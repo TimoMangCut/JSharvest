@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -25,7 +26,6 @@ import (
 	"github.com/TimoMangCut/JSharvest/internal/endpoints"
 	"github.com/TimoMangCut/JSharvest/internal/frontier"
 	"github.com/TimoMangCut/JSharvest/internal/guard"
-	"github.com/TimoMangCut/JSharvest/internal/jsapi"
 	"github.com/TimoMangCut/JSharvest/internal/resolve"
 	"github.com/TimoMangCut/JSharvest/internal/scope"
 	"github.com/TimoMangCut/JSharvest/internal/store"
@@ -246,12 +246,13 @@ func runFrontier(ctx context.Context, cfg Config, tab context.Context, g *guard.
 			if ctx.Err() != nil {
 				break
 			}
-			tabs[0].specFiles(o, refPage)
+			tabs[0].specFiles(ctx, c, o, refPage)
 		}
 		if ctx.Err() == nil {
-			tabs[0].specFilesPhase2(ctx, &c.specCtx, c.seedOrigin, refPage)
+			tabs[0].specFilesPhase2(ctx, c, refPage)
 		}
 	}
+	c.closeSpecClient()
 
 	stats.Queued = q.Len()
 	q.SortListed()
@@ -329,6 +330,10 @@ type crawl struct {
 	apiSeen    map[string]bool
 	apiPending []string
 	specCtx    frontier.SpecCollector
+	specMu     sync.Mutex
+	specPol    *resolve.Policy
+	specTr     *http.Transport
+	specHTTP   *http.Client
 	// dedupe: with several tabs, two pages that land on one URL are one
 	// page; the later is named its duplicate (visited: page -> first page).
 	dedupe  bool
@@ -798,12 +803,12 @@ func (e *engine) frontierPage(ctx context.Context, c *crawl, d *donePage, x *exp
 		found = append(found, e.knownFiles(p.FinalURL)...)
 		if c.specProbe {
 			if u, err := url.Parse(p.FinalURL); err == nil {
-				e.specFiles(u.Scheme+"://"+u.Host, p.FinalURL)
+				e.specFiles(ctx, c, u.Scheme+"://"+u.Host, p.FinalURL)
 			}
 		}
 	}
 	for _, o := range c.takeAPIOrigins() {
-		e.specFiles(o, p.FinalURL)
+		e.specFiles(ctx, c, o, p.FinalURL)
 	}
 	if e.cfg.Resolve {
 		e.resolve(ctx)
@@ -993,197 +998,6 @@ func (w *popupWatch) take() []frontier.Found {
 			return out
 		}
 	}
-}
-
-// specFiles asks an origin or gateway base for its API's description through
-// the page (frontier.SpecPaths): an OpenAPI document or an OpenID Provider's
-// configuration is stored with the tag openapi, for the catalog (PIP-03).
-// Another origin is asked without credentials, and its answer is read
-// only if its CORS lets the page.
-func (e *engine) specFiles(root, page string) {
-	e.specFilesWithHeaders(root, page, nil, nil, nil)
-}
-
-func (e *engine) specFilesWithHeaders(base, page string, hdrs []jsapi.Header, seen map[string]bool, budget *int) {
-	base = strings.TrimRight(base, "/")
-	noDNS := e.cfg.Browser.Proxy != "" || e.cfg.Browser.HostRules != ""
-	pol := resolve.NewPolicy(e.cfg.Target.Hostname(), func(h string) bool { return !frontier.IsTrackerHost(h) }, noDNS)
-	if _, err := url.Parse(base); err != nil || pol.Check(base+"/") != resolve.Allow {
-		return
-	}
-	var hdrMap map[string]string
-	if len(hdrs) > 0 {
-		hdrMap = make(map[string]string, len(hdrs))
-		for _, h := range hdrs {
-			hdrMap[h.Name] = h.Value
-		}
-	}
-	fetchOne := func(targetURL, pathHint string) (fetchResult, bool) {
-		if budget != nil && *budget <= 0 {
-			return fetchResult{}, false
-		}
-		if seen != nil {
-			if seen[targetURL] {
-				return fetchResult{}, false
-			}
-			seen[targetURL] = true
-		}
-		if budget != nil {
-			*budget--
-		}
-		var (
-			r   fetchResult
-			err error
-		)
-		if len(hdrMap) > 0 {
-			r, err = e.pageFetchHeaders(targetURL, hdrMap)
-		} else {
-			r, err = e.pageFetch(targetURL, true)
-		}
-		if err != nil || r.Status != 200 || r.Text == "" || r.Challenge {
-			return r, false
-		}
-		body := []byte(r.Text)
-		tags := []string{"openapi"}
-		switch {
-		case jsapi.IsOpenAPI(body):
-		case pathHint == "/.well-known/openid-configuration" && jsapi.IsOIDC(body):
-			tags = append(tags, "oidc")
-		default:
-			return r, false
-		}
-		key, isNew, err := e.st.Put(store.Record{Body: body, URL: targetURL, Kind: "file", Via: "probe", Target: "page", Page: page,
-			Tags: tags, Source: "live"})
-		if err != nil {
-			return r, false
-		}
-		e.noteScript(key, isNew)
-		slog.Info("an API description", "url", targetURL, "tags", strings.Join(tags, ","))
-		return r, true
-	}
-
-	for _, p := range frontier.SpecPaths {
-		if budget != nil && *budget <= 0 {
-			return
-		}
-		targetURL := frontier.JoinSpecBase(base, p)
-		r, stored := fetchOne(targetURL, p)
-		if !stored && p == "/swagger-resources" && r.Status == 200 && r.Text != "" && !r.Challenge {
-			for _, rel := range jsapi.SwaggerResources([]byte(r.Text)) {
-				if budget != nil && *budget <= 0 {
-					break
-				}
-				fetchOne(frontier.JoinSpecBase(base, rel), rel)
-			}
-		}
-	}
-}
-
-func (e *engine) specFilesPhase2(ctx context.Context, specCtx *frontier.SpecCollector, seedOrigin, page string) {
-	noDNS := e.cfg.Browser.Proxy != "" || e.cfg.Browser.HostRules != ""
-	pol := resolve.NewPolicy(e.cfg.Target.Hostname(), func(h string) bool { return !frontier.IsTrackerHost(h) }, noDNS)
-	plan := specCtx.Plan(seedOrigin, e.cfg.InScope)
-	budget := frontier.MaxPhase2SpecProbes
-	seen := map[string]bool{}
-
-	for _, base := range plan.Bases {
-		if ctx.Err() != nil || budget <= 0 {
-			return
-		}
-		hdrs := specCtx.HeadersFor(base, e.cfg.InScope)
-		e.specFilesWithHeaders(base, page, hdrs, seen, &budget)
-	}
-
-	type gateState struct {
-		lastSig    string
-		consec     int
-		hadOpenAPI bool
-		braked     bool
-	}
-	gates := map[string]*gateState{}
-	for _, svc := range plan.Services {
-		if ctx.Err() != nil || budget <= 0 {
-			return
-		}
-		if pol.Check(svc.PrefixURL+"/") != resolve.Allow {
-			continue
-		}
-		gs := gates[svc.GatewayBase]
-		if gs == nil {
-			gs = &gateState{}
-			gates[svc.GatewayBase] = gs
-		}
-		if gs.braked {
-			continue
-		}
-		hdrs := specCtx.HeadersFor(svc.PrefixURL, e.cfg.InScope)
-		var hdrMap map[string]string
-		if len(hdrs) > 0 {
-			hdrMap = make(map[string]string, len(hdrs))
-			for _, h := range hdrs {
-				hdrMap[h.Name] = h.Value
-			}
-		}
-		for _, p := range frontier.ServiceDocPaths {
-			if ctx.Err() != nil || budget <= 0 || gs.braked {
-				break
-			}
-			targetURL := frontier.JoinSpecBase(svc.PrefixURL, p)
-			if seen[targetURL] {
-				continue
-			}
-			seen[targetURL] = true
-			budget--
-			r, err := e.pageFetchHeaders(targetURL, hdrMap)
-			if err == nil && r.Status == 200 && r.Text != "" && !r.Challenge && jsapi.IsOpenAPI([]byte(r.Text)) {
-				key, isNew, perr := e.st.Put(store.Record{Body: []byte(r.Text), URL: targetURL, Kind: "file", Via: "probe",
-					Target: "page", Page: page, Tags: []string{"openapi"}, Source: "live"})
-				if perr == nil {
-					e.noteScript(key, isNew)
-					slog.Info("an API description", "url", targetURL, "tags", "openapi")
-				}
-				gs.hadOpenAPI = true
-				gs.lastSig = ""
-				gs.consec = 0
-				continue
-			}
-			sig, isGate := engineGateSig(r)
-			if !isGate {
-				gs.lastSig = ""
-				gs.consec = 0
-				continue
-			}
-			if sig == gs.lastSig {
-				gs.consec++
-			} else {
-				gs.lastSig = sig
-				gs.consec = 1
-			}
-			if gs.consec >= 2 && (!gs.hadOpenAPI || r.Status != 404) {
-				gs.braked = true
-				break
-			}
-		}
-	}
-}
-
-func engineGateSig(r fetchResult) (string, bool) {
-	if r.Status <= 0 || r.Challenge {
-		return "", false
-	}
-	ct := strings.ToLower(strings.TrimSpace(strings.Split(r.ContentType, ";")[0]))
-	trimmed := strings.TrimSpace(r.Text)
-	lowHead := strings.ToLower(trimmed[:min(len(trimmed), 256)])
-	if strings.Contains(ct, "html") || strings.HasPrefix(lowHead, "<!doctype html") || strings.HasPrefix(lowHead, "<html") {
-		if r.Status == 200 || r.Status == 400 || r.Status == 401 || r.Status == 403 || r.Status == 404 {
-			return fmt.Sprintf("html:%d:%d", r.Status, len(trimmed)/128), true
-		}
-		return "", false
-	}
-	if r.Status != 400 && r.Status != 401 && r.Status != 403 && r.Status != 404 {
-		return "", false
-	}
-	return fmt.Sprintf("wall:%d:%s:%d", r.Status, ct, len(trimmed)/64), true
 }
 
 // tabTarget is the target id of a tab context ("" when it has none).

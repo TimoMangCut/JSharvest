@@ -1358,10 +1358,11 @@ func (cr *crawler) specProbePhase2(ctx context.Context, referer string) {
 }
 
 // gateSignature classifies a non-OpenAPI probe response for D3 uniform gate
-// detection: an SPA HTML fallback shell or a 400/401/403/404 auth/gateway wall.
+// detection: an SPA HTML fallback shell, a 400/401/403/404 auth/gateway wall,
+// or repeated transport failures ("neterr") on an unreachable gateway.
 func (cr *crawler) gateSignature(a answer) (string, bool) {
 	if a.Err != nil || a.Status == 0 {
-		return "", false
+		return "neterr", true
 	}
 	ct := strings.ToLower(strings.TrimSpace(strings.Split(a.Header.Get("Content-Type"), ";")[0]))
 	if strings.Contains(ct, "html") || htmlLike(a.Body) {
