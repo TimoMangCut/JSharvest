@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/chromedp/cdproto/cdp"
 	"github.com/TimoMangCut/JSharvest/internal/jsapi"
+	"github.com/chromedp/cdproto/cdp"
 )
 
 func mustURL(s string) *url.URL {
@@ -333,5 +333,45 @@ func TestSpecPathsAndAppAPIOrigins(t *testing.T) {
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("APIOrigins:\n got  %v\n want %v", got, want)
+	}
+}
+
+func TestSaaSDomainsDoNotStarveSpecProbeSlots(t *testing.T) {
+	r := jsapi.Result{
+		Bases: []string{
+			"https://api.stripe.com/v1",
+			"https://api.mapbox.com/styles/v1",
+			"https://maps.googleapis.com/maps/api",
+			"https://challenges.cloudflare.com/turnstile/v0",
+			"https://api.github.com",
+			"https://abc123.execute-api.us-east-1.amazonaws.com/prod",
+			"https://billing-svc-xyz.a.run.app/gw",
+			"https://api.my-org.workers.dev/v1",
+			"https://orders-api.azurewebsites.net/api",
+		},
+	}
+	inScope := func(h string) bool { return h == "portal.example.test" }
+	origins := APIOrigins(r, inScope)
+	wantOrigins := []string{
+		"https://abc123.execute-api.us-east-1.amazonaws.com",
+		"https://billing-svc-xyz.a.run.app",
+		"https://api.my-org.workers.dev",
+		"https://orders-api.azurewebsites.net",
+	}
+	if !slices.Equal(origins, wantOrigins) {
+		t.Fatalf("APIOrigins with SaaS noise:\n got  %v\n want %v", origins, wantOrigins)
+	}
+
+	var sc SpecCollector
+	sc.AddScript(r, "https://portal.example.test/", "https://portal.example.test/app.js")
+	plan := sc.Plan("https://portal.example.test", inScope)
+	wantBases := []string{
+		"https://abc123.execute-api.us-east-1.amazonaws.com/prod",
+		"https://api.my-org.workers.dev/v1",
+		"https://billing-svc-xyz.a.run.app/gw",
+		"https://orders-api.azurewebsites.net/api",
+	}
+	if !slices.Equal(plan.Bases, wantBases) {
+		t.Fatalf("SpecCollector.Plan Bases:\n got  %v\n want %v", plan.Bases, wantBases)
 	}
 }
