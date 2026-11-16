@@ -1,0 +1,7 @@
+[
+  {"do": "goto", "url": "http://127.0.0.1:8770/rt/login?kind=bff"},
+  {"do": "type", "selector": "#email", "text": "${RT_USER}"},
+  {"do": "type", "selector": "#password", "text": "${RT_PASS}"},
+  {"do": "click", "selector": "#go"},
+  {"do": "wait", "url": "/rt/bff/"}
+]

@@ -1,0 +1,14 @@
+# Flask-only build of security-crawl-maze: the upstream image no longer
+# builds (polymer-cli fails on node 14), and the README says the Flask app
+# serves every case except the bundled JS framework apps.
+FROM python:3.9-slim
+WORKDIR /usr/src/app
+COPY requirements.txt .
+# Pins from the Flask 1.0 era: newer Jinja2 breaks Flask 1.0.2. Werkzeug 1.0
+# merges "//" in paths, which the maze's own category links contain.
+RUN pip install --no-cache-dir -r requirements.txt Jinja2==2.11.3 MarkupSafe==1.1.1 Werkzeug==1.0.1 itsdangerous==1.1.0 click==7.1.2
+COPY app.py ./
+COPY blueprints ./blueprints
+COPY templates ./templates
+COPY test-cases ./test-cases
+CMD ["python", "app.py"]

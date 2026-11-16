@@ -1,0 +1,1 @@
+{"version":3,"file":"build-2022.js","sources":["webpack:///./src/api/legacy.ts","webpack:///./node_modules/left-pad/index.js"],"sourcesContent":["// A 2022 build's own source, only in its map (MAX-04).\nexport const purge = (id: string) => fetch(`/api/v1/map-only-hook/${id}`, { method: 'DELETE' });\n","module.exports = () => fetch('/api/v9/vendor-noise');\n"],"mappings":""}

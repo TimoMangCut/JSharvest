@@ -1,0 +1,2 @@
+JSHMARK:entry:main
+JSHMARK:route:admin            # the admin chunk: only an admin runs it; the resolver fetches it

@@ -1,0 +1,6 @@
+<!doctype html>
+<title>spa writes</title>
+<p>Stands for a single-page app the user already has open when jsharvest
+starts watching: it writes every 500 ms and never navigates. While a guarded
+watch runs, none of its writes may reach the server.</p>
+<script>setInterval(() => fetch('/api/write-spa', { method: 'POST', body: 'x' }), 500);</script>

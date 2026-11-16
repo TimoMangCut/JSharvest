@@ -1,0 +1,12 @@
+# Ground truth for this app: one marker per line, as JSHMARK:<category>:<name>.
+# Next.js 15 static export using both the Pages Router and the App Router.
+# How each one can be reached:
+JSHMARK:entry:index           # pages/index chunk, from <script src> on /
+JSHMARK:inline:document       # inline <script> from _document, only in index.html (never a .js file)
+JSHMARK:route:about           # pages chunk, linked from / via next/link
+JSHMARK:route:item            # dynamic pages/items/[id] chunk (getStaticPaths id=1), linked from /
+JSHMARK:route:hidden-pages    # pages chunk /unlisted, no link anywhere (_buildManifest.js only)
+JSHMARK:route:app-linked      # App Router page chunk, linked from / (not in _buildManifest.js)
+JSHMARK:route:hidden-app      # App Router page /vault/deep, no link anywhere and not in _buildManifest.js
+JSHMARK:click:report          # next/dynamic (ssr:false) chunk, loaded by clicking the button on /
+JSHMARK:timer:telemetry       # import() chunk loaded 800 ms after / mounts

@@ -1,0 +1,4 @@
+# maps-app: the markers of the build.
+JSHMARK:maps:main
+JSHMARK:maps:app
+JSHMARK:maps:vendors

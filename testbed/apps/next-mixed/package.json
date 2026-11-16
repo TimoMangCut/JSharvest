@@ -1,0 +1,12 @@
+{
+  "name": "jsh-testbed-next-mixed",
+  "private": true,
+  "scripts": {
+    "build": "NEXT_TELEMETRY_DISABLED=1 next build"
+  },
+  "dependencies": {
+    "next": "15.1.12",
+    "react": "19.0.4",
+    "react-dom": "19.0.4"
+  }
+}

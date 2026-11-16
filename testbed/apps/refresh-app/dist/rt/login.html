@@ -1,0 +1,16 @@
+<!doctype html><meta charset="utf-8"><title>Log in</title>
+<form id="f"><input id="email" name="email" type="email"><input id="password" name="password" type="password">
+<input type="hidden" name="kind" value="{{KIND}}"><button id="go">Log in</button></form>
+<p id="msg"></p>
+<script>
+  // Login in the page: OAuth keeps the pair in localStorage, BFF gets its cookies.
+  document.getElementById('f').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const r = await fetch('/rt/login', { method: 'POST', body: new URLSearchParams(new FormData(e.target)) });
+    if (!r.ok) { document.getElementById('msg').textContent = 'bad credentials'; return; }
+    const j = await r.json();
+    if ('{{KIND}}' === 'bff') { location.href = '/rt/bff/?kind=bff'; return; }
+    localStorage.setItem('rt_auth', JSON.stringify({ at: j.access_token, rt: j.refresh_token }));
+    location.href = '/rt/?mode={{MODE}}';
+  });
+</script>

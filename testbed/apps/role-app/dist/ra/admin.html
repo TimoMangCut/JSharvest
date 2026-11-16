@@ -1,0 +1,6 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Admin</title></head>
+<body><h1>Admin</h1><button id="rotate">Rotate keys</button>
+<script>
+// JSHMARK:roles:admin-page
+document.getElementById('rotate').addEventListener('click', () => fetch('/api/ra/admin/keys', { method: 'POST' }));
+</script></body></html>

@@ -1,0 +1,46 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>frontier-app</title></head>
+<body>
+<!-- Each source of URLs a frontier reads, and what it must not do. -->
+<a href="/pages/a.html">a link</a>
+<img src="/img/x.png" usemap="#m"><map name="m"><area href="/pages/area.html" shape="rect" coords="0,0,10,10"></map>
+<svg width="10" height="10"><a xlink:href="/pages/svg.html"><rect width="10" height="10"/></a></svg>
+<iframe src="/pages/frame.html"></iframe>
+<iframe srcdoc="<a href='/pages/srcdoc.html'>srcdoc</a>"></iframe>
+<div id="host"></div>
+<template><a href="/pages/template.html">template</a></template>
+<noscript><a href="/pages/noscript.html">noscript</a></noscript>
+<!--[if IE]><a href="/pages/comment.html">comment</a><![endif]-->
+<div onclick="location.href='/pages/onclick.html'">onclick</div>
+<a href="javascript:location.href='/pages/jshref.html'">javascript href</a>
+<a href="/pages/refresh.html">meta refresh</a>
+<a href="/pages/timer.html">timer</a>
+<a href="/fr/redirect">redirect</a>
+<a href="/fr/headers">headers</a>
+<a href="/#/hash-route">hash route</a>
+<form action="/pages/search.html"><input name="q"><select name="s"><option value="1">1</option></select><button>go</button></form>
+<form method="post" action="/pages/post-target.html"><input name="u"><button>send</button></form>
+<blockquote cite="/pages/cite.html">a quote</blockquote>
+<a href="/logout">log out</a>
+<a href="/pages/delete-account.html">delete account</a>
+<a href="/files/report.pdf">report</a>
+<a href="http://other.test/elsewhere.html">elsewhere</a>
+<div id="app"></div>
+<script>
+  // A closed shadow root, a link built by script, a path only in a
+  // string, links written as HTML, an API call never made.
+  document.getElementById('host').attachShadow({ mode: 'closed' }).innerHTML = '<a href="/pages/shadow.html">shadow</a>';
+  var built = document.createElement('a');
+  built.href = '/pages/' + 'js-built.html';
+  built.textContent = 'built';
+  document.getElementById('app').appendChild(built);
+  var later = '/pages/js-string.html';
+  var html = '<a href="/pages/inner.html">inner</a>';
+  var routes = [{ path: '/pages/route-page' }];
+  function never() { return fetch('/api/things', { method: 'GET' }); }
+  window.app = { later: later, html: html, routes: routes, never: never };
+  console.debug('JSHMARK:entry:main');
+</script>
+</body>
+</html>

@@ -1,0 +1,219 @@
+{
+  "url": "http://127.0.0.1:8770/",
+  "pause_ms": 2500,
+  "steps": [
+    {
+      "do": "type",
+      "selector": "#q",
+      "text": "shoes"
+    },
+    {
+      "do": "click",
+      "selector": "#search",
+      "expect": [
+        "GET /api/search?q=shoes&page=1"
+      ],
+      "how": "causal"
+    },
+    {
+      "do": "click",
+      "selector": ".open[data-id='42']",
+      "expect": [
+        "GET /api/items/42",
+        "GET /api/items/42/reviews"
+      ],
+      "how": "causal"
+    },
+    {
+      "do": "click",
+      "selector": ".open[data-id='108']",
+      "expect": [
+        "GET /api/items/108",
+        "GET /api/items/108/reviews"
+      ],
+      "how": "causal"
+    },
+    {
+      "do": "click",
+      "selector": "#save",
+      "expect": [
+        "GET /api/csrf",
+        "POST /api/profile"
+      ],
+      "how": "causal"
+    },
+    {
+      "do": "click",
+      "selector": "#delete",
+      "expect": []
+    },
+    {
+      "do": "click",
+      "selector": "#confirm",
+      "expect": [
+        "DELETE /api/items/42"
+      ],
+      "how": "causal"
+    },
+    {
+      "do": "click",
+      "selector": "#next1",
+      "expect": [
+        "POST /api/wizard/step1"
+      ],
+      "how": "causal"
+    },
+    {
+      "do": "click",
+      "selector": "#next2",
+      "expect": [
+        "POST /api/wizard/step2",
+        "GET /api/wizard/summary"
+      ],
+      "how": "causal"
+    },
+    {
+      "do": "click",
+      "selector": "#export",
+      "expect": [
+        "GET /api/export?format=csv"
+      ]
+    },
+    {
+      "do": "click",
+      "selector": "#legacy",
+      "expect": [
+        "GET /api/legacy"
+      ]
+    },
+    {
+      "do": "type",
+      "selector": "#q2",
+      "text": "boots\r",
+      "expect": [
+        "GET /api/find?q=boots"
+      ],
+      "how": "causal"
+    },
+    {
+      "do": "click",
+      "selector": "label[for='agree']",
+      "expect": [
+        "POST /api/consent"
+      ],
+      "how": "causal"
+    },
+    {
+      "do": "click",
+      "selector": "#new-note",
+      "expect": [
+        "POST /api/notes",
+        "GET /api/notes/{note}"
+      ],
+      "how": "causal"
+    },
+    {
+      "do": "click",
+      "selector": "#live",
+      "expect": [
+        "POST /api/live/start"
+      ],
+      "how": "causal"
+    },
+    {
+      "do": "click",
+      "selector": "#report",
+      "expect": [
+        "GET /api/report/ready"
+      ]
+    },
+    {
+      "do": "click",
+      "selector": "#refresh",
+      "expect": [
+        "POST /api/items",
+        "GET /api/items?refresh=1"
+      ],
+      "how": "causal"
+    },
+    {
+      "do": "click",
+      "selector": "#update",
+      "expect": [
+        "POST /api/edit"
+      ],
+      "how": "causal"
+    },
+    {
+      "do": "click",
+      "selector": "#upload",
+      "expect": [
+        "PUT /api/upload/0",
+        "PUT /api/upload/1",
+        "PUT /api/upload/2",
+        "PUT /api/upload/3"
+      ],
+      "how": "causal"
+    },
+    {
+      "do": "click",
+      "selector": "#find-later",
+      "expect": [
+        "GET /api/find-later"
+      ],
+      "how": "causal"
+    },
+    {
+      "do": "click",
+      "selector": "#export-slow",
+      "pause_ms": 50,
+      "expect": [
+        "GET /api/export?format=pdf"
+      ]
+    },
+    {
+      "do": "type",
+      "selector": "#q",
+      "text": "more"
+    }
+  ],
+  "load": [
+    "GET /api/me",
+    "GET /api/config"
+  ],
+  "noise": [
+    "GET /api/notifications",
+    "POST /api/analytics",
+    "GET /api/heartbeat",
+    "GET /api/late-config",
+    "GET /api/live/tick"
+  ],
+  "templates": [
+    {
+      "method": "GET",
+      "template": "/api/items/{id}"
+    },
+    {
+      "method": "GET",
+      "template": "/api/items/{id}/reviews"
+    },
+    {
+      "method": "PUT",
+      "template": "/api/upload/{id}"
+    }
+  ],
+  "depends_on": [
+    {
+      "request": "POST /api/profile",
+      "at": "header:x-csrf-token",
+      "from": "GET /api/csrf",
+      "from_at": "json:$.csrf"
+    },
+    {
+      "request": "GET /api/notes/{note}",
+      "at": "path:3",
+      "from": "POST /api/notes",
+      "from_at": "json:$.id"
+    }
+  ]
+}

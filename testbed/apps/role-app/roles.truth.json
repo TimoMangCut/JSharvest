@@ -1,0 +1,41 @@
+{
+  "comment": "testbed rolescore: what jsharvest diff -roles anon,user,admin must report for role-app (layer, key without host, class, lowest role), and nothing else; absent lists what must not be reported. A key's {x} matches any one segment.",
+  "items": [
+    {"layer": "endpoint", "key": "GET /api/me", "class": "denied_below", "lowest": "user"},
+    {"layer": "endpoint", "key": "GET /api/ra/me/profile", "class": "denied_below", "lowest": "user"},
+    {"layer": "endpoint", "key": "GET /api/ra/me/inbox", "class": "denied_below", "lowest": "user"},
+    {"layer": "endpoint", "key": "GET /api/ra/admin/stats", "class": "denied_below", "lowest": "admin"},
+    {"layer": "endpoint", "key": "GET /api/ra/admin/summary", "class": "lower_ok", "lowest": "user"},
+    {"layer": "endpoint", "key": "GET /api/ra/pub/legacy", "class": "inconsistent", "lowest": "anon"},
+    {"layer": "endpoint", "key": "GET /api/ra/me/orders", "class": "client_gated", "lowest": "user"},
+    {"layer": "endpoint", "key": "GET /api/ra/admin/users", "class": "client_gated", "lowest": "admin"},
+    {"layer": "endpoint", "key": "POST /api/ra/admin/invite", "class": "client_gated", "lowest": "admin"},
+    {"layer": "endpoint", "key": "DELETE /api/ra/admin/users/{id}", "class": "client_gated", "lowest": "admin"},
+    {"layer": "endpoint", "key": "POST /api/ra/graphql op=PurgeUsers", "class": "client_gated", "lowest": "admin"},
+    {"layer": "endpoint", "key": "GET /api/ra/rpc action=purge", "class": "client_gated", "lowest": "admin"},
+    {"layer": "endpoint", "key": "GET /api/ra/admin/audit", "class": "higher_only", "lowest": "admin"},
+    {"layer": "endpoint", "key": "POST /api/ra/admin/keys", "class": "higher_only", "lowest": "admin"},
+    {"layer": "endpoint", "key": "POST /api/ra/search", "class": "shape_differs", "lowest": "anon"},
+
+    {"layer": "feature", "key": "click / #orders", "class": "higher_only", "lowest": "user"},
+    {"layer": "feature", "key": "click / #list-users", "class": "higher_only", "lowest": "admin"},
+    {"layer": "feature", "key": "click / #invite", "class": "higher_only", "lowest": "admin"},
+    {"layer": "feature", "key": "click / #remove-user", "class": "higher_only", "lowest": "admin"},
+    {"layer": "feature", "key": "click / #purge-users", "class": "higher_only", "lowest": "admin"},
+    {"layer": "feature", "key": "click / #purge-cache", "class": "higher_only", "lowest": "admin"},
+    {"layer": "feature", "key": "click /ra/admin #rotate", "class": "higher_only", "lowest": "admin"},
+
+    {"layer": "page", "key": "/ra/admin", "class": "denied_below", "lowest": "admin"},
+
+    {"layer": "script", "key": "127.0.0.1:8770/ra/js/admin-chunk.js", "class": "client_gated", "lowest": "admin"},
+    {"layer": "script", "key": "127.0.0.1:8770/private/ra-audit.js", "class": "server_gated", "lowest": "admin"},
+    {"layer": "script", "key": "127.0.0.1:8770/ra/admin#inline", "class": "server_gated", "lowest": "admin"},
+    {"layer": "script", "key": "127.0.0.1:8770/ra/config.js", "class": "content_differs", "lowest": "anon"}
+  ],
+  "absent": [
+    "GET /api/ra/pub/news", "POST /api/ra/graphql op=News", "GET /api/ra/rpc action=list", "POST /api/login",
+    "/authors", "/login", "/",
+    "127.0.0.1:8770/app.js", "127.0.0.1:8770/ra/js/vendor.[h].js", "127.0.0.1:8770/login#inline"
+  ],
+  "warnings": ["build hash"]
+}

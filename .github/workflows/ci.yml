@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  go-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build CLI and testbed binaries
+        run: |
+          go build -o /tmp/jsharvest ./cmd/jsharvest
+          go build -o /tmp/testbed ./testbed/cmd/testbed
+
+      - name: Run unit tests with race detector
+        run: go test -race ./...
+
+  repo-hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for hardcoded developer paths
+        run: |
+          python3 - <<'PY'
+          import re, subprocess, pathlib
+          rx = re.compile(r'(?<![.\w/])(/(?:home|Users)/[A-Za-z0-9_.-]+/|file:///(?:home|Users)/)')
+          ignore = {".github/workflows/ci.yml", "internal/sourcemap/sourcemap_test.go"}
+          bad = []
+          for f in subprocess.check_output(["git", "ls-files"], text=True).splitlines():
+              if f in ignore: continue
+              p = pathlib.Path(f)
+              if not p.is_file(): continue
+              for i, line in enumerate(p.read_text(errors="replace").splitlines(), 1):
+                  if rx.search(line):
+                      bad.append(f"{f}:{i}: {line.strip()[:120]}")
+          if bad:
+              print("\n".join(bad))
+              raise SystemExit(1)
+          PY

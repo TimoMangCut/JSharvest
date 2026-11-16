@@ -1,0 +1,28 @@
+# mkdir -p output profiles
+# docker compose run --rm jsharvest crawl -u https://target/
+# docker compose run --rm --service-ports jsharvest login -u https://target/login -role user
+#   (open http://127.0.0.1:6080/vnc.html, log in, press Enter here)
+# Files are written as JSH_UID:JSH_GID (default 1000:1000): set them to
+# "$(id -u)" and "$(id -g)" when yours differ.
+services:
+  jsharvest:
+    build: .
+    image: ${JSH_IMAGE:-jsharvest}
+    user: "${JSH_UID:-1000}:${JSH_GID:-1000}"
+    # A Chrome profile's lock names its host: the same name on every run.
+    hostname: jsharvest
+    volumes:
+      - ${JSH_OUTPUT:-./output}:/output
+      - ${JSH_PROFILES:-./profiles}:/profiles
+    ports:
+      - "127.0.0.1:6080:6080" # noVNC, for a login by hand: the host's loopback only
+    cap_drop: [ALL]
+    # Docker's seccomp profile refuses the user namespaces Chrome's own
+    # sandbox needs; without it a hostile page's exploit would reach
+    # /profiles. Chrome's sandbox (namespaces and its own seccomp filters on
+    # every renderer) is the stronger wall for pages (see the design, 3).
+    security_opt: ["no-new-privileges:true", "seccomp=unconfined"]
+    # Chrome keeps its shared memory in /tmp (--disable-dev-shm-usage), and
+    # a throwaway profile and cache: sized, as it counts against memory.
+    tmpfs: ["/tmp:size=2g,mode=1777"]
+    stdin_open: true

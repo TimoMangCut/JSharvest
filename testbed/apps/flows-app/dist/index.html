@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>flows-app</title></head>
+<body>
+<h1>flows-app</h1>
+<p>Seven features, each a known set of requests, all through one shared
+apiClient(), with background noise. The truth is flows.truth.json.</p>
+
+<section>
+  <input id="q" placeholder="Search">
+  <button id="search">Search</button>
+</section>
+
+<section>
+  <ul id="items">
+    <li>Item 42 <button class="open" data-id="42">Open</button></li>
+    <li>Item 108 <button class="open" data-id="108">Open</button></li>
+  </ul>
+</section>
+
+<section>
+  <form id="profile">
+    <input name="display_name" value="Bob">
+    <button id="save" type="submit">Save profile</button>
+  </form>
+</section>
+
+<section>
+  <button id="delete">Delete item 42</button>
+  <div id="modal" hidden>
+    Really delete? <button id="confirm">Confirm</button>
+  </div>
+</section>
+
+<section>
+  <button id="next1">Wizard: next</button>
+  <button id="next2" disabled>Wizard: finish</button>
+</section>
+
+<section>
+  <button id="export">Export CSV</button>
+  <button id="legacy" onclick="legacyLoad()">Legacy report</button>
+</section>
+
+<section>
+  <form id="find"><input id="q2" name="q"><button type="submit">Find</button></form>
+  <label for="agree">I agree</label> <input type="checkbox" id="agree">
+  <button id="new-note">New note</button>
+  <button id="live">Go live</button>
+  <button id="report">Slow report</button>
+</section>
+
+<section>
+  <button id="refresh">Create and refresh</button>
+  <form id="edit">
+    <input name="id" value="7"><input name="action" value="update">
+    <button id="update" type="submit">Update</button>
+  </form>
+  <button id="upload">Upload in chunks</button>
+  <button id="find-later">Find (delayed)</button>
+  <button id="export-slow">Slow export</button>
+</section>
+
+<script src="/app.js"></script>
+</body>
+</html>

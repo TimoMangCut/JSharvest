@@ -1,0 +1,33 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>webrtc-app</title>
+<!-- Gathers the ICE candidates the browser offers and reports only their
+     kinds (host, srflx, relay, prflx) and whether each address is an mDNS
+     name (.local): never an address. With --force-webrtc-ip-handling-policy=
+     disable_non_proxied_udp there must be no host or srflx. -->
+<script>
+(async () => {
+  const run = new URLSearchParams(location.search).get('run') || 'x';
+  const kinds = [], mdns = [], protos = [];
+  let state = 'ok';
+  try {
+    const pc = new RTCPeerConnection({ iceServers: [] });
+    pc.createDataChannel('probe');
+    pc.onicecandidate = (e) => {
+      if (!e.candidate) return;
+      const f = e.candidate.candidate.split(' ');
+      const i = f.indexOf('typ');
+      kinds.push(i >= 0 ? f[i + 1] : 'unknown');
+      mdns.push((f[4] || '').endsWith('.local'));
+      protos.push((f[2] || '').toLowerCase());
+    };
+    await pc.setLocalDescription(await pc.createOffer());
+    await new Promise((r) => setTimeout(r, 3000));
+    pc.close();
+  } catch (err) {
+    state = 'error:' + err.name;
+  }
+  const report = JSON.stringify({ state, kinds, mdns, protos });
+  await fetch('/rtc/report?run=' + encodeURIComponent(run) + '&c=' + encodeURIComponent(report)).catch(() => {});
+})();
+</script>

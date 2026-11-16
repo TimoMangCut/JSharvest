@@ -1,0 +1,11 @@
+# Edge cases for Capture v2, kept apart from the 56 markers of the five apps.
+JSHMARK:eval:function            # new Function(atob(...)) in an inline script
+JSHMARK:eval:timeout             # setTimeout("string"): empty URL and no stack in scriptParsed
+JSHMARK:eval:worker              # eval inside a dedicated worker (Debugger replays it with no stack)
+JSHMARK:inline:handler           # onclick attribute; compiled only on click (expected miss on a passive load)
+JSHMARK:worker:nested-parent     # dedicated worker
+JSHMARK:worker:nested            # worker started by a worker: attach hangs in Runtime.enable (known limit)
+JSHMARK:worker:short             # worker that closes itself at once (known limit)
+JSHMARK:debugger:after           # eval that runs only after a debugger statement
+JSHMARK:big:tail                 # end of /gen/big.js, ~25 MB, fetched not run (needs the raised buffer)
+JSHMARK:resolve:in-scope         # named only by import() in decoy.js, never run: the resolver must fetch it

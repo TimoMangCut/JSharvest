@@ -1,0 +1,20 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>jsharvest testbed (guard cases)</title></head>
+<body>
+  <h1>Guard cases</h1>
+  <p>On load this page sends every kind of write it can, so a run with the
+  guard on shows which ones reach the server. Paths that must never arrive
+  are in ../forbidden.txt; paths that must are in ../required.txt.</p>
+  <form id="f" method="POST" action="/api/write-form">
+    <input name="email" value="a@b.c"><button>Save</button>
+  </form>
+  <form id="popup" method="POST" action="/api/write-popup" target="_blank">
+    <input name="n" value="1">
+  </form>
+  <!-- Speculative prefetch of a destructive URL: it bypasses request
+       interception unless the profile turns prediction off. -->
+  <script type="speculationrules">{"prefetch": [{"source": "list", "urls": ["/prefetch/sign-out"]}]}</script>
+  <script src="/guard.js"></script>
+</body>
+</html>

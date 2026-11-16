@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>explore-app</title>
+<style>
+  .pointer { cursor: pointer; }
+  #spacer { height: 1600px; }
+  #feed li { height: 60px; }
+  #banner { position: fixed; left: 0; right: 0; bottom: 0; height: 90px; background: #eee; z-index: 10; }
+  #under { position: fixed; left: 10px; bottom: 30px; }
+  #menu { display: inline-block; padding: 4px; border: 1px solid #ccc; }
+</style>
+</head>
+<body>
+<!-- Hard cases for jsharvest crawl -explore. Each one asks for its own
+     /api/x/<case>; explore.truth.json says what each must send and what
+     must never reach the server. -->
+<h1>explore-app</h1>
+<main id="main">
+
+<!-- 1. A click listener on the root only, as React attaches it; the rows
+     are divs with cursor:pointer and no listener of their own. -->
+<div id="root">
+  <div class="card pointer" data-act="a">Open card A</div>
+  <div class="card pointer" data-act="b"><span>Open card B</span></div>
+</div>
+
+<!-- 2. A menu that opens on hover (and asks for its data), and closes when
+     the pointer leaves it. -->
+<div id="menu">Menu <button id="reports" hidden>Reports</button></div>
+
+<!-- 3. A delete behind confirm(). -->
+<button id="del-draft">Delete draft</button>
+
+<!-- 4. A button that navigates; 5. one that changes the route in place. -->
+<button id="go">Go elsewhere</button>
+<button id="route">Open route</button>
+
+<!-- 6. A logout done in the page alone: no request the guard could hold. -->
+<button id="logout-btn">Log out</button>
+<span role="button" tabindex="0" id="signout">Sign out</span>
+
+<!-- 8. Load more, which adds another load more. -->
+<div id="more"><button class="load-more" data-n="10">Show 10 more</button></div>
+
+<!-- 9. Tabs; 10. details. -->
+<div role="tablist"><span role="tab" id="tab-general">General</span> <span role="tab" id="tab-billing">Billing</span></div>
+<div id="panel-billing" hidden><button id="invoice">Download invoice</button></div>
+<details><summary>Advanced</summary><button id="rebuild">Rebuild index</button></details>
+
+<!-- 11. A closed shadow root. -->
+<x-widget></x-widget>
+
+<!-- 13. A hundred rows alike. -->
+<ul id="rows"></ul>
+
+<!-- 14. A button enabled once its field has a value. -->
+<input id="coupon" placeholder="Coupon"> <button id="apply" disabled>Apply</button>
+
+<!-- 15. A form with constraints that the browser checks. -->
+<form id="signup">
+  <input name="email" type="email" required placeholder="email">
+  <input name="password" type="password" required minlength="8" placeholder="password">
+  <input name="code" required pattern="[A-Z]{3}[0-9]{2}" placeholder="code">
+  <input name="age" type="number" required min="5" max="10">
+  <select name="plan" required><option value="">Choose</option><option value="basic">Basic</option></select>
+  <label><input name="terms" type="checkbox" required> terms</label>
+  <button type="submit">Create account</button>
+</form>
+
+<!-- 16. Enter in a field with a keydown listener, outside any form. -->
+<input id="quick" placeholder="Quick search">
+
+<!-- 17. dblclick and contextmenu. -->
+<div id="dbl">Double-click me</div>
+<div id="ctx">Right-click me</div>
+
+<!-- 18. A file input. -->
+<input type="file" id="avatar" accept="image/*">
+
+<!-- 19. window.close(); 20. a download made by the page. -->
+<button id="close">Close window</button>
+<button id="export-file">Export file</button>
+
+<!-- 21. A frame of the same origin. -->
+<iframe src="/frame.html" title="frame" width="300" height="60"></iframe>
+
+<!-- 22. A toolbar: one class, three actions. -->
+<div class="toolbar"><button class="btn tool">Save</button> <button class="btn tool">Archive</button> <button class="btn tool">Share</button></div>
+
+<!-- 23. select; 24. checkbox; 25. links that are buttons. -->
+<select id="sort"><option>Newest</option><option>Oldest</option></select>
+<label><input type="checkbox" id="compact"> compact</label>
+<a href="#" id="hash-link">Hash link</a>
+<a href="javascript:void(0)" onclick="fetch('/api/x/js-link')">JS link</a>
+
+<!-- 27. role=button with a listener; 29. a link that prefetches on hover. -->
+<div role="button" tabindex="0" id="aria-btn">Aria action</div>
+<a href="/x/docs" id="docs-link">Docs</a>
+
+<div id="late"></div>
+
+<!-- Cases from the independent review. -->
+<button id="popup">Open popup</button>
+<form action="/x/newtab" target="_blank"><input name="q" value="tab"><button>Search in a new tab</button></form>
+<section id="wizard"><div id="wiz-body"><label>Step 1 field <input name="f1" class="wiz-f1"></label></div><button id="wiz-next">Next</button></section>
+<table><tbody id="people">
+  <tr data-id="1"><td>Alice</td><td>admin</td></tr>
+  <tr data-id="2"><td>Bob</td><td>user</td></tr>
+  <tr data-id="3"><td>Carol</td><td>user</td></tr>
+</tbody></table>
+<div class="card" id="plan"><h3>Plan Pro</h3><p>All the things</p><button id="plan-like">Like</button></div>
+<a href="/x/terms" id="terms">Terms</a>
+<div id="intent">Hover to preview</div>
+<div id="press">Press me</div>
+<input id="suggest" placeholder="Suggest">
+<div id="box" style="height:120px;overflow:auto"><p style="height:300px">box start</p></div>
+<div id="relist"></div>
+<button id="archive-all">Archive all</button>
+<div id="modal2" hidden>Sure? <button id="modal2-cancel">Cancel</button> <button id="modal2-ok">Confirm archive</button></div>
+<button id="pick-file">Choose a file</button><input type="file" id="hidden-file" style="display:none">
+<button id="open-folder">Open a folder</button>
+<button id="alerts">Many alerts</button>
+<button id="approve">Approve order</button>
+<form id="jsform" novalidate><input name="nick" placeholder="nick"><button>Save nick</button><span id="jsform-err"></span></form>
+<button id="dang-xuat">Đăng xuất</button>
+<button id="icon-logout" aria-label=""><i class="fa fa-sign-out"></i></button>
+<textarea id="dirty" placeholder="Notes"></textarea>
+
+<!-- 7. An infinite feed, far down the page. -->
+<div id="spacer"></div>
+<ul id="feed"></ul>
+<div id="sentinel">loading…</div>
+
+</main>
+
+<!-- 12. A cookie banner over a button. -->
+<button id="under">Hidden behind banner</button>
+<div id="banner">We use cookies. <button id="accept">Accept</button></div>
+
+<script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+{
+  "name": "jsh-testbed-vite-pwa",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build"
+  },
+  "devDependencies": {
+    "vite": "6.0.7",
+    "vite-plugin-pwa": "0.21.1"
+  }
+}

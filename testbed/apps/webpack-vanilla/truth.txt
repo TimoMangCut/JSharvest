@@ -1,0 +1,22 @@
+# Ground truth for this app: one marker per line, as JSHMARK:<category>:<name>.
+# How each one can be reached:
+JSHMARK:entry:main            # main bundle, from <script src>
+JSHMARK:inline:html           # inline <script> in index.html
+JSHMARK:eval:main             # eval of a runtime string; never a file
+JSHMARK:route:home            # lazy route chunk, loaded on /
+JSHMARK:route:about           # lazy route chunk, linked from the nav
+JSHMARK:route:login           # lazy route chunk, linked from the nav
+JSHMARK:route:hidden          # lazy route chunk, no link anywhere (route table only)
+JSHMARK:route:account         # lazy route chunk, only linked once logged in
+JSHMARK:route:admin           # lazy route chunk, only linked once logged in
+JSHMARK:auth-server:admin-panel  # /private/admin-panel.js, served only to an admin session
+JSHMARK:click:report          # chunk loaded by clicking a button on /
+JSHMARK:scroll:comments       # chunk loaded when the end of /about scrolls into view
+JSHMARK:form:welcome          # chunk loaded after a valid login form submit
+JSHMARK:timer:telemetry       # chunk loaded 800 ms after start
+JSHMARK:worker:main           # dedicated worker script
+JSHMARK:worker:dep            # chunk the worker imports
+JSHMARK:sw:main               # service worker /extra/sw.js
+JSHMARK:sw:dep                # importScripts from the service worker
+JSHMARK:shared-worker:main    # shared worker /extra/shared.js
+JSHMARK:iframe:cross-site     # script in a frame from another site (localhost vs 127.0.0.1)

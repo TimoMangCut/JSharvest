@@ -1,0 +1,1 @@
+{"version":3,"file":"main.js","sources":["webpack:///./src/api/orders.ts","webpack:///./node_modules/axios/lib/core.js"],"sourcesContent":["export const listOrders = () => fetch('/api/from-named-map/orders');\n","export default () => fetch('/api/vendor-noise-named');\n"],"mappings":""}

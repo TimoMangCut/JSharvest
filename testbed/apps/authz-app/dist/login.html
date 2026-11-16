@@ -1,0 +1,9 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Log in</title></head><body>
+<form id="f"><input id="email" name="email" type="email"><input id="password" name="password" type="password"><button id="go">Log in</button></form>
+<script>
+document.getElementById('f').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const r = await fetch('/api/login', { method: 'POST', body: new URLSearchParams(new FormData(e.target)) });
+  if (r.ok) location.href = '/?in=1';
+});
+</script></body></html>

@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>authz-app</title></head>
+<body>
+<!-- 5.1: jsharvest authz's fixture. Three roles (anon, user, admin); the
+     admin's tools call endpoints the server checks well, badly, or not at
+     all, and some that set traps for a verdict. authz.truth.json says what
+     authz must conclude for each. -->
+<nav><a href="/">Home</a> <a href="/login">Log in</a></nav>
+<h1>authz-app</h1>
+<p id="who"></p>
+<section id="admin-tools" hidden>
+  <button id="stats">Stats</button>
+  <button id="summary">Summary</button>
+  <button id="public-export">Export</button>
+  <button id="report">Report</button>
+  <button id="flags">Flags</button>
+  <button id="orders">All orders</button>
+  <button id="account">Account 1</button>
+  <button id="invite">Invite</button>
+  <button id="note">Add note</button>
+  <button id="wipe">Wipe cache</button>
+</section>
+<script src="/app.js"></script>
+</body>
+</html>

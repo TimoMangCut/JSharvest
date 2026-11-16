@@ -1,0 +1,5 @@
+# role-app: the markers each role's store holds (roles.truth.json is the diff's truth).
+JSHMARK:roles:app            # app.js, every role
+JSHMARK:roles:admin-chunk    # /ra/js/admin-chunk.js: run by admin; anon and user have it from the resolver
+JSHMARK:roles:audit          # /private/ra-audit.js: admin only
+JSHMARK:roles:admin-page     # /ra/admin: admin only

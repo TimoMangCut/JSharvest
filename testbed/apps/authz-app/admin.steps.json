@@ -1,0 +1,7 @@
+[
+  {"do": "goto", "url": "http://127.0.0.1:8770/login"},
+  {"do": "type", "selector": "#email", "text": "${AUTHZ_APP_ADMIN}"},
+  {"do": "type", "selector": "#password", "text": "${AUTHZ_APP_PASS}"},
+  {"do": "click", "selector": "#go"},
+  {"do": "wait", "url": "/?in=1"}
+]

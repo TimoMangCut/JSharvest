@@ -1,0 +1,28 @@
+[
+  {
+    "do": "goto",
+    "url": "https://jellyfin.jsh.test:8920/web/#/login.html"
+  },
+  {
+    "do": "wait",
+    "selector": ".manualLoginForm button[type=submit]"
+  },
+  {
+    "do": "type",
+    "selector": "#txtManualName",
+    "text": "${JELLYFIN_ADMIN_USER}"
+  },
+  {
+    "do": "type",
+    "selector": "#txtManualPassword",
+    "text": "${JELLYFIN_ADMIN_PASSWORD}"
+  },
+  {
+    "do": "click",
+    "selector": ".manualLoginForm button[type=submit]"
+  },
+  {
+    "do": "wait",
+    "ms": 5000
+  }
+]

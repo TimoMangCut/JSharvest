@@ -1,0 +1,28 @@
+{
+  "params": [
+    {"endpoint": "GET /api/search", "in": "query", "name": "q", "type": "string", "observed": true, "in_js": true, "ffuf": true, "no_derived": true},
+    {"endpoint": "GET /api/search", "in": "query", "name": "page", "type": "int", "in_js": true, "ffuf": true},
+    {"endpoint": "GET /api/search", "in": "query", "name": "include_deleted", "observed": false, "in_js": true},
+    {"endpoint": "GET /api/export", "in": "query", "name": "format", "type": "string", "in_js": true, "ffuf": true},
+    {"endpoint": "POST /api/profile", "in": "header", "name": "x-csrf-token", "derived_from": "GET /api/csrf", "refresh": "likely", "ffuf": false},
+    {"endpoint": "POST /api/profile", "in": "json", "name": "$.display_name", "type": "string", "ffuf": true},
+    {"endpoint": "GET /api/notes/{}", "in": "path", "index": 3, "derived_from": "POST /api/notes", "refresh": "unknown", "ffuf": true, "guard_off": true},
+    {"endpoint": "GET /api/items/{id}", "in": "path", "index": 3, "type": "int", "ffuf": true},
+    {"endpoint": "PUT /api/upload/{id}", "in": "path", "index": 3, "type": "int", "ffuf": true},
+    {"endpoint": "POST /api/analytics", "in": "json", "name": "$.t", "type": "int", "in_js": true},
+    {"endpoint": "POST /api/edit", "in": "form", "name": "action", "type": "string"},
+    {"endpoint": "DELETE /api/items/{id}", "in": "path", "index": 3, "destructive": true},
+    {"endpoint": "* 127.0.0.1:8770", "in": "cookie", "name": "fsid", "ffuf": false}
+  ],
+  "not_params": [
+    {"endpoint": "POST /api/profile", "in": "header", "name": "user-agent"},
+    {"endpoint": "POST /api/profile", "in": "header", "name": "origin"},
+    {"endpoint": "GET /api/items/{id}", "in": "path", "name": "api"},
+    {"endpoint": "GET /api/search", "in": "cookie", "name": "fsid"}
+  ],
+  "replay_same_body": ["GET /api/items/{id}", "GET /api/items/{id}/reviews", "GET /api/export", "GET /api/search", "GET /api/me"],
+  "replay": [
+    {"endpoint": "POST /api/profile", "write": true, "status": 200, "redacted_status": 403},
+    {"endpoint": "GET /api/export", "status": 200, "redacted_status": 401}
+  ]
+}

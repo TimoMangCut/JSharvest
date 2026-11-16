@@ -1,0 +1,3 @@
+# Reads that must still reach the server with the guard on.
+/api/read?x=1
+/graphql?op=query

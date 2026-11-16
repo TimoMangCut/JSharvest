@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>peer-app</title></head>
+<body>
+<!-- P5.3: jsharvest authz -peers' fixture (docs/gd7-bola-design.md 6). Four
+     people (alice, bob: org-alpha; charlie, dave: org-beta). After the login
+     the page asks, on load, for everything the caller owns, by the ids the
+     API gives it. peer.truth.json says what authz -peers must conclude. -->
+<nav><a href="/">Home</a> <a href="/login">Log in</a></nav>
+<h1>peer-app</h1>
+<p id="who"></p>
+<ul id="feed"></ul>
+<section id="keys" hidden>
+  <button id="regen">Regenerate key</button>
+</section>
+<script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,19 @@
+{
+  "comment": "testbed authzscore: what jsharvest authz must conclude on authz-app, by endpoint (key without host) and role; write_* apply with -allow-write. Every item authz reports must be here.",
+  "items": [
+    {"key": "GET /api/az/me", "user": "needs-review", "anon": "enforced"},
+    {"key": "GET /api/az/csrf", "user": "needs-review", "anon": "enforced"},
+    {"key": "GET /api/az/admin/stats", "user": "enforced", "anon": "enforced"},
+    {"key": "GET /api/az/admin/summary", "user": "bypass", "anon": "enforced"},
+    {"key": "GET /api/az/admin/export", "user": "unauthenticated", "anon": "unauthenticated"},
+    {"key": "GET /api/az/admin/report", "user": "needs-review", "anon": "needs-review"},
+    {"key": "GET /api/az/admin/flags", "user": "unclear", "anon": "unclear"},
+    {"key": "GET /api/az/admin/orders", "user": "needs-review", "anon": "enforced"},
+    {"key": "GET /api/az/admin/accounts/{id}", "user": "needs-review", "anon": "enforced"},
+    {"key": "POST /api/az/admin/invite", "user": "skipped", "anon": "skipped", "write_user": "enforced", "write_anon": "unclear"},
+    {"key": "POST /api/az/admin/notes", "user": "skipped", "anon": "skipped", "write_user": "bypass", "write_anon": "unclear"},
+    {"key": "GET /api/az/admin/cache action=wipe", "user": "skipped", "anon": "skipped"}
+  ],
+  "never_sent": ["/api/az/admin/cache", "/api/login", "/api/logout"],
+  "never_sent_without_write": ["POST /api/az/admin/invite", "POST /api/az/admin/notes"]
+}

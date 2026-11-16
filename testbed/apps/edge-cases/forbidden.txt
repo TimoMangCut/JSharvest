@@ -1,0 +1,4 @@
+# Paths the testbed server must never be asked for; bench.sh fails the gate
+# if its log shows one. decoy.js names this one on an out-of-scope host.
+/decoy-out-of-scope.js
+/decoy-redirected.js

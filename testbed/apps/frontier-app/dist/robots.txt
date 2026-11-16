@@ -1,0 +1,3 @@
+User-agent: *
+Disallow: /pages/robots.html
+Sitemap: /sitemap.xml

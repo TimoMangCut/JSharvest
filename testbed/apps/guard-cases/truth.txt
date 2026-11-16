@@ -1,0 +1,3 @@
+# Guard fixture: the scripts themselves must still be captured.
+JSHMARK:guard:page               # page script that fires every kind of write on load
+JSHMARK:guard:worker             # worker that POSTs

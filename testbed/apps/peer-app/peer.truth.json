@@ -1,0 +1,849 @@
+{
+ "comment": "orders carry ownerId (the owner's user id): same-org bypass by the owner marker of gd7 8 Q2; org-docs have no owner: shared. testbed peerscore: what jsharvest authz -peers must conclude on peer-app (docs/gd7-bola-design.md 6.2), by scenario: each (key without host, direction, mode) once, no more, no less. Keys have {} for every path placeholder. Substitute modes name the place of the id patched as Param.At writes it: path:N counts the segments of the path from 1 (api=1: orgs/{o}/projects/{p} is path:4 and path:6). Expectations are under review: edit here when a rule of plan-28 6 says otherwise. P5.4 (gd7 8): a refusal where the request has two ids that B has not seen is enforced-parent (Q3), not enforced; featured/{int} for dave is enforced (Trial = Bogus is checked before the Bogus-with-data fuse, #5), so no endpoint is stopped here (the fuse is tested in internal/replay).",
+ "excluded": [
+  "GET /api/peer/me",
+  "GET /api/peer/home",
+  "GET /api/peer/feed",
+  "GET /api/peer/announcements/{}",
+  "GET /api/peer/file-links",
+  "POST /api/peer/graphql op=GetViewer"
+ ],
+ "scenarios": {
+  "alice-bob-same-org": {
+   "peers": [
+    "alice",
+    "bob"
+   ],
+   "relation": "same-org",
+   "flags": "-relation same-org",
+   "items": [
+    {
+     "key": "GET /api/peer/org-docs/{}",
+     "direction": "alice->bob",
+     "mode": "main",
+     "verdict": "shared"
+    },
+    {
+     "key": "GET /api/peer/private-notes/{}",
+     "direction": "alice->bob",
+     "mode": "main",
+     "verdict": "bypass"
+    },
+    {
+     "key": "GET /api/peer/preferences",
+     "direction": "alice->bob",
+     "mode": "main",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/lookup",
+     "direction": "alice->bob",
+     "mode": "main",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/orders/{}",
+     "direction": "alice->bob",
+     "mode": "main",
+     "verdict": "bypass"
+    },
+    {
+     "key": "GET /api/peer/featured/{}",
+     "direction": "alice->bob",
+     "mode": "main",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/orgs/{}/projects/{}",
+     "direction": "alice->bob",
+     "mode": "main",
+     "verdict": "shared"
+    },
+    {
+     "key": "GET /api/peer/files/{}",
+     "direction": "alice->bob",
+     "mode": "main",
+     "verdict": "unauthenticated"
+    },
+    {
+     "key": "POST /api/peer/graphql op=GetVaultItem",
+     "direction": "alice->bob",
+     "mode": "main",
+     "verdict": "bypass"
+    },
+    {
+     "key": "GET /api/peer/wallets/{}",
+     "direction": "alice->bob",
+     "mode": "main",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/wallets-leaky/{}",
+     "direction": "alice->bob",
+     "mode": "main",
+     "verdict": "bypass"
+    },
+    {
+     "key": "GET /api/peer/quota/{}",
+     "direction": "alice->bob",
+     "mode": "main",
+     "verdict": "unclear"
+    },
+    {
+     "key": "GET /api/peer/signed-preview/{}",
+     "direction": "alice->bob",
+     "mode": "main",
+     "verdict": "replay_broken"
+    },
+    {
+     "key": "GET /api/peer/keys/{} action=regenerate",
+     "direction": "alice->bob",
+     "mode": "main",
+     "verdict": "skipped"
+    },
+    {
+     "key": "GET /api/peer/org-docs/{}",
+     "direction": "bob->alice",
+     "mode": "main",
+     "verdict": "shared"
+    },
+    {
+     "key": "GET /api/peer/private-notes/{}",
+     "direction": "bob->alice",
+     "mode": "main",
+     "verdict": "bypass"
+    },
+    {
+     "key": "GET /api/peer/preferences",
+     "direction": "bob->alice",
+     "mode": "main",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/lookup",
+     "direction": "bob->alice",
+     "mode": "main",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/orders/{}",
+     "direction": "bob->alice",
+     "mode": "main",
+     "verdict": "bypass"
+    },
+    {
+     "key": "GET /api/peer/featured/{}",
+     "direction": "bob->alice",
+     "mode": "main",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/orgs/{}/projects/{}",
+     "direction": "bob->alice",
+     "mode": "main",
+     "verdict": "shared"
+    },
+    {
+     "key": "GET /api/peer/files/{}",
+     "direction": "bob->alice",
+     "mode": "main",
+     "verdict": "unauthenticated"
+    },
+    {
+     "key": "POST /api/peer/graphql op=GetVaultItem",
+     "direction": "bob->alice",
+     "mode": "main",
+     "verdict": "bypass"
+    },
+    {
+     "key": "GET /api/peer/wallets/{}",
+     "direction": "bob->alice",
+     "mode": "main",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/wallets-leaky/{}",
+     "direction": "bob->alice",
+     "mode": "main",
+     "verdict": "bypass"
+    },
+    {
+     "key": "GET /api/peer/quota/{}",
+     "direction": "bob->alice",
+     "mode": "main",
+     "verdict": "unclear"
+    },
+    {
+     "key": "GET /api/peer/signed-preview/{}",
+     "direction": "bob->alice",
+     "mode": "main",
+     "verdict": "replay_broken"
+    },
+    {
+     "key": "GET /api/peer/keys/{} action=regenerate",
+     "direction": "bob->alice",
+     "mode": "main",
+     "verdict": "skipped"
+    }
+   ]
+  },
+  "alice-bob-same-org-private": {
+   "peers": [
+    "alice",
+    "bob"
+   ],
+   "relation": "same-org",
+   "flags": "-relation same-org -private 'orgs/.*/projects'",
+   "items": [
+    {
+     "key": "GET /api/peer/org-docs/{}",
+     "direction": "alice->bob",
+     "mode": "main",
+     "verdict": "shared"
+    },
+    {
+     "key": "GET /api/peer/private-notes/{}",
+     "direction": "alice->bob",
+     "mode": "main",
+     "verdict": "bypass"
+    },
+    {
+     "key": "GET /api/peer/preferences",
+     "direction": "alice->bob",
+     "mode": "main",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/lookup",
+     "direction": "alice->bob",
+     "mode": "main",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/orders/{}",
+     "direction": "alice->bob",
+     "mode": "main",
+     "verdict": "bypass"
+    },
+    {
+     "key": "GET /api/peer/featured/{}",
+     "direction": "alice->bob",
+     "mode": "main",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/orgs/{}/projects/{}",
+     "direction": "alice->bob",
+     "mode": "main",
+     "verdict": "bypass"
+    },
+    {
+     "key": "GET /api/peer/files/{}",
+     "direction": "alice->bob",
+     "mode": "main",
+     "verdict": "unauthenticated"
+    },
+    {
+     "key": "POST /api/peer/graphql op=GetVaultItem",
+     "direction": "alice->bob",
+     "mode": "main",
+     "verdict": "bypass"
+    },
+    {
+     "key": "GET /api/peer/wallets/{}",
+     "direction": "alice->bob",
+     "mode": "main",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/wallets-leaky/{}",
+     "direction": "alice->bob",
+     "mode": "main",
+     "verdict": "bypass"
+    },
+    {
+     "key": "GET /api/peer/quota/{}",
+     "direction": "alice->bob",
+     "mode": "main",
+     "verdict": "unclear"
+    },
+    {
+     "key": "GET /api/peer/signed-preview/{}",
+     "direction": "alice->bob",
+     "mode": "main",
+     "verdict": "replay_broken"
+    },
+    {
+     "key": "GET /api/peer/keys/{} action=regenerate",
+     "direction": "alice->bob",
+     "mode": "main",
+     "verdict": "skipped"
+    },
+    {
+     "key": "GET /api/peer/org-docs/{}",
+     "direction": "bob->alice",
+     "mode": "main",
+     "verdict": "shared"
+    },
+    {
+     "key": "GET /api/peer/private-notes/{}",
+     "direction": "bob->alice",
+     "mode": "main",
+     "verdict": "bypass"
+    },
+    {
+     "key": "GET /api/peer/preferences",
+     "direction": "bob->alice",
+     "mode": "main",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/lookup",
+     "direction": "bob->alice",
+     "mode": "main",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/orders/{}",
+     "direction": "bob->alice",
+     "mode": "main",
+     "verdict": "bypass"
+    },
+    {
+     "key": "GET /api/peer/featured/{}",
+     "direction": "bob->alice",
+     "mode": "main",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/orgs/{}/projects/{}",
+     "direction": "bob->alice",
+     "mode": "main",
+     "verdict": "bypass"
+    },
+    {
+     "key": "GET /api/peer/files/{}",
+     "direction": "bob->alice",
+     "mode": "main",
+     "verdict": "unauthenticated"
+    },
+    {
+     "key": "POST /api/peer/graphql op=GetVaultItem",
+     "direction": "bob->alice",
+     "mode": "main",
+     "verdict": "bypass"
+    },
+    {
+     "key": "GET /api/peer/wallets/{}",
+     "direction": "bob->alice",
+     "mode": "main",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/wallets-leaky/{}",
+     "direction": "bob->alice",
+     "mode": "main",
+     "verdict": "bypass"
+    },
+    {
+     "key": "GET /api/peer/quota/{}",
+     "direction": "bob->alice",
+     "mode": "main",
+     "verdict": "unclear"
+    },
+    {
+     "key": "GET /api/peer/signed-preview/{}",
+     "direction": "bob->alice",
+     "mode": "main",
+     "verdict": "replay_broken"
+    },
+    {
+     "key": "GET /api/peer/keys/{} action=regenerate",
+     "direction": "bob->alice",
+     "mode": "main",
+     "verdict": "skipped"
+    }
+   ]
+  },
+  "alice-charlie-cross-org": {
+   "peers": [
+    "alice",
+    "charlie"
+   ],
+   "relation": "cross-org",
+   "flags": "-relation cross-org",
+   "items": [
+    {
+     "key": "GET /api/peer/org-docs/{}",
+     "direction": "alice->charlie",
+     "mode": "main",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/private-notes/{}",
+     "direction": "alice->charlie",
+     "mode": "main",
+     "verdict": "bypass"
+    },
+    {
+     "key": "GET /api/peer/preferences",
+     "direction": "alice->charlie",
+     "mode": "main",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/lookup",
+     "direction": "alice->charlie",
+     "mode": "main",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/orders/{}",
+     "direction": "alice->charlie",
+     "mode": "main",
+     "verdict": "bypass"
+    },
+    {
+     "key": "GET /api/peer/featured/{}",
+     "direction": "alice->charlie",
+     "mode": "main",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/orgs/{}/projects/{}",
+     "direction": "alice->charlie",
+     "mode": "main",
+     "verdict": "enforced-parent"
+    },
+    {
+     "key": "GET /api/peer/files/{}",
+     "direction": "alice->charlie",
+     "mode": "main",
+     "verdict": "unauthenticated"
+    },
+    {
+     "key": "POST /api/peer/graphql op=GetVaultItem",
+     "direction": "alice->charlie",
+     "mode": "main",
+     "verdict": "bypass"
+    },
+    {
+     "key": "GET /api/peer/wallets/{}",
+     "direction": "alice->charlie",
+     "mode": "main",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/wallets-leaky/{}",
+     "direction": "alice->charlie",
+     "mode": "main",
+     "verdict": "bypass"
+    },
+    {
+     "key": "GET /api/peer/quota/{}",
+     "direction": "alice->charlie",
+     "mode": "main",
+     "verdict": "unclear"
+    },
+    {
+     "key": "GET /api/peer/signed-preview/{}",
+     "direction": "alice->charlie",
+     "mode": "main",
+     "verdict": "replay_broken"
+    },
+    {
+     "key": "GET /api/peer/keys/{} action=regenerate",
+     "direction": "alice->charlie",
+     "mode": "main",
+     "verdict": "skipped"
+    },
+    {
+     "key": "GET /api/peer/org-docs/{}",
+     "direction": "charlie->alice",
+     "mode": "main",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/private-notes/{}",
+     "direction": "charlie->alice",
+     "mode": "main",
+     "verdict": "bypass"
+    },
+    {
+     "key": "GET /api/peer/preferences",
+     "direction": "charlie->alice",
+     "mode": "main",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/lookup",
+     "direction": "charlie->alice",
+     "mode": "main",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/orders/{}",
+     "direction": "charlie->alice",
+     "mode": "main",
+     "verdict": "bypass"
+    },
+    {
+     "key": "GET /api/peer/featured/{}",
+     "direction": "charlie->alice",
+     "mode": "main",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/orgs/{}/projects/{}",
+     "direction": "charlie->alice",
+     "mode": "main",
+     "verdict": "enforced-parent"
+    },
+    {
+     "key": "GET /api/peer/files/{}",
+     "direction": "charlie->alice",
+     "mode": "main",
+     "verdict": "unauthenticated"
+    },
+    {
+     "key": "POST /api/peer/graphql op=GetVaultItem",
+     "direction": "charlie->alice",
+     "mode": "main",
+     "verdict": "bypass"
+    },
+    {
+     "key": "GET /api/peer/wallets/{}",
+     "direction": "charlie->alice",
+     "mode": "main",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/wallets-leaky/{}",
+     "direction": "charlie->alice",
+     "mode": "main",
+     "verdict": "bypass"
+    },
+    {
+     "key": "GET /api/peer/quota/{}",
+     "direction": "charlie->alice",
+     "mode": "main",
+     "verdict": "unclear"
+    },
+    {
+     "key": "GET /api/peer/signed-preview/{}",
+     "direction": "charlie->alice",
+     "mode": "main",
+     "verdict": "replay_broken"
+    },
+    {
+     "key": "GET /api/peer/keys/{} action=regenerate",
+     "direction": "charlie->alice",
+     "mode": "main",
+     "verdict": "skipped"
+    }
+   ]
+  },
+  "alice-charlie-cross-org-substitute": {
+   "peers": [
+    "alice",
+    "charlie"
+   ],
+   "relation": "cross-org",
+   "flags": "-relation cross-org -substitute",
+   "items": [
+    {
+     "key": "GET /api/peer/org-docs/{}",
+     "direction": "alice->charlie",
+     "mode": "main",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/private-notes/{}",
+     "direction": "alice->charlie",
+     "mode": "main",
+     "verdict": "bypass"
+    },
+    {
+     "key": "GET /api/peer/preferences",
+     "direction": "alice->charlie",
+     "mode": "main",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/lookup",
+     "direction": "alice->charlie",
+     "mode": "main",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/orders/{}",
+     "direction": "alice->charlie",
+     "mode": "main",
+     "verdict": "bypass"
+    },
+    {
+     "key": "GET /api/peer/featured/{}",
+     "direction": "alice->charlie",
+     "mode": "main",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/orgs/{}/projects/{}",
+     "direction": "alice->charlie",
+     "mode": "main",
+     "verdict": "enforced-parent"
+    },
+    {
+     "key": "GET /api/peer/orgs/{}/projects/{}",
+     "direction": "alice->charlie",
+     "mode": "substitute:path:4",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/orgs/{}/projects/{}",
+     "direction": "alice->charlie",
+     "mode": "substitute:path:6",
+     "verdict": "bypass"
+    },
+    {
+     "key": "GET /api/peer/files/{}",
+     "direction": "alice->charlie",
+     "mode": "main",
+     "verdict": "unauthenticated"
+    },
+    {
+     "key": "POST /api/peer/graphql op=GetVaultItem",
+     "direction": "alice->charlie",
+     "mode": "main",
+     "verdict": "bypass"
+    },
+    {
+     "key": "GET /api/peer/wallets/{}",
+     "direction": "alice->charlie",
+     "mode": "main",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/wallets-leaky/{}",
+     "direction": "alice->charlie",
+     "mode": "main",
+     "verdict": "bypass"
+    },
+    {
+     "key": "GET /api/peer/quota/{}",
+     "direction": "alice->charlie",
+     "mode": "main",
+     "verdict": "unclear"
+    },
+    {
+     "key": "GET /api/peer/signed-preview/{}",
+     "direction": "alice->charlie",
+     "mode": "main",
+     "verdict": "replay_broken"
+    },
+    {
+     "key": "GET /api/peer/keys/{} action=regenerate",
+     "direction": "alice->charlie",
+     "mode": "main",
+     "verdict": "skipped"
+    },
+    {
+     "key": "GET /api/peer/org-docs/{}",
+     "direction": "charlie->alice",
+     "mode": "main",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/private-notes/{}",
+     "direction": "charlie->alice",
+     "mode": "main",
+     "verdict": "bypass"
+    },
+    {
+     "key": "GET /api/peer/preferences",
+     "direction": "charlie->alice",
+     "mode": "main",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/lookup",
+     "direction": "charlie->alice",
+     "mode": "main",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/orders/{}",
+     "direction": "charlie->alice",
+     "mode": "main",
+     "verdict": "bypass"
+    },
+    {
+     "key": "GET /api/peer/featured/{}",
+     "direction": "charlie->alice",
+     "mode": "main",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/orgs/{}/projects/{}",
+     "direction": "charlie->alice",
+     "mode": "main",
+     "verdict": "enforced-parent"
+    },
+    {
+     "key": "GET /api/peer/orgs/{}/projects/{}",
+     "direction": "charlie->alice",
+     "mode": "substitute:path:4",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/orgs/{}/projects/{}",
+     "direction": "charlie->alice",
+     "mode": "substitute:path:6",
+     "verdict": "bypass"
+    },
+    {
+     "key": "GET /api/peer/files/{}",
+     "direction": "charlie->alice",
+     "mode": "main",
+     "verdict": "unauthenticated"
+    },
+    {
+     "key": "POST /api/peer/graphql op=GetVaultItem",
+     "direction": "charlie->alice",
+     "mode": "main",
+     "verdict": "bypass"
+    },
+    {
+     "key": "GET /api/peer/wallets/{}",
+     "direction": "charlie->alice",
+     "mode": "main",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/wallets-leaky/{}",
+     "direction": "charlie->alice",
+     "mode": "main",
+     "verdict": "bypass"
+    },
+    {
+     "key": "GET /api/peer/quota/{}",
+     "direction": "charlie->alice",
+     "mode": "main",
+     "verdict": "unclear"
+    },
+    {
+     "key": "GET /api/peer/signed-preview/{}",
+     "direction": "charlie->alice",
+     "mode": "main",
+     "verdict": "replay_broken"
+    },
+    {
+     "key": "GET /api/peer/keys/{} action=regenerate",
+     "direction": "charlie->alice",
+     "mode": "main",
+     "verdict": "skipped"
+    }
+   ]
+  },
+  "alice-dave-cross-org": {
+   "peers": [
+    "alice",
+    "dave"
+   ],
+   "relation": "cross-org",
+   "flags": "-relation cross-org",
+   "items": [
+    {
+     "key": "GET /api/peer/org-docs/{}",
+     "direction": "alice->dave",
+     "mode": "main",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/private-notes/{}",
+     "direction": "alice->dave",
+     "mode": "main",
+     "verdict": "bypass"
+    },
+    {
+     "key": "GET /api/peer/preferences",
+     "direction": "alice->dave",
+     "mode": "main",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/lookup",
+     "direction": "alice->dave",
+     "mode": "main",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/orders/{}",
+     "direction": "alice->dave",
+     "mode": "main",
+     "verdict": "bypass"
+    },
+    {
+     "key": "GET /api/peer/featured/{}",
+     "direction": "alice->dave",
+     "mode": "main",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/orgs/{}/projects/{}",
+     "direction": "alice->dave",
+     "mode": "main",
+     "verdict": "enforced-parent"
+    },
+    {
+     "key": "GET /api/peer/files/{}",
+     "direction": "alice->dave",
+     "mode": "main",
+     "verdict": "unauthenticated"
+    },
+    {
+     "key": "POST /api/peer/graphql op=GetVaultItem",
+     "direction": "alice->dave",
+     "mode": "main",
+     "verdict": "bypass"
+    },
+    {
+     "key": "GET /api/peer/wallets/{}",
+     "direction": "alice->dave",
+     "mode": "main",
+     "verdict": "enforced"
+    },
+    {
+     "key": "GET /api/peer/wallets-leaky/{}",
+     "direction": "alice->dave",
+     "mode": "main",
+     "verdict": "bypass"
+    },
+    {
+     "key": "GET /api/peer/quota/{}",
+     "direction": "alice->dave",
+     "mode": "main",
+     "verdict": "unclear"
+    },
+    {
+     "key": "GET /api/peer/signed-preview/{}",
+     "direction": "alice->dave",
+     "mode": "main",
+     "verdict": "replay_broken"
+    },
+    {
+     "key": "GET /api/peer/keys/{} action=regenerate",
+     "direction": "alice->dave",
+     "mode": "main",
+     "verdict": "skipped"
+    },
+    {
+     "key": "GET /api/peer/preferences",
+     "direction": "dave->alice",
+     "mode": "main",
+     "verdict": "enforced"
+    }
+   ]
+  }
+ }
+}

@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>role-app</title></head>
+<body>
+<!-- 4.7: one app, three roles (anon, user, admin). roles.truth.json says
+     what jsharvest diff must find, and what it must not. -->
+<nav id="nav"><a href="/">Home</a> <a href="/authors">Authors</a> <a href="/login">Log in</a></nav>
+<h1>role-app</h1>
+<section id="user-tools" hidden><button id="orders">My orders</button></section>
+<section id="admin-tools"></section>
+<form id="search-form">
+  <input name="q" placeholder="Search">
+  <label id="incl" hidden><input type="checkbox" id="include-deleted"> include deleted</label>
+  <button>Search</button>
+</form>
+<script src="/ra/config.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

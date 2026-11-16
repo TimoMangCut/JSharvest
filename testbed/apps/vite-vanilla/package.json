@@ -1,0 +1,11 @@
+{
+  "name": "jsh-testbed-vite-vanilla",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build"
+  },
+  "devDependencies": {
+    "vite": "6.0.7"
+  }
+}

@@ -1,0 +1,430 @@
+{
+  "comment": "testbed archivecheck: what jsharvest archive must find in archive-app's fake history (history.json). historical: every line of historical.jsonl, and nothing else. scripts: the archive store's entries, by path. live_checks: the paths the live check asks the server, each once; the archived URL with a token is never sent. CF-04a: the archived front page (text/html) names scripts no listing has; they and the chunks they load are fetched, live first; an archived challenge page is skipped, its scripts never asked for. Round 16: historical and catalog are compared line for line on their whole key (class, method, path, bases, query, body, and for historical the scripts that call it): precision and recall must be 1. catalog: archive/endpoints.jsonl, the old scripts' own (today's app.js is held, not fetched). in_current_code: old paths today's code still writes out (/api/v2/hidden-report in a comment, billing/v1.0/invoices/ relative to a base, ARC-09); round 20 (COV-01): they stay in historical.jsonl under class in_current_code, never dropped. otx_section: OTX files an IP under IPv4 (ARC-02). summary.urls: the distinct URLs listed (old-2022.js and app.js are each listed by two archives: one URL each, ARC-06). Round 17: the map's own source (not node_modules: no /api/v9/vendor-noise), the script only a 2022 asset-manifest.json names, the script only Common Crawl's WARC file holds, the one only a urlscan scan saw (alive).",
+  "historical": [
+    {
+      "class": "historical",
+      "method": "POST",
+      "path": "/api/v1/admin/impersonate-user",
+      "scripts": [
+        "/static/gone.js"
+      ]
+    },
+    {
+      "class": "historical",
+      "method": "GET",
+      "path": "/api/v1/coupons/redeem-all",
+      "scripts": [
+        "/assets/otx-only.js"
+      ]
+    },
+    {
+      "class": "historical",
+      "method": "GET",
+      "path": "/api/v1/legacy-export",
+      "query": [
+        "format"
+      ],
+      "scripts": [
+        "/legacy/app.js"
+      ]
+    },
+    {
+      "class": "historical",
+      "method": "GET",
+      "path": "/api/v1/reports/schedule",
+      "scripts": [
+        "/assets/coded.js"
+      ]
+    },
+    {
+      "class": "historical",
+      "method": "POST",
+      "path": "/api/v2/export-all",
+      "scripts": [
+        "/assets/old-2023.js"
+      ]
+    },
+    {
+      "class": "version_changed",
+      "method": "GET",
+      "path": "/api/v1/orders",
+      "scripts": [
+        "/legacy/app.js"
+      ]
+    },
+    {
+      "class": "version_changed",
+      "method": "GET",
+      "path": "/v1.0/scooters/{}",
+      "scripts": [
+        "/legacy/app.js"
+      ]
+    },
+    {
+      "class": "historical",
+      "method": "POST",
+      "path": "/legacy/v1.0/export",
+      "bases": [
+        "/api-gateway"
+      ],
+      "body": [
+        "from",
+        "to"
+      ],
+      "scripts": [
+        "/assets/gateway-2022.js"
+      ]
+    },
+    {
+      "class": "historical",
+      "method": "GET",
+      "path": "/api/v1/revisit-hook",
+      "scripts": [
+        "/assets/revisit-only.js"
+      ]
+    },
+    {
+      "class": "historical",
+      "method": "GET",
+      "path": "/api/v1/cc-only-hook",
+      "scripts": [
+        "/assets/cc-only.js"
+      ]
+    },
+    {
+      "class": "historical",
+      "method": "GET",
+      "path": "/api/v1/inline-hook",
+      "scripts": [
+        "/"
+      ]
+    },
+    {
+      "class": "historical",
+      "method": "GET",
+      "path": "/api/v1/html-only-hook",
+      "scripts": [
+        "/static/html-only.js"
+      ]
+    },
+    {
+      "class": "historical",
+      "method": "POST",
+      "path": "/api/v1/html-chunk-hook",
+      "scripts": [
+        "/static/html-chunk.js"
+      ]
+    },
+    {
+      "class": "historical",
+      "method": "GET",
+      "path": "/api/v1/live-only-hook",
+      "scripts": [
+        "/assets/live-only.js"
+      ],
+      "live_only": true
+    },
+    {
+      "class": "historical",
+      "method": "GET",
+      "path": "/api/v1/live-chunk-hook",
+      "scripts": [
+        "/assets/live-chunk.js"
+      ],
+      "live_only": true
+    },
+    {
+      "class": "historical",
+      "method": "DELETE",
+      "path": "/api/v1/map-only-hook/{}",
+      "scripts": [
+        "/static/js/build-2022.js.map"
+      ]
+    },
+    {
+      "class": "historical",
+      "method": "GET",
+      "path": "/api/v1/manifest-only-hook",
+      "scripts": [
+        "/static/js/manifest-only.js"
+      ]
+    },
+    {
+      "class": "historical",
+      "method": "PUT",
+      "path": "/api/v1/warc-only-hook",
+      "scripts": [
+        "/assets/warc-only.js"
+      ]
+    },
+    {
+      "class": "historical",
+      "method": "GET",
+      "path": "/api/v1/urlscan-only-hook",
+      "scripts": [
+        "/assets/urlscan-only.js"
+      ],
+      "live_only": true
+    },
+    {
+      "class": "in_current_code",
+      "method": "GET",
+      "path": "/api/v2/hidden-report",
+      "scripts": [
+        "/legacy/app.js"
+      ]
+    },
+    {
+      "class": "in_current_code",
+      "method": "GET",
+      "path": "/billing/v1.0/invoices/{}",
+      "bases": [
+        "/api-gateway"
+      ],
+      "scripts": [
+        "/assets/gateway-2022.js"
+      ]
+    }
+  ],
+  "catalog": [
+    {
+      "method": "GET",
+      "path": "/api/v1/cc-only-hook"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/coupons/redeem-all"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/html-only-hook"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/inline-hook"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/legacy-export",
+      "query": [
+        "format"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/live-chunk-hook",
+      "live_only": true
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/live-only-hook",
+      "live_only": true
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/orders"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/reports/schedule"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/revisit-hook"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/hidden-report"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/items/7"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/orders"
+    },
+    {
+      "method": "GET",
+      "path": "/billing/v1.0/invoices/{}",
+      "bases": [
+        "/api-gateway"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/v1.0/scooters/{}"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/admin/impersonate-user"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/html-chunk-hook"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v2/export-all"
+    },
+    {
+      "method": "POST",
+      "path": "/legacy/v1.0/export",
+      "bases": [
+        "/api-gateway"
+      ],
+      "body": [
+        "from",
+        "to"
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/map-only-hook/{}"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/manifest-only-hook"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/warc-only-hook"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/urlscan-only-hook",
+      "live_only": true
+    }
+  ],
+  "scripts": [
+    {
+      "path": "/assets/old-2023.js",
+      "source": "both",
+      "alive": true,
+      "live_same": true
+    },
+    {
+      "path": "/legacy/app.js",
+      "source": "wayback",
+      "alive": false,
+      "captures": 3
+    },
+    {
+      "path": "/static/gone.js",
+      "source": "wayback",
+      "alive": false
+    },
+    {
+      "path": "/assets/coded.js",
+      "source": "wayback",
+      "alive": false,
+      "not_tag": "digest-mismatch"
+    },
+    {
+      "path": "/assets/otx-only.js",
+      "source": "wayback",
+      "alive": false
+    },
+    {
+      "path": "/assets/cc-only.js",
+      "source": "wayback",
+      "alive": false
+    },
+    {
+      "path": "/static/html-only.js",
+      "source": "wayback",
+      "alive": false
+    },
+    {
+      "path": "/static/html-chunk.js",
+      "source": "wayback",
+      "alive": false
+    },
+    {
+      "path": "/assets/live-only.js",
+      "source": "live",
+      "alive": true,
+      "live_only": true
+    },
+    {
+      "path": "/assets/live-chunk.js",
+      "source": "live",
+      "alive": true,
+      "live_only": true
+    },
+    {
+      "path": "/assets/gateway-2022.js",
+      "source": "wayback",
+      "alive": false
+    },
+    {
+      "path": "/assets/revisit-only.js",
+      "source": "wayback",
+      "alive": false,
+      "captures": 2
+    },
+    {
+      "path": "/assets/warc-only.js",
+      "source": "wayback",
+      "alive": false
+    },
+    {
+      "path": "/static/js/manifest-only.js",
+      "source": "wayback",
+      "alive": false
+    },
+    {
+      "path": "/assets/urlscan-only.js",
+      "source": "live",
+      "alive": true,
+      "live_only": true
+    }
+  ],
+  "summary": {
+    "urls": 21,
+    "already_held": 1,
+    "revisits": 3,
+    "credential_urls": 1,
+    "fetched": 12,
+    "digest_mismatch": 0,
+    "failed": 0,
+    "html_captures": 2,
+    "pages_read": 2,
+    "page_scripts": 3,
+    "inline": 1,
+    "resolved": 3,
+    "not_archived": 3,
+    "from_warc": 1,
+    "source_maps": 1,
+    "map_sources": 1,
+    "manifests": 1
+  },
+  "skipped": {
+    "vendor library": 1,
+    "out of scope": 2,
+    "challenge page": 1,
+    "before -since": 1
+  },
+  "in_current_code": 2,
+  "live_checks": [
+    "/asset-manifest.json",
+    "/assets/cc-only.js",
+    "/assets/coded.js",
+    "/assets/gateway-2022.js",
+    "/assets/live-chunk.js",
+    "/assets/live-only.js",
+    "/assets/old-2023.js",
+    "/assets/otx-only.js",
+    "/assets/revisit-only.js",
+    "/assets/urlscan-only.js",
+    "/assets/warc-only.js",
+    "/legacy/app.js",
+    "/static/gone.js",
+    "/static/html-chunk.js",
+    "/static/html-only.js",
+    "/static/js/build-2022.js.map",
+    "/static/js/manifest-only.js"
+  ],
+  "otx_section": "IPv4",
+  "secret": "abcdef0123456789secret"
+}

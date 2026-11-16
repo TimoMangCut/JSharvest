@@ -1,0 +1,82 @@
+# Isolated local lab for jsharvest (plan-28 28B(a) preparation).
+# No ports are published; the host reaches container IPs directly on the
+# internal Docker bridge (172.31.250.0/24).
+
+name: jshlab
+
+networks:
+  lab:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.31.250.0/24
+
+volumes:
+  jellyfin_config:
+  jellyfin_cache:
+  directus_db:
+  directus_uploads:
+
+services:
+  jellyfin:
+    image: jellyfin/jellyfin:12.4.20261026-211555@sha256:fea863d0cd9ec445985d9c75fc6ed64e38a1d2766cf0c250a33d553f4fc1b771
+    restart: "no"
+    networks:
+      lab:
+        ipv4_address: 172.31.250.10
+    volumes:
+      - jellyfin_config:/config
+      - jellyfin_cache:/cache
+    environment:
+      # Advertised URL for Jellyfin client redirects/links.
+      JELLYFIN_PublishedServerUrl: https://jellyfin.jsh.test:8920
+      # Disable .NET diagnostic event pipe/telemetry if honored by runtime.
+      DOTNET_EnableDiagnostics: "0"
+      # Note: Jellyfin does not expose env vars for plugin repositories or
+      # remote metadata fetchers; setup.sh disables plugin repositories via API.
+    cap_drop:
+      # Drop all Linux capabilities; if the image entrypoint requires root chown
+      # on /config or /cache, CHOWN/DAC_OVERRIDE/SETUID/SETGID may be needed.
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  directus:
+    image: directus/directus:12.6.1@sha256:e1561b5e526e8e7a2ac19b7bb6eab63611dd84a862a8c45b864118768a2baff4
+    restart: "no"
+    networks:
+      lab:
+        ipv4_address: 172.31.250.11
+    volumes:
+      - directus_db:/directus/database
+      - directus_uploads:/directus/uploads
+    environment:
+      # SQLite storage inside the named volume.
+      DB_CLIENT: sqlite3
+      DB_FILENAME: /directus/database/data.db
+      # Fixed test-only signing/encryption keys (do not use outside local lab).
+      KEY: "lab-test-key-00000000000000000000"
+      SECRET: "lab-test-secret-00000000000000000"
+      # Initial admin account.
+      ADMIN_EMAIL: admin@example.com
+      ADMIN_PASSWORD: ${LAB_ADMIN_PASSWORD:-LabAdminPass123!}
+      # Public URL matching Chrome -host-resolver-rules.
+      PUBLIC_URL: http://directus.jsh.test:8055
+      # Disable Directus telemetry (documented env var).
+      TELEMETRY: "false"
+      # Disable extension auto-reload.
+      EXTENSIONS_AUTO_RELOAD: "false"
+      # Disable external marketplace / update checks / registry lookups.
+      # Uncertain whether all three names are recognized in Directus 12.6.1:
+      # - MARKETPLACE_ENABLED: disables marketplace UI/fetches if supported.
+      # - PACKAGE_CHECK_UPDATES: disables npm/version update checks if supported.
+      # - EXTENSIONS_REGISTRY_URL: clears remote extension registry URL if supported.
+      MARKETPLACE_ENABLED: "false"
+      PACKAGE_CHECK_UPDATES: "false"
+      EXTENSIONS_REGISTRY_URL: ""
+    cap_drop:
+      # Directus runs as non-root node user (uid 1000) and binds 8055.
+      - ALL
+    security_opt:
+      - no-new-privileges:true

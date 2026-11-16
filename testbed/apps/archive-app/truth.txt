@@ -1,0 +1,2 @@
+# archive-app: the marker of today's build.
+JSHMARK:archive:app

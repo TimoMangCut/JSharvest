@@ -1,0 +1,7 @@
+[
+  {"do": "goto", "url": "http://127.0.0.1:8770/login"},
+  {"do": "type", "selector": "input[name=email]", "text": "${ADMIN_USER}"},
+  {"do": "type", "selector": "input[name=password]", "text": "${ADMIN_PASS}"},
+  {"do": "click", "selector": "#f button"},
+  {"do": "wait", "url": "/account"}
+]

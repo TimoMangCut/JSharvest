@@ -1,0 +1,8 @@
+[
+  {"do": "goto", "url": "http://directus.jsh.test:8055/admin/login"},
+  {"do": "wait", "selector": "input[type=email]"},
+  {"do": "type", "selector": "input[type=email]", "text": "${DIRECTUS_ADMIN_EMAIL}"},
+  {"do": "type", "selector": "input[type=password]", "text": "${DIRECTUS_ADMIN_PASSWORD}"},
+  {"do": "click", "selector": "button[type=submit]"},
+  {"do": "wait", "url": "/admin/content"}
+]

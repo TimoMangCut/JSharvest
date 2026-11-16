@@ -1,0 +1,29 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>jsharvest testbed (edge cases)</title></head>
+<body>
+  <h1>Edge cases</h1>
+  <!-- Compiled only when clicked, so a passive load cannot see it. -->
+  <button onclick="window.__jshHandler = 'JSHMARK:inline:handler'">handler</button>
+  <script>
+    // Runtime strings, so the markers are visible in no file and not in this
+    // page either: new Function, and setTimeout with a string (which V8
+    // compiles with an empty URL and no stack).
+    new Function(atob('d2luZG93Ll9fanNoRm4gPSAiSlNITUFSSzpldmFsOmZ1bmN0aW9uIg=='))();
+    setTimeout(atob('d2luZG93Ll9fanNoVG8gPSAiSlNITUFSSzpldmFsOnRpbWVvdXQi'), 0);
+    // A worker that starts another worker, and runs an eval of its own.
+    new Worker('/nested-parent.js');
+    // A worker that closes itself at once.
+    new Worker('/short-worker.js');
+    // A JS file that is fetched, not run, and is larger than Chrome's default
+    // 20 MB per-resource buffer: only the network capture with a raised
+    // buffer can keep it. The marker is at the end.
+    fetch('/gen/big.js').then((r) => r.text());
+  </script>
+  <!-- A debugger statement must not hang the crawler: the marker only exists
+       in code that runs after it. -->
+  <script src="/debugger.js"></script>
+  <!-- Chunk references for the resolver: one in scope, one decoy out of scope. -->
+  <script src="/decoy.js"></script>
+</body>
+</html>

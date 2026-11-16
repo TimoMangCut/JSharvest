@@ -1,0 +1,14 @@
+{
+  "comment": "frontier-app crawled with -depth 3 and the guard on. visit: pages the crawl must open (path, or path#fragment). listed: URLs it must name in pages.jsonl without opening, with why. forbidden: paths the server must never be asked for.",
+  "visit": ["/", "/pages/a.html", "/pages/deep1.html", "/pages/deep2.html", "/pages/area.html", "/pages/svg.html", "/pages/frame.html",
+    "/pages/in-frame.html", "/pages/srcdoc.html", "/pages/shadow.html", "/pages/template.html", "/pages/noscript.html",
+    "/pages/comment.html", "/pages/onclick.html", "/pages/jshref.html", "/pages/js-built.html", "/pages/js-string.html",
+    "/pages/inner.html", "/pages/route-page", "/pages/search.html", "/pages/refresh.html", "/pages/refreshed.html", "/pages/timer.html",
+    "/pages/timer-target.html", "/fr/redirect", "/pages/redirected.html", "/fr/headers", "/pages/link-header.html",
+    "/pages/content-location.html", "/pages/refresh-header.html", "/pages/robots.html", "/pages/sitemap.html", "/#/hash-route"],
+  "listed": {"/pages/post-target.html": "post", "/pages/cite.html": "listed", "/logout": "destructive",
+    "/pages/delete-account.html": "destructive", "/files/report.pdf": "asset", "/elsewhere.html": "scope", "/pages/deep3.html": "depth",
+    "/img/x.png": "listed"},
+  "forbidden": ["/pages/post-target.html", "/pages/cite.html", "/logout", "/pages/delete-account.html", "/files/report.pdf",
+    "/pages/deep3.html", "/api/things"]
+}

@@ -1,0 +1,413 @@
+{
+  "comment": "testbed/cmd/testbed explorescore: each case must be one action of explore in flows.jsonl holding all of its requests (and of the kind given); forbidden never reaches the server; server_max bounds how often one does; urls are found by explore and named in pages.jsonl. Run with crawl -explore -depth 1.",
+  "cases": [
+    {
+      "name": "delegated card A",
+      "expect": [
+        "GET /api/x/react-a"
+      ],
+      "kind": "click"
+    },
+    {
+      "name": "delegated card B",
+      "expect": [
+        "GET /api/x/react-b"
+      ],
+      "kind": "click"
+    },
+    {
+      "name": "hover menu",
+      "expect": [
+        "GET /api/x/menu-prefetch"
+      ],
+      "kind": "hover"
+    },
+    {
+      "name": "item of the hover menu",
+      "expect": [
+        "GET /api/x/reports"
+      ],
+      "kind": "click"
+    },
+    {
+      "name": "confirm then delete",
+      "expect": [
+        "DELETE /api/x/draft"
+      ],
+      "kind": "click"
+    },
+    {
+      "name": "navigation held",
+      "expect": [
+        "GET /x/nav-target"
+      ],
+      "kind": "click"
+    },
+    {
+      "name": "route view, visited by the frontier",
+      "expect": [
+        "GET /api/x/route-only"
+      ],
+      "kind": "click"
+    },
+    {
+      "name": "infinite feed, page 1",
+      "expect": [
+        "GET /api/x/feed?page=1"
+      ],
+      "kind": "scroll"
+    },
+    {
+      "name": "infinite feed, page 2",
+      "expect": [
+        "GET /api/x/feed?page=2"
+      ],
+      "kind": "scroll"
+    },
+    {
+      "name": "infinite feed, page 3",
+      "expect": [
+        "GET /api/x/feed?page=3"
+      ],
+      "kind": "scroll"
+    },
+    {
+      "name": "load more",
+      "expect": [
+        "GET /api/x/more?n=10"
+      ],
+      "kind": "click"
+    },
+    {
+      "name": "tab",
+      "expect": [
+        "GET /api/x/tab-billing"
+      ],
+      "kind": "click"
+    },
+    {
+      "name": "button in the tab's panel",
+      "expect": [
+        "GET /api/x/invoice"
+      ],
+      "kind": "click"
+    },
+    {
+      "name": "button inside details",
+      "expect": [
+        "POST /api/x/rebuild"
+      ],
+      "kind": "click"
+    },
+    {
+      "name": "closed shadow root",
+      "expect": [
+        "GET /api/x/widget"
+      ],
+      "kind": "click"
+    },
+    {
+      "name": "cookie banner",
+      "expect": [
+        "GET /api/x/consent-banner"
+      ],
+      "kind": "click"
+    },
+    {
+      "name": "button under the banner",
+      "expect": [
+        "GET /api/x/under"
+      ],
+      "kind": "click"
+    },
+    {
+      "name": "one of a hundred rows",
+      "expect": [
+        "GET /api/x/row/{id}"
+      ],
+      "kind": "click"
+    },
+    {
+      "name": "enabled once filled",
+      "expect": [
+        "GET /api/x/coupon?code=*"
+      ],
+      "kind": "click"
+    },
+    {
+      "name": "valid signup form",
+      "expect": [
+        "POST /api/x/signup"
+      ],
+      "kind": "submit"
+    },
+    {
+      "name": "enter in a field",
+      "expect": [
+        "GET /api/x/quick?q=*"
+      ]
+    },
+    {
+      "name": "dblclick",
+      "expect": [
+        "GET /api/x/dbl"
+      ],
+      "kind": "click"
+    },
+    {
+      "name": "contextmenu",
+      "expect": [
+        "GET /api/x/ctx"
+      ]
+    },
+    {
+      "name": "upload",
+      "expect": [
+        "POST /api/x/avatar"
+      ],
+      "kind": "change"
+    },
+    {
+      "name": "window.close",
+      "expect": [
+        "GET /api/x/close"
+      ],
+      "kind": "click"
+    },
+    {
+      "name": "download",
+      "expect": [
+        "GET /api/x/export-file"
+      ],
+      "kind": "click"
+    },
+    {
+      "name": "same-origin frame",
+      "expect": [
+        "GET /api/x/frame"
+      ],
+      "kind": "click"
+    },
+    {
+      "name": "toolbar save",
+      "expect": [
+        "GET /api/x/tool-save"
+      ],
+      "kind": "click"
+    },
+    {
+      "name": "toolbar archive",
+      "expect": [
+        "GET /api/x/tool-archive"
+      ],
+      "kind": "click"
+    },
+    {
+      "name": "toolbar share",
+      "expect": [
+        "GET /api/x/tool-share"
+      ],
+      "kind": "click"
+    },
+    {
+      "name": "select",
+      "expect": [
+        "GET /api/x/sort?by=oldest"
+      ],
+      "kind": "change"
+    },
+    {
+      "name": "checkbox",
+      "expect": [
+        "GET /api/x/toggle?on=true"
+      ]
+    },
+    {
+      "name": "a href=#",
+      "expect": [
+        "GET /api/x/hash-link"
+      ],
+      "kind": "click"
+    },
+    {
+      "name": "a href=javascript:",
+      "expect": [
+        "GET /api/x/js-link"
+      ],
+      "kind": "click"
+    },
+    {
+      "name": "role=button",
+      "expect": [
+        "GET /api/x/aria"
+      ],
+      "kind": "click"
+    },
+    {
+      "name": "prefetch on hover of a link",
+      "expect": [
+        "GET /api/x/prefetch-docs"
+      ],
+      "kind": "hover"
+    },
+    {
+      "name": "late button",
+      "expect": [
+        "GET /api/x/late"
+      ],
+      "kind": "click"
+    },
+    {
+      "name": "wizard step 1",
+      "expect": [
+        "GET /api/x/wizard/step1"
+      ],
+      "kind": "click"
+    },
+    {
+      "name": "wizard step 2, same button",
+      "expect": [
+        "GET /api/x/wizard/step2"
+      ],
+      "kind": "click"
+    },
+    {
+      "name": "wizard step 3, same button",
+      "expect": [
+        "GET /api/x/wizard/step3"
+      ],
+      "kind": "click"
+    },
+    {
+      "name": "clickable table row",
+      "expect": [
+        "GET /api/x/person/{id}"
+      ],
+      "kind": "click"
+    },
+    {
+      "name": "card with a handler of its own",
+      "expect": [
+        "GET /api/x/plan-card"
+      ],
+      "kind": "click"
+    },
+    {
+      "name": "button in the card",
+      "expect": [
+        "GET /api/x/plan-like"
+      ],
+      "kind": "click"
+    },
+    {
+      "name": "link with a click handler",
+      "expect": [
+        "GET /api/x/terms-dialog"
+      ],
+      "kind": "click"
+    },
+    {
+      "name": "hover intent (timer in mouseenter)",
+      "expect": [
+        "GET /api/x/hover-intent"
+      ],
+      "kind": "hover"
+    },
+    {
+      "name": "mousedown handler",
+      "expect": [
+        "GET /api/x/mousedown"
+      ],
+      "kind": "click"
+    },
+    {
+      "name": "keyup suggest",
+      "expect": [
+        "GET /api/x/suggest?q=*"
+      ]
+    },
+    {
+      "name": "list in a scrolling box",
+      "expect": [
+        "GET /api/x/box?page=1"
+      ],
+      "kind": "scroll"
+    },
+    {
+      "name": "list rendered anew",
+      "expect": [
+        "GET /api/x/pick/{n}"
+      ],
+      "kind": "click"
+    },
+    {
+      "name": "modal: confirm after cancel",
+      "expect": [
+        "POST /api/x/archive-all"
+      ],
+      "kind": "click"
+    },
+    {
+      "name": "custom upload button",
+      "expect": [
+        "POST /api/x/custom-upload"
+      ]
+    },
+    {
+      "name": "folder picker made on the spot",
+      "expect": [
+        "GET /api/x/folder-picked"
+      ],
+      "kind": "click"
+    },
+    {
+      "name": "25 alerts",
+      "expect": [
+        "GET /api/x/after-alerts"
+      ],
+      "kind": "click"
+    },
+    {
+      "name": "GET that approves (held)",
+      "expect": [
+        "GET /api/x/orders/7/approve"
+      ],
+      "kind": "click"
+    },
+    {
+      "name": "form checked by script",
+      "expect": [
+        "POST /api/x/jsform"
+      ],
+      "kind": "submit"
+    },
+    {
+      "name": "list in a scrolling box, page 2",
+      "expect": [
+        "GET /api/x/box?page=2"
+      ],
+      "kind": "scroll"
+    }
+  ],
+  "forbidden": [
+    "GET /api/x/logged-out",
+    "GET /api/x/signed-out",
+    "GET /api/x/vn-logged-out",
+    "GET /api/x/icon-logged-out",
+    "GET /api/x/orders/7/approve",
+    "GET /api/x/toggle?on=*"
+  ],
+  "server_max": {
+    "GET /x/nav-target": 1,
+    "GET /api/x/row/{id}": 1,
+    "GET /api/x/more?n=*": 2,
+    "GET /api/x/pick/{n}": 2,
+    "GET /x/popped": 1,
+    "GET /x/newtab?q=*": 1
+  },
+  "urls": [
+    "/x/nav-target",
+    "/x/route",
+    "/x/popped"
+  ]
+}

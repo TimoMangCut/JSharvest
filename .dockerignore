@@ -1,0 +1,8 @@
+.git
+bin
+output
+profiles
+spike
+testbed
+docs
+*.log

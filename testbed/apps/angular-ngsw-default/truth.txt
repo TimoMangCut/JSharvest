@@ -1,0 +1,11 @@
+# Same app as angular-ngsw, with Angular's default SW registration (registerWhenStable:30000)
+# and polling that keeps the app unstable: the worker registers after 30 s.
+# Ground truth for this app: one marker per line, as JSHMARK:<category>:<name>.
+# How each one can be reached:
+JSHMARK:entry:main                 # main bundle, from <script src>
+JSHMARK:route:about                # lazy route chunk (loadComponent), routerLink on /
+JSHMARK:route:hidden               # lazy route chunk (loadComponent), no link anywhere (route table only)
+JSHMARK:route:hidden-children      # lazy child routes (loadChildren), no link anywhere (route table only)
+JSHMARK:click:report               # chunk loaded by import() when the button on / is clicked
+JSHMARK:defer:idle                 # @defer (on idle) chunk on /, loads by itself once the browser is idle
+JSHMARK:defer:interaction          # @defer (on interaction) chunk on /, loads on click/keydown on its placeholder

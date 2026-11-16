@@ -1,0 +1,20 @@
+# Markers the capture must keep finding; written by testbed score -write-baseline.
+JSHMARK:entry:main
+JSHMARK:inline:html
+JSHMARK:eval:main
+JSHMARK:route:home
+JSHMARK:route:about
+JSHMARK:route:login
+JSHMARK:route:hidden
+JSHMARK:route:account
+JSHMARK:route:admin
+JSHMARK:click:report
+JSHMARK:scroll:comments
+JSHMARK:form:welcome
+JSHMARK:timer:telemetry
+JSHMARK:worker:main
+JSHMARK:worker:dep
+JSHMARK:sw:main
+JSHMARK:sw:dep
+JSHMARK:shared-worker:main
+JSHMARK:iframe:cross-site

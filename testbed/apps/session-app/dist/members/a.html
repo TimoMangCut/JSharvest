@@ -1,0 +1,12 @@
+<!doctype html><title>a</title><p>a</p>
+<!-- explore (4.6): a control that ends the session in the page alone, under
+     a harmless name; the crawl must notice, put the session back, and go on
+     to the pages after this one. -->
+<button id="reset">Reset view</button>
+<script>
+console.debug("JSHMARK:members:a");
+document.getElementById('reset').addEventListener('click', () => {
+  document.cookie = 'session=; max-age=0; path=/';
+  localStorage.clear();
+});
+</script>

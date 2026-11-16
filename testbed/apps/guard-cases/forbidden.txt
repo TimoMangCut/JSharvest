@@ -1,0 +1,21 @@
+# With the guard on, none of these may reach the server.
+/api/write-fetch
+/api/write-put
+/api/write-xhr
+/api/write-beacon
+/api/write-keepalive
+/api/write-worker
+/api/write-form
+/api/logout
+/graphql?op=mutation
+/img/logout.gif
+/users/sign_out
+/api/%64elete
+/api/notes
+/graphql?op=bom
+/ws
+/api/write-via-sw
+/api/write-popup
+/prefetch/sign-out
+/api/write-sw-own
+/api/write-shared

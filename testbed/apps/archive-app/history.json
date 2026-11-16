@@ -1,0 +1,238 @@
+{
+  "comment": "The fake archive (testbed serve, /fake/\u2026): each capture of the Wayback (cdx), of OTX and of Common Crawl. file: under history/; status '-' is a revisit of the file's digest; coded: the archive stored it gzip-coded; redirect: the memento moves to this capture's time stamp from another. The gate lists with -since 2020-01-01: revisit-only.js has revisits since, its first capture before (ARC-03). The CDX server answers its first query with the Internet Archive's offline page as a 200, and one later page with a 502 (ARC-05). Round 17: a source map and an asset-manifest.json the Wayback archived (MAX-04); warc-only.js only in Common Crawl's WARC file, the newest collection answering a 504 once (MAX-01); urlscan's scan of the front page, whose result names urlscan-only.js (MAX-05).",
+  "wayback": [
+    {
+      "ts": "20210305101010",
+      "url": "http://127.0.0.1:8770/static/gone.js",
+      "mime": "application/javascript",
+      "status": "200",
+      "file": "gone.js"
+    },
+    {
+      "ts": "20220115120000",
+      "url": "http://127.0.0.1:8770/assets/old-2022.js",
+      "mime": "application/javascript",
+      "status": "200",
+      "file": "old-2022.js"
+    },
+    {
+      "ts": "20220601120000",
+      "url": "http://127.0.0.1:8770/assets/old-2022.js",
+      "mime": "warc/revisit",
+      "status": "-",
+      "file": "old-2022.js"
+    },
+    {
+      "ts": "20220701000000",
+      "url": "http://127.0.0.1:8770/api/v1/legacy-export?format=csv",
+      "mime": "text/csv",
+      "status": "200",
+      "body": "id,total\n1,3\n"
+    },
+    {
+      "ts": "20220801000000",
+      "url": "http://127.0.0.1:8770/assets/coded.js",
+      "mime": "application/javascript",
+      "status": "200",
+      "file": "coded.js",
+      "coded": true
+    },
+    {
+      "ts": "20230301000000",
+      "url": "http://127.0.0.1:8770/assets/old-2023.js",
+      "mime": "application/javascript",
+      "status": "200",
+      "file": "old-2023.js"
+    },
+    {
+      "ts": "20230401000000",
+      "url": "http://127.0.0.1:8770/legacy/app.js",
+      "mime": "application/javascript",
+      "status": "200",
+      "file": "old-2022.js"
+    },
+    {
+      "ts": "20230501000000",
+      "url": "http://127.0.0.1:8770/assets/app.js?token=abcdef0123456789secret",
+      "mime": "application/javascript",
+      "status": "200",
+      "file": "app-today.js"
+    },
+    {
+      "ts": "20240101000000",
+      "url": "http://127.0.0.1:8770/assets/app.js",
+      "mime": "application/javascript",
+      "status": "200",
+      "file": "app-today.js"
+    },
+    {
+      "ts": "20240102000000",
+      "url": "http://cdn.elsewhere.test/lib.js",
+      "mime": "application/javascript",
+      "status": "200",
+      "body": "fetch('/api/v9/out-of-scope');"
+    },
+    {
+      "ts": "20240201000000",
+      "url": "http://127.0.0.1:8770/assets/vendor.jquery.js",
+      "mime": "application/javascript",
+      "status": "200",
+      "body": "/* jquery */"
+    },
+    {
+      "ts": "20240301000000",
+      "url": "http://127.0.0.1:8770/assets/otx-only.js",
+      "mime": "application/javascript",
+      "status": "200",
+      "file": "otx-only.js",
+      "cdx": false
+    },
+    {
+      "ts": "20240410000000",
+      "url": "http://127.0.0.1:8770/assets/cc-only.js",
+      "mime": "application/javascript",
+      "status": "200",
+      "file": "cc-only.js",
+      "cdx": false
+    },
+    {
+      "ts": "20230601000000",
+      "url": "http://127.0.0.1:8770/",
+      "mime": "text/html",
+      "status": "200",
+      "file": "index-2023.html"
+    },
+    {
+      "ts": "20230602000000",
+      "url": "http://127.0.0.1:8770/login",
+      "mime": "text/html",
+      "status": "200",
+      "file": "challenge.html"
+    },
+    {
+      "ts": "20230601000500",
+      "url": "http://127.0.0.1:8770/static/html-only.js",
+      "mime": "application/javascript",
+      "status": "200",
+      "file": "html-only.js",
+      "cdx": false
+    },
+    {
+      "ts": "20230601000600",
+      "url": "http://127.0.0.1:8770/static/html-chunk.js",
+      "mime": "application/javascript",
+      "status": "200",
+      "file": "html-chunk.js",
+      "cdx": false
+    },
+    {
+      "ts": "20220901000000",
+      "url": "http://127.0.0.1:8770/assets/gateway-2022.js",
+      "mime": "application/javascript",
+      "status": "200",
+      "file": "gateway-2022.js"
+    },
+    {
+      "ts": "20190301000000",
+      "url": "http://127.0.0.1:8770/assets/revisit-only.js",
+      "mime": "application/javascript",
+      "status": "200",
+      "file": "revisit-only.js"
+    },
+    {
+      "ts": "20230701000000",
+      "url": "http://127.0.0.1:8770/assets/revisit-only.js",
+      "mime": "warc/revisit",
+      "status": "-",
+      "file": "revisit-only.js"
+    },
+    {
+      "ts": "20240701000000",
+      "url": "http://127.0.0.1:8770/assets/revisit-only.js",
+      "mime": "warc/revisit",
+      "status": "-",
+      "file": "revisit-only.js"
+    },
+    {
+      "ts": "20220905000000",
+      "url": "http://127.0.0.1:8770/static/js/build-2022.js.map",
+      "mime": "application/json",
+      "status": "200",
+      "file": "build-2022.js.map"
+    },
+    {
+      "ts": "20220905000100",
+      "url": "http://127.0.0.1:8770/asset-manifest.json",
+      "mime": "application/json",
+      "status": "200",
+      "file": "asset-manifest-2022.json"
+    },
+    {
+      "ts": "20220905000200",
+      "url": "http://127.0.0.1:8770/static/js/manifest-only.js",
+      "mime": "application/javascript",
+      "status": "200",
+      "file": "manifest-only.js",
+      "cdx": false
+    }
+  ],
+  "otx": [
+    {
+      "url": "http://127.0.0.1:8770/assets/otx-only.js",
+      "date": "2024-03-01T00:00:00",
+      "httpcode": 200
+    },
+    {
+      "url": "http://127.0.0.1:8770/api/v1/coupons",
+      "date": "2024-03-02T00:00:00",
+      "httpcode": 200
+    },
+    {
+      "url": "http://127.0.0.1:8770/assets/old-2022.js",
+      "date": "2022-02-01T00:00:00",
+      "httpcode": 200
+    }
+  ],
+  "commoncrawl": [
+    {
+      "timestamp": "20240401000000",
+      "url": "http://127.0.0.1:8770/api/v1/legacy-export",
+      "mime": "text/csv",
+      "status": "200"
+    },
+    {
+      "timestamp": "20240401000000",
+      "url": "http://127.0.0.1:8770/assets/app.js",
+      "mime": "application/javascript",
+      "status": "200"
+    },
+    {
+      "timestamp": "20240401000000",
+      "url": "http://127.0.0.1:8770/assets/cc-only.js",
+      "mime": "application/javascript",
+      "status": "200",
+      "file": "cc-only.js"
+    },
+    {
+      "timestamp": "20240402000000",
+      "url": "http://127.0.0.1:8770/assets/warc-only.js",
+      "mime": "application/javascript",
+      "status": "200",
+      "file": "warc-only.js",
+      "warc": true
+    }
+  ],
+  "urlscan": [
+    {
+      "id": "0190f1a2-scan-0001",
+      "time": "2025-06-01T10:00:00.000Z",
+      "page": "http://127.0.0.1:8770/",
+      "urls": [
+        "http://127.0.0.1:8770/",
+        "http://127.0.0.1:8770/assets/app.js",
+        "http://127.0.0.1:8770/assets/urlscan-only.js",
+        "http://cdn.elsewhere.test/x.js"
+      ]
+    }
+  ]
+}

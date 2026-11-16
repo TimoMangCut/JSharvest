@@ -1,0 +1,1 @@
+{"version":3,"file":"app.js","sources":["webpack:///./src/admin/users.ts"],"sourcesContent":["export const purge = (id: string) => fetch(`/api/from-guessed-map/users/${id}`, { method: 'DELETE' });\n"],"mappings":""}

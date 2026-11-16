@@ -1,0 +1,13 @@
+{
+  "comment": "testbed/monitor-check.sh: what jsharvest monitor must report from build v1 (dist) to build v2 (dist-v2) of monitor-app, every change of severity low or above, and nothing else at those severities. A key holds the host (127.0.0.1:8770) and the template.",
+  "v1_to_v2": [
+    {"severity": "high", "kind": "endpoint_new", "key": "POST 127.0.0.1:8770/api/admin/export"},
+    {"severity": "high", "kind": "param_new", "key": "GET 127.0.0.1:8770/api/search include_deleted"},
+    {"severity": "high", "kind": "status_changed", "key": "GET 127.0.0.1:8770/api/report"},
+    {"severity": "medium", "kind": "endpoint_new", "key": "GET 127.0.0.1:8770/api/news"},
+    {"severity": "medium", "kind": "endpoint_gone", "key": "GET 127.0.0.1:8770/api/old-feed"},
+    {"severity": "medium", "kind": "param_new", "key": "GET 127.0.0.1:8770/api/search page"},
+    {"severity": "low", "kind": "script_changed", "key": "127.0.0.1:8770/assets/app.js"},
+    {"severity": "low", "kind": "script_new", "key": "127.0.0.1:8770/assets/extra.js"}
+  ]
+}

@@ -1,0 +1,4 @@
+# Markers the capture must keep finding; written by testbed score -write-baseline.
+JSHMARK:maps:app
+JSHMARK:maps:main
+JSHMARK:maps:vendors

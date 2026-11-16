@@ -1,0 +1,12 @@
+# Ground truth for this app: one marker per line, as JSHMARK:<category>:<name>.
+# Same cases as vite-vanilla; the Workbox precache manifest lists every chunk.
+JSHMARK:entry:main            # main module, from <script type=module>
+JSHMARK:inline:html           # inline <script> in index.html
+JSHMARK:route:home            # lazy route chunk, loaded on /
+JSHMARK:route:about           # lazy route chunk, linked from the nav
+JSHMARK:route:hidden          # lazy route chunk, no link anywhere (route table only)
+JSHMARK:shared:format         # chunk shared by /about and /hidden, listed in __vite__mapDeps
+JSHMARK:click:report          # chunk loaded by clicking a button on /
+JSHMARK:timer:telemetry       # chunk loaded 800 ms after start
+JSHMARK:worker:main           # module worker
+JSHMARK:worker:dep            # chunk the worker imports

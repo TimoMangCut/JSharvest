@@ -1,0 +1,23 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>lan-app</title>
+<!-- A public page that reaches for the internal network. Every request to
+     127.0.0.1:8771 (or a name for it) must be held back by the guard's
+     layer 1, except the one to lan.jsh.test when the user's
+     -host-resolver-rules map it: that host is internal and allowed. -->
+<img src="http://127.0.0.1:8771/lan/img" alt="">
+<script>
+const nc = { mode: 'no-cors' };
+fetch('/ok').catch(() => {});
+fetch('http://127.0.0.1:8771/lan/fetch', nc).catch(() => {});
+fetch('http://2130706433:8771/lan/num', nc).catch(() => {});
+fetch('http://localhost:8771/lan/localhost', nc).catch(() => {});
+fetch('http://lan.jsh.test:8771/lan/rules', nc).catch(() => {});
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js')
+    .then(() => navigator.serviceWorker.ready)
+    .then((r) => r.active.postMessage('go'))
+    .catch(() => {});
+}
+setTimeout(() => fetch('/done').catch(() => {}), 2500);
+</script>

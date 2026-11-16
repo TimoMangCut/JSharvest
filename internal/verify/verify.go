@@ -1,0 +1,973 @@
+package verify
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/url"
+	"os"
+	"path/filepath"
+	"slices"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/TimoMangCut/JSharvest/internal/endpoints"
+	"github.com/TimoMangCut/JSharvest/internal/guard"
+	"github.com/TimoMangCut/JSharvest/internal/marker"
+	"github.com/TimoMangCut/JSharvest/internal/replay"
+	"github.com/TimoMangCut/JSharvest/internal/traffic"
+)
+
+// Verdicts.
+const (
+	Alive           = "verified_alive"   // the route answers as itself
+	Resource404     = "resource_404"     // a route that says its sample item does not exist
+	AuthWall        = "auth_wall_opaque" // the prefix answers 401/403 to any path: a login is needed to tell
+	ServerError     = "server_error"     // a 5xx the canary does not give
+	WriteUnverified = "write_unverified" // a write whose GET probe matched a method-scoped (404/405) canary (-allow-write needed)
+	ClientRoute     = "client_route"     // a bare string (-include-strings) that answered with the SPA's shell
+	DeadOrFP        = "dead_or_fp"       // what any path gets: no such route, or the SPA's shell
+	Unreachable     = "unreachable"      // no answer
+	WAFBlocked      = "waf_blocked"      // a CDN/WAF answered in the application's place: nothing to tell (round 25H)
+	HostBlocked     = "host_blocked"     // not sent: the host was given up, a vendor blocks the client there
+	HostGated       = "host_gated"       // not sent: every probe of the host answered as its canary did, alike (round 25I)
+	Skipped         = "skipped"          // not sent (Reason says why)
+	Planned         = "planned"          // -dry-run: what would be sent
+)
+
+// verdictRank orders what a line that no candidate answered as a route
+// for is said to be: the most a candidate told.
+var verdictRank = map[string]int{Unreachable: 1, HostBlocked: 1, HostGated: 1, DeadOrFP: 2, WAFBlocked: 3, ClientRoute: 4, WriteUnverified: 5, Planned: 6, ServerError: 7, AuthWall: 8}
+
+// maxPrefixes bounds the gateway prefixes of one origin a canary is asked
+// of; the others share their origin's root's.
+const maxPrefixes = 12
+
+// Options are a verification's.
+type Options struct {
+	Target, Role      string
+	Drafts            []Draft
+	Sender            *replay.Sender
+	Policy            replay.Policy
+	InScope           func(host string) bool
+	Recorded          map[string]string
+	AllowWrite        bool
+	IncludeDocs       bool
+	IncludeStrings    bool
+	IncludeSourceOnly bool
+	Identity          *replay.Identity // nil: a visitor's requests
+	Dir               string           // <role>/verify
+	// GateAfter: that many probes in a row on a host, each answering as
+	// its canary and all alike (a login, a device or app header before
+	// every route), and the host's other drafts are not sent (round 25I,
+	// N4). 0: never.
+	GateAfter int
+	// Concurrency: hosts verified at once, each one request at a time
+	// (round 25K); the Sender's -rate stays the ceiling on all. 1 (or
+	// less): one host after another, in the order of probeOrder.
+	Concurrency  int
+	Cloud        []endpoints.IntelURL // cloud storage URLs from intel.json
+	IntelDir     string               // role directory whose intel.json is updated when writable
+	NoCloudProbe bool                 // -no-cloud-probe: skip safe cloud ACL checks
+}
+
+// CloudCheck is endpoints.CloudCheck.
+type CloudCheck = endpoints.CloudCheck
+
+// Result is what one draft came to.
+type Result struct {
+	ID             string   `json:"id"`
+	Operation      string   `json:"operation,omitempty"`
+	Source         string   `json:"source"`
+	Method         string   `json:"method"`
+	Path           string   `json:"path"`
+	Confidence     string   `json:"confidence,omitempty"`
+	Tier           string   `json:"tier"`
+	Verdict        string   `json:"verdict"`
+	Reason         string   `json:"reason,omitempty"`
+	Sent           string   `json:"sent,omitempty"` // the method sent (GET: a probe of a write)
+	URL            string   `json:"url,omitempty"`
+	Prefix         string   `json:"prefix,omitempty"` // origin + gateway prefix of its canary
+	Answer         *Sig     `json:"answer,omitempty"`
+	VerifiedBase   string               `json:"verified_base,omitempty"`
+	VerifiedMethod string               `json:"verified_method,omitempty"`
+	ServerMissing  []string             `json:"server_missing_params,omitempty"`
+	AuthFlows      []endpoints.AuthFlow `json:"auth_flows,omitempty"`
+}
+
+// Canary is a gateway prefix's answer to a path that cannot exist.
+type Canary struct {
+	Prefix  string `json:"prefix"`
+	URL     string `json:"url"`
+	Answer  *Sig   `json:"answer,omitempty"`
+	Options *Sig   `json:"options,omitempty"`
+	Err     string `json:"error,omitempty"`
+	Drafts  int    `json:"drafts"`
+}
+
+// Report is verify.json.
+type Report struct {
+	Target     string    `json:"target"`
+	Role       string    `json:"role"`
+	DryRun     bool      `json:"dry_run,omitempty"`
+	AllowWrite bool      `json:"allow_write,omitempty"`
+	Started    time.Time `json:"started"`
+	Ended      time.Time `json:"ended"`
+	Sent       int       `json:"sent"`
+	Stopped    string    `json:"stopped,omitempty"`
+	// HostsBlocked are the hosts given up: a vendor blocked the client
+	// there, a control request too (round 25H).
+	HostsBlocked map[string]string `json:"hosts_blocked,omitempty"`
+	// HostsGated are the hosts whose probes all answered alike, as their
+	// canaries did: the rest of their drafts were not sent (round 25I).
+	HostsGated map[string]string `json:"hosts_gated,omitempty"`
+	Verdicts   map[string]int    `json:"verdicts"`
+	Tiers      map[string]int    `json:"tiers"`
+	Confidence map[string]int    `json:"confidence"`
+	Canaries    []*Canary         `json:"canaries"`
+	Results     []Result          `json:"results"`
+	CloudChecks []CloudCheck      `json:"cloud_checks,omitempty"`
+}
+
+// Run verifies the drafts. With a dry-run Sender nothing leaves: each
+// request it would send is written to its log, and each draft's verdict
+// is planned.
+func Run(ctx context.Context, o Options) (*Report, error) {
+	rep := &Report{Target: o.Target, Role: o.Role, DryRun: o.Sender.DryRun(), AllowWrite: o.AllowWrite, Started: time.Now().UTC(),
+		Verdicts: map[string]int{}, Tiers: map[string]int{}, Confidence: map[string]int{}}
+	v := &verifier{o: o, rep: rep, canaries: map[string]*Canary{}, perOrigin: map[string]int{}, gates: map[string]*gate{}, parents: map[string]int{}, hostPrefixes: map[string]int{}, hostMu: map[string]*sync.Mutex{}}
+	// The hosts: those of the drafts in scope, nothing else.
+	hosts := map[string]bool{}
+	for _, d := range o.Drafts {
+		for _, t := range append([]string{d.URL}, d.Candidates...) {
+			if u, err := url.Parse(t); err == nil && u.Host != "" && !d.ThirdParty && o.InScope(u.Hostname()) {
+				hosts[u.Host] = true
+			}
+		}
+	}
+	o.Sender.Allow(hosts, o.Recorded)
+	// Drafts that differ only in their operation (and id) are the same
+	// request: it is sent once and its answer is each one's.
+	var uniq []Draft
+	rep0 := make([]int, len(o.Drafts)) // draft -> its request's place in uniq
+	byReq := map[string]int{}
+	for i, d := range o.Drafts {
+		c := d
+		c.ID, c.Operation = "", ""
+		k := ""
+		if b, err := json.Marshal(c); err == nil {
+			k = string(b)
+		}
+		if k == "" {
+			rep0[i] = len(uniq)
+			uniq = append(uniq, d)
+			continue
+		}
+		if j, ok := byReq[k]; ok {
+			rep0[i] = j
+			continue
+		}
+		byReq[k] = len(uniq)
+		rep0[i] = len(uniq)
+		uniq = append(uniq, d)
+	}
+	all := o.Drafts
+	v.o.Drafts, o.Drafts = uniq, uniq
+	results := make([]*Result, len(uniq))
+	order := v.probeOrder(o.Drafts)
+	if o.Concurrency <= 1 {
+		for _, i := range order {
+			if ctx.Err() != nil {
+				break
+			}
+			r := v.one(ctx, o.Drafts[i])
+			results[i] = &r
+		}
+	} else {
+		v.byHost(ctx, order, results)
+	}
+	// verify.json lists the drafts in their own order, whatever order they
+	// were sent in.
+	for i, d := range all {
+		r := results[rep0[i]]
+		if r == nil {
+			continue
+		}
+		res := *r
+		res.ID, res.Operation = d.ID, d.Operation
+		rep.Tiers[d.Tier]++
+		if d.Confidence != "" {
+			rep.Confidence[d.Confidence]++
+		}
+		rep.Verdicts[res.Verdict]++
+		rep.Results = append(rep.Results, res)
+	}
+	for _, k := range slices.Sorted(mapsKeys(v.canaries)) {
+		rep.Canaries = append(rep.Canaries, v.canaries[k])
+	}
+	rep.Sent = o.Sender.Count()
+	rep.Stopped = o.Sender.Stopped()
+	rep.HostsBlocked = o.Sender.BlockedHosts()
+	for h, g := range v.gates {
+		if g.why != "" {
+			if rep.HostsGated == nil {
+				rep.HostsGated = map[string]string{}
+			}
+			rep.HostsGated[h] = g.why
+		}
+	}
+	if !o.NoCloudProbe && o.Sender != nil && !o.Sender.DryRun() && ctx.Err() == nil {
+		intelDir := o.IntelDir
+		if intelDir == "" && filepath.Base(o.Dir) == "verify" {
+			intelDir = filepath.Dir(o.Dir)
+		}
+		cloud := o.Cloud
+		if len(cloud) == 0 && intelDir != "" {
+			var in endpoints.Intel
+			if b, err := os.ReadFile(filepath.Join(intelDir, endpoints.IntelFile)); err == nil && json.Unmarshal(b, &in) == nil {
+				cloud = in.Cloud
+			}
+		}
+		if len(cloud) > 0 {
+			so := o.Sender.Options()
+			probed, checks := endpoints.ProbeCloud(ctx, cloud, endpoints.CloudProbeOptions{
+				Proxy:        so.Proxy,
+				HostRules:    so.HostRules,
+				AllowPrivate: so.AllowPrivate,
+				Insecure:     so.Insecure,
+				Resolver:     so.Resolver,
+				UserAgent:    so.UserAgent,
+			})
+			rep.CloudChecks = checks
+			if intelDir != "" {
+				_ = endpoints.UpdateIntelCloud(intelDir, probed)
+			}
+		}
+	}
+	rep.Ended = time.Now().UTC()
+	return rep, ctx.Err()
+}
+
+func mapsKeys[V any](m map[string]V) func(func(string) bool) {
+	return func(yield func(string) bool) {
+		for k := range m {
+			if !yield(k) {
+				return
+			}
+		}
+	}
+}
+
+type verifier struct {
+	o         Options
+	rep       *Report
+	canaries  map[string]*Canary // origin+prefix
+	perOrigin map[string]int
+	gates     map[string]*gate // host
+	parents   map[string]int   // origin: 1-segment parent canaries past maxPrefixes
+	// hostPrefixes: how many gateway prefixes a host's drafts that are
+	// sent have (probeOrder): a host with one or two needs no third to be
+	// found gated.
+	hostPrefixes map[string]int
+	// mu guards the maps every host's probes share (canaries, perOrigin,
+	// parents, gates, hostMu); hostMu holds a host for one probe at a time.
+	mu     sync.Mutex
+	hostMu map[string]*sync.Mutex
+}
+
+// gate is what a host's probes said so far: alike, as their canaries.
+type gate struct {
+	first    *Sig
+	n        int
+	prefixes map[string]bool
+	broken   bool   // a probe told something: the host is not gated
+	why      string // set once gated
+}
+
+// gateStatus are answers a gateway gives before routing: a login, a
+// device or app check (e.g., 400 "unauthorized_client"), a proxy's.
+// A router's "no such route" (404, 405) and an SPA's shell (2xx, 3xx) are
+// routing, not a gate: a host answering so has routes the drafts may miss
+// and hit alike, and is never given up for it (round 25I review).
+var gateStatus = map[int]bool{400: true, 401: true, 403: true, 407: true, 412: true, 426: true, 428: true}
+
+// gatePrefixes is how many gateway prefixes a gate must be seen on: one
+// prefix behind a login (/opaque) is that prefix's, not the host's.
+const gatePrefixes = 3
+
+// gateOf is a host's gate (made when make is set), under v.mu.
+func (v *verifier) gateOf(host string, make bool) *gate {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	g := v.gates[host]
+	if g == nil && make {
+		g = &gate{}
+		v.gates[host] = g
+	}
+	return g
+}
+
+// lockHost holds a host for one probe; it returns the unlock.
+func (v *verifier) lockHost(host string) func() {
+	v.mu.Lock()
+	m := v.hostMu[host]
+	if m == nil {
+		m = &sync.Mutex{}
+		v.hostMu[host] = m
+	}
+	v.mu.Unlock()
+	m.Lock()
+	return m.Unlock
+}
+
+// noteGate counts a probe's answer toward its host's gate.
+func (v *verifier) noteGate(host string, sig Sig, r *Result, asCanary bool) {
+	if v.o.GateAfter <= 0 {
+		return
+	}
+	g := v.gateOf(host, true)
+	if g.broken || g.why != "" {
+		return
+	}
+	if !asCanary || !gateStatus[sig.Status] || (r.Verdict != DeadOrFP && r.Verdict != AuthWall) || g.first != nil && !Same(sig, *g.first) {
+		g.broken = true
+		return
+	}
+	if g.first == nil {
+		s := sig
+		g.first = &s
+		g.prefixes = map[string]bool{}
+	}
+	g.prefixes[r.Prefix] = true
+	if g.n++; g.n >= v.o.GateAfter && len(g.prefixes) >= min(gatePrefixes, max(1, v.hostPrefixes[host])) {
+		g.why = fmt.Sprintf("the host answered %d probes alike (%d %s), each as its canary: a gate before every route (a login, a device or app header); "+
+			"verify it as a role (-role) or with the app's headers", g.n, sig.Status, sig.Type)
+	}
+}
+
+func (v *verifier) one(ctx context.Context, d Draft) Result {
+	r := Result{ID: d.ID, Source: d.Source, Method: d.Method, Path: d.Path, Confidence: d.Confidence, Tier: d.Tier}
+	if why := v.preSkip(d); why != "" {
+		r.Verdict, r.Reason = Skipped, why
+		return r
+	}
+	targets, bases := []string{d.URL}, []string{""}
+	if d.URL == "" {
+		targets, bases = d.Candidates, d.CandidateBases
+	}
+	// Each candidate in turn, to the first that answers as a route; one
+	// the policy will not send (a base under /auth) is passed over, not
+	// the end of the line (POL-23-1).
+	var best *Result
+	for i, t := range targets {
+		u, err := url.Parse(t)
+		if err != nil || !v.o.InScope(u.Hostname()) {
+			if best == nil {
+				r.Verdict, r.Reason = Skipped, "out_of_scope"
+			}
+			continue
+		}
+		res := v.probe(ctx, d, t)
+		res.ID, res.Source, res.Method, res.Path, res.Confidence, res.Tier = r.ID, r.Source, r.Method, r.Path, r.Confidence, r.Tier
+		if (res.Verdict == Alive || res.Verdict == Resource404) && i < len(bases) && bases[i] != "" {
+			res.VerifiedBase = bases[i]
+		}
+		switch {
+		case res.Verdict == Alive || res.Verdict == Resource404:
+			return res
+		case res.Verdict == Skipped:
+			if best == nil && (r.Verdict == "" || r.Verdict == Skipped && r.Reason == "out_of_scope") {
+				r = res // what is said of the line if no candidate is sent
+			}
+		case best == nil || verdictRank[res.Verdict] > verdictRank[best.Verdict]:
+			b := res
+			best = &b
+		}
+		if errors.Is(ctx.Err(), context.Canceled) || v.o.Sender.Stopped() != "" {
+			break
+		}
+	}
+	if best != nil {
+		return *best
+	}
+	return r
+}
+
+// preSkip says why a draft is not sent at all, "" when it may be.
+func (v *verifier) preSkip(d Draft) string {
+	switch {
+	case d.ThirdParty:
+		return "out_of_scope"
+	case d.SourceOnly && !v.o.IncludeSourceOnly:
+		return "source_only (use -include-source-only to probe)"
+	case d.Confidence == "string" && d.Method == "" && !v.o.IncludeStrings:
+		return "bare string (use -include-strings to probe)"
+	case d.Confidence == "doc" && !v.o.IncludeDocs:
+		return "a document's line (-include-docs)"
+	case d.URL == "" && len(d.Candidates) == 0:
+		return "no URL: " + d.Why
+	}
+	return ""
+}
+
+// sendPlan is the method a draft goes to target with, or why it is not
+// sent there: the policy's word (never, not read either) or a
+// destructive URL.
+func (v *verifier) sendPlan(d Draft, target string) (method, why string) {
+	method = d.Method
+	if method == "" {
+		method = "GET" // no method known: a read says whether it is there
+	}
+	real := traffic.Entry{Method: method, URL: target, Body: traffic.Body{Body: string(d.Body)},
+		Headers: map[string]string{"content-type": "application/json"}}
+	read := traffic.Entry{Method: "GET", URL: target}
+	switch dec := v.o.Policy.Classify(real, false); {
+	case dec.Kind == replay.Never:
+		return "", "never sent: " + dec.Reason
+	case dec.Kind == replay.Read && (method == "GET" || method == "HEAD"):
+	case v.o.AllowWrite && (dec.Kind == replay.Write || dec.Kind == replay.Read):
+	default:
+		// A write, and no -allow-write (or a destructive one, never): the
+		// path is read instead, which changes nothing; a router that
+		// knows the route says so (405 and its Allow, a 401 the canary
+		// does not get).
+		if rd := v.o.Policy.Classify(read, false); rd.Kind != replay.Read {
+			return "", "not read either: " + rd.Reason
+		}
+		method = "GET"
+	}
+	if guard.Destructive(target) {
+		return "", "a destructive URL"
+	}
+	return method, ""
+}
+
+// firstTarget is the URL a draft is sent to first: its own, or the first
+// candidate in scope the policy sends; "" when none is.
+func (v *verifier) firstTarget(d Draft) string {
+	if v.preSkip(d) != "" {
+		return ""
+	}
+	targets := []string{d.URL}
+	if d.URL == "" {
+		targets = d.Candidates
+	}
+	for _, t := range targets {
+		if u, err := url.Parse(t); err == nil && v.o.InScope(u.Hostname()) {
+			if _, why := v.sendPlan(d, t); why == "" {
+				return t
+			}
+		}
+	}
+	return ""
+}
+
+// probeOrder is the order the drafts are sent in (round 25J): a host's
+// gateway prefixes taken in turn (one draft of each, then the next of
+// each), so that a gate before every route shows on several prefixes
+// within a few probes, not after the whole of the first service. Drafts
+// not sent keep their place at the front. Deterministic: groups in the
+// order they first appear, drafts in their order within a group. It also
+// counts each host's prefixes, among the drafts that are sent.
+func (v *verifier) probeOrder(ds []Draft) []int {
+	var front []int
+	groups := map[string][]int{}
+	var keys []string
+	for i, d := range ds {
+		t := v.firstTarget(d)
+		if t == "" {
+			front = append(front, i)
+			continue
+		}
+		origin, prefix := GatewayPrefix(t)
+		k := origin + prefix
+		if _, ok := groups[k]; !ok {
+			keys = append(keys, k)
+			v.hostPrefixes[hostOf(t)]++
+		}
+		groups[k] = append(groups[k], i)
+	}
+	out := front
+	for round := 0; ; round++ {
+		took := false
+		for _, k := range keys {
+			if round < len(groups[k]) {
+				out = append(out, groups[k][round])
+				took = true
+			}
+		}
+		if !took {
+			return out
+		}
+	}
+}
+
+// probe sends one draft to one URL (or the read that stands for a write),
+// after its prefix's canary.
+func (v *verifier) probe(ctx context.Context, d Draft, target string) Result {
+	r := Result{URL: target}
+	sendMethod, why := v.sendPlan(d, target)
+	if why != "" {
+		r.Verdict, r.Reason = Skipped, why
+		return r
+	}
+	r.Sent = sendMethod
+	sd := d
+	sd.Method = sendMethod
+	if sendMethod != d.Method {
+		sd.Body = nil
+	}
+	raw, err := sd.raw(target, v.o.Identity == nil)
+	if err != nil {
+		r.Verdict, r.Reason = Skipped, err.Error()
+		return r
+	}
+	// One request at a time on a host (verify -concurrency): its gate,
+	// its canaries, its probes and their OPTIONS in turn.
+	defer v.lockHost(hostOf(target))()
+	if g := v.gateOf(hostOf(target), false); g != nil && g.why != "" {
+		r.Verdict, r.Reason = HostGated, g.why
+		return r
+	}
+	if why := v.o.Sender.BlockedHosts()[hostOf(target)]; why != "" {
+		// Given up: no canary either (it would only log a refusal).
+		r.Verdict, r.Reason = HostBlocked, "not sent: the host was given up: "+why
+		return r
+	}
+	c := v.canary(ctx, d, target)
+	r.Prefix = c.Prefix
+	ans, err := v.send(ctx, raw, target, "verify", d.ID)
+	if errors.Is(err, replay.ErrHostBlocked) {
+		r.Verdict, r.Reason = HostBlocked, err.Error()
+		return r
+	}
+	if err != nil {
+		r.Verdict, r.Reason = Unreachable, err.Error()
+		return r
+	}
+	if v.o.Sender.DryRun() {
+		r.Verdict = Planned
+		return r
+	}
+	if ans.Err != "" {
+		r.Verdict, r.Reason = Unreachable, ans.Err
+		return r
+	}
+	if ans.Block != nil {
+		// The vendor's page, not the route's: an alive 403 it is not.
+		r.Verdict, r.Reason = WAFBlocked, ans.Block.String()
+		if why := v.o.Sender.BlockedHosts()[hostOf(target)]; why != "" {
+			r.Reason += "; the host was given up: " + why
+		}
+		return r
+	}
+	sig := SigOf(ans.Status, ans.Header, ans.Body)
+	r.Answer = &sig
+	if ans.Status >= 200 && ans.Status < 400 {
+		r.AuthFlows, _ = endpoints.ExtractAuthFlows(target, ans.Status, ans.Header, ans.Body)
+	}
+	v.judge(ctx, &r, d, sig, ans.Body, c, raw, target)
+	v.noteGate(hostOf(target), sig, &r, c.Answer != nil && Same(sig, *c.Answer))
+	return r
+}
+
+// judge sets a verdict from an answer and the canary of its prefix.
+func (v *verifier) judge(ctx context.Context, r *Result, d Draft, sig Sig, body []byte, c *Canary, raw []byte, target string) {
+	same := c.Answer != nil && Same(sig, *c.Answer)
+	st := sig.Status
+	switch {
+	case same && (st == 401 || st == 403):
+		// The prefix answers so to any path: its OPTIONS may still tell
+		// the route from none.
+		opt := v.options(ctx, raw, target, d.ID)
+		co := v.canaryOptions(ctx, c)
+		if opt != nil && co != nil && (opt.Status != co.Status || !strings.EqualFold(opt.Allow, co.Allow)) {
+			r.Verdict, r.Reason = Alive, "behind the prefix's auth wall, its OPTIONS differs from the canary's"
+			if opt.Allow != "" {
+				r.VerifiedMethod = methodFrom(opt.Allow, d.Method)
+			}
+			return
+		}
+		r.Verdict, r.Reason = AuthWall, "the prefix answers "+fmt.Sprint(st)+" to any path: run again with a role that is logged in"
+	case same && r.Sent != d.Method && d.Method != "" && (st == 404 || st == 405) && c.Answer != nil && c.Answer.MethodScoped:
+		// ENH-02: a write endpoint probed via read-only GET on a router that
+		// matches (method, path) (Express HTML or NestJS/Fastify JSON "Cannot GET …", or 405).
+		opt := v.options(ctx, raw, target, d.ID)
+		co := v.canaryOptions(ctx, c)
+		if opt != nil && co != nil && (opt.Status != co.Status || !strings.EqualFold(opt.Allow, co.Allow)) {
+			r.Verdict, r.Reason = Alive, "OPTIONS differs from the canary's"
+			if opt.Allow != "" {
+				r.VerifiedMethod = methodFrom(opt.Allow, d.Method)
+			}
+			return
+		}
+		r.Verdict = WriteUnverified
+		r.Reason = fmt.Sprintf("GET matched the %d canary; %s requires -allow-write to verify", st, d.Method)
+	case same && d.Confidence == "string" && d.Method == "" && c.Answer != nil && c.Answer.Status == 200 && strings.Contains(c.Answer.Type, "html"):
+		r.Verdict, r.Reason = ClientRoute, "bare string answered with the SPA's shell"
+	case same:
+		r.Verdict, r.Reason = DeadOrFP, "answers as any path does (the canary)"
+	case st >= 200 && st < 300:
+		r.Verdict = Alive
+	case st == 405:
+		r.Verdict, r.Reason = Alive, "405: the route is there, for another method"
+		r.VerifiedMethod = methodFrom(sig.Allow, d.Method)
+	case st == 400 || st == 415 || st == 422:
+		r.Verdict = Alive
+		r.ServerMissing = MissingParams(body)
+	case st == 401 || st == 403:
+		r.Verdict, r.Reason = Alive, "an auth guard the canary does not meet"
+	case st == 404:
+		r.Verdict, r.Reason = Resource404, "a 404 of its own, not the router's (the canary's)"
+	case st >= 500:
+		r.Verdict = ServerError
+	case st >= 300 && st < 400:
+		r.Verdict, r.Reason = Alive, "a redirect the canary does not get"
+	default:
+		r.Verdict = Alive
+	}
+	if r.VerifiedMethod == "" && r.Verdict == Alive && r.Sent == d.Method {
+		r.VerifiedMethod = d.Method
+	}
+}
+
+// methodFrom is the method an Allow header confirms: the line's, when it
+// lists it, else what it lists.
+func methodFrom(allow, method string) string {
+	var ms []string
+	for _, m := range strings.Split(allow, ",") {
+		if m = strings.ToUpper(strings.TrimSpace(m)); m != "" {
+			ms = append(ms, m)
+		}
+	}
+	if method != "" && slices.Contains(ms, method) {
+		return method
+	}
+	return strings.Join(ms, ",")
+}
+
+func (v *verifier) send(ctx context.Context, raw []byte, target, purpose, item string) (replay.Answer, error) {
+	if v.o.Identity != nil {
+		raw, _ = replay.Apply(raw, v.o.Identity, target, nil)
+	}
+	u, _ := url.Parse(target)
+	return v.o.Sender.Send(ctx, raw, u.Scheme, purpose, v.o.Role, item, nil)
+}
+
+// GatewayPrefix is a URL's first fixed path segments, two at most and
+// never all of them: /hub/auth of /hub/auth/v1/token, / of /health.
+func GatewayPrefix(rawURL string) (origin, prefix string) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", "/"
+	}
+	origin = u.Scheme + "://" + u.Host
+	segs := strings.Split(strings.Trim(u.EscapedPath(), "/"), "/")
+	var keep []string
+	for i, s := range segs {
+		if i == 2 || i == len(segs)-1 || s == "" || s == sampleUUID || s == "sample-item" || isNumber(s) {
+			break
+		}
+		keep = append(keep, s)
+	}
+	return origin, "/" + strings.Join(keep, "/")
+}
+
+func isNumber(s string) bool {
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return s != ""
+}
+
+// canary is the answer of the target's prefix to a path that cannot exist,
+// asked once.
+func (v *verifier) canary(ctx context.Context, d Draft, target string) *Canary {
+	c, cu, key := v.canaryFor(target)
+	if cu == "" {
+		return c
+	}
+	cd := Draft{ID: "canary", Method: "GET", Headers: d.Headers, SampleHeaders: d.SampleHeaders}
+	raw, err := cd.raw(cu, v.o.Identity == nil)
+	if err != nil {
+		c.Err = err.Error()
+		return c
+	}
+	ans, err := v.send(ctx, raw, cu, "canary", key)
+	return v.canaryAnswer(c, ans, err)
+}
+
+// canaryFor is the canary a target is judged against: one already asked
+// (cu ""), or a new one to ask at cu. Under v.mu: the canaries are every
+// host's (verify -concurrency).
+func (v *verifier) canaryFor(target string) (c *Canary, cu, key string) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	origin, prefix := GatewayPrefix(target)
+	key = origin + prefix
+	if c := v.canaries[key]; c != nil {
+		c.Drafts++
+		return c, "", key
+	}
+	if v.perOrigin[origin] >= maxPrefixes && prefix != "/" {
+		// ENH-13: fall back to the 1-segment parent (/chat of /chat/tools)
+		// before falling all the way back to origin root /. The parent is
+		// asked when no canary has it yet, within a budget of its own: a
+		// gateway's 13th service judged against / (an SPA's 200 shell)
+		// read every gateway refusal as a route (observed 14
+		// false verified_alive; round 25I review).
+		fellBack := false
+		if rest := strings.TrimPrefix(prefix, "/"); strings.Contains(rest, "/") {
+			seg, _, _ := strings.Cut(rest, "/")
+			if c := v.canaries[origin+"/"+seg]; c != nil {
+				c.Drafts++
+				return c, "", key
+			}
+			if v.parents[origin] < maxPrefixes {
+				v.parents[origin]++
+				prefix, key, fellBack = "/"+seg, origin+"/"+seg, true
+			}
+		}
+		if !fellBack {
+			prefix = "/"
+			key = origin + prefix
+			if c := v.canaries[key]; c != nil {
+				c.Drafts++
+				return c, "", key
+			}
+		}
+	}
+	v.perOrigin[origin]++
+	cu = strings.TrimRight(origin+prefix, "/") + "/" + marker.Slug()
+	c = &Canary{Prefix: key, URL: cu, Drafts: 1}
+	v.canaries[key] = c
+	return c, cu, key
+}
+
+// canaryAnswer notes a canary's answer.
+func (v *verifier) canaryAnswer(c *Canary, ans replay.Answer, err error) *Canary {
+	switch {
+	case err != nil:
+		c.Err = err.Error()
+	case ans.Err != "":
+		c.Err = ans.Err
+	case ans.Block != nil:
+		// A vendor's page is no baseline of the prefix's router.
+		c.Err = "blocked: " + ans.Block.String()
+	default:
+		s := SigOf(ans.Status, ans.Header, ans.Body)
+		c.Answer = &s
+	}
+	return c
+}
+
+// options is an OPTIONS of a request's URL, as it was (its headers).
+func (v *verifier) options(ctx context.Context, raw []byte, target, item string) *Sig {
+	line, rest, ok := bytes.Cut(raw, []byte("\r\n"))
+	if !ok {
+		return nil
+	}
+	_, after, _ := bytes.Cut(line, []byte(" "))
+	head, _, _ := bytes.Cut(rest, []byte("\r\n\r\n"))
+	var kept []string
+	for _, l := range strings.Split(string(head), "\r\n") {
+		n, _, _ := strings.Cut(l, ":")
+		if n = strings.ToLower(strings.TrimSpace(n)); n != "content-length" && n != "content-type" && l != "" {
+			kept = append(kept, l)
+		}
+	}
+	opt := []byte("OPTIONS " + string(after) + "\r\n" + strings.Join(kept, "\r\n") + "\r\n\r\n")
+	ans, err := v.send(ctx, opt, target, "options", item)
+	if err != nil || ans.Err != "" || ans.Block != nil {
+		return nil
+	}
+	s := SigOf(ans.Status, ans.Header, ans.Body)
+	return &s
+}
+
+func (v *verifier) canaryOptions(ctx context.Context, c *Canary) *Sig {
+	if c.Options != nil || c.Err != "" {
+		return c.Options
+	}
+	cd := Draft{ID: "canary", Method: "GET"}
+	raw, err := cd.Raw(c.URL)
+	if err != nil {
+		return nil
+	}
+	c.Options = v.options(ctx, raw, c.URL, c.Prefix)
+	return c.Options
+}
+
+// AliveKeys reads a verification's verdicts: the drafts' keys (method
+// path) that answered as routes, and the URL each answered at.
+func AliveKeys(verifyDir string) map[string]string {
+	out := map[string]string{}
+	b, err := os.ReadFile(filepath.Join(verifyDir, "verify.json"))
+	if err != nil {
+		return out
+	}
+	var rep Report
+	if json.Unmarshal(b, &rep) != nil {
+		return out
+	}
+	for _, r := range rep.Results {
+		if r.Verdict == Alive || r.Verdict == Resource404 {
+			out[r.Method+" "+r.Path] = r.URL
+		}
+	}
+	return out
+}
+
+// Write writes verify.json and verify.md (0600, in a 0700 directory).
+func Write(dir string, rep *Report) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	os.Chmod(dir, 0o700)
+	b, err := json.MarshalIndent(rep, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := writeFile(filepath.Join(dir, "verify.json"), append(b, '\n')); err != nil {
+		return err
+	}
+	return writeFile(filepath.Join(dir, "verify.md"), []byte(Markdown(rep)))
+}
+
+func writeFile(p string, b []byte) error {
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, p)
+}
+
+// Markdown is verify.md: the counts, the canaries, the routes alive.
+func Markdown(rep *Report) string {
+	var b strings.Builder
+	mode := "sent"
+	if rep.DryRun {
+		mode = "dry run: nothing sent, the plan below"
+	}
+	fmt.Fprintf(&b, "# jsharvest verify: %s (%s)\n\n%s; %d request(s)", rep.Target, rep.Role, mode, rep.Sent)
+	if rep.Stopped != "" {
+		fmt.Fprintf(&b, "; stopped: %s", rep.Stopped)
+	}
+	b.WriteString("\n\n")
+	for _, h := range slices.Sorted(mapsKeys(rep.HostsGated)) {
+		fmt.Fprintf(&b, "**Host gated:** %s: %s. Its other drafts are `host_gated`.\n\n", h, rep.HostsGated[h])
+	}
+	for _, h := range slices.Sorted(mapsKeys(rep.HostsBlocked)) {
+		fmt.Fprintf(&b, "**Host given up:** %s: %s. Its drafts after that are `host_blocked`.\n\n", h, rep.HostsBlocked[h])
+	}
+	counts := func(title string, m map[string]int) {
+		fmt.Fprintf(&b, "## %s\n\n| | |\n|---|---|\n", title)
+		for _, k := range slices.Sorted(mapsKeys(m)) {
+			fmt.Fprintf(&b, "| %s | %d |\n", k, m[k])
+		}
+		b.WriteString("\n")
+	}
+	counts("Verdicts", rep.Verdicts)
+	counts("Tiers", rep.Tiers)
+	counts("Confidence", rep.Confidence)
+	fmt.Fprintf(&b, "## Canaries (gateway prefixes)\n\n| prefix | drafts | answer |\n|---|---|---|\n")
+	for _, c := range rep.Canaries {
+		a := c.Err
+		if c.Answer != nil {
+			a = c.Answer.String()
+		}
+		fmt.Fprintf(&b, "| %s | %d | %s |\n", c.Prefix, c.Drafts, a)
+	}
+	b.WriteString("\n## Results\n\n| verdict | method | URL | note |\n|---|---|---|---|\n")
+	rs := slices.Clone(rep.Results)
+	sort.SliceStable(rs, func(i, j int) bool { return rs[i].Verdict < rs[j].Verdict })
+	for _, r := range rs {
+		note := r.Reason
+		if r.Sent != "" && r.Sent != r.Method && r.Method != "" {
+			note += " (probed via " + r.Sent + ")"
+		}
+		if r.VerifiedMethod != "" {
+			note += " method " + r.VerifiedMethod
+		}
+		if len(r.ServerMissing) > 0 {
+			note += " missing " + strings.Join(r.ServerMissing, ",")
+		}
+		u := r.URL
+		if u == "" {
+			u = r.Path
+		}
+		fmt.Fprintf(&b, "| %s | %s | %s | %s |\n", r.Verdict, r.Method, strings.ReplaceAll(u, "|", "%7C"), strings.ReplaceAll(strings.TrimSpace(note), "|", "/"))
+	}
+	if len(rep.CloudChecks) > 0 {
+		b.WriteString("\n## Cloud Storage Checks\n\n| status | provider | bucket | URL |\n|---|---|---|---|\n")
+		for _, c := range rep.CloudChecks {
+			st := c.Status
+			if st == "" && c.Error != "" {
+				st = "error"
+			}
+			fmt.Fprintf(&b, "| %s | %s | %s | %s |\n", st, c.Provider, c.Bucket, strings.ReplaceAll(c.URL, "|", "%7C"))
+		}
+	}
+	return b.String()
+}
+
+// hostOf is a URL's host:port, as the Sender keys its hosts.
+func hostOf(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return u.Host
+}
+
+// byHost verifies the hosts at once, o.Concurrency of them, each host's
+// drafts in turn in probeOrder's order (round 25K): what one worker sends
+// a host is what a run of one sends it, in the same order. A draft whose
+// candidates span hosts is the first one's, and holds each other host it
+// tries for its probe (lockHost).
+func (v *verifier) byHost(ctx context.Context, order []int, results []*Result) {
+	queues := map[string][]int{}
+	var hosts []string
+	for _, i := range order {
+		t := v.firstTarget(v.o.Drafts[i])
+		if t == "" {
+			// Not sent: said at once, no request.
+			r := v.one(ctx, v.o.Drafts[i])
+			results[i] = &r
+			continue
+		}
+		h := hostOf(t)
+		if _, ok := queues[h]; !ok {
+			hosts = append(hosts, h)
+		}
+		queues[h] = append(queues[h], i)
+	}
+	next := make(chan string)
+	var wg sync.WaitGroup
+	for range min(v.o.Concurrency, len(hosts)) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for h := range next {
+				for _, i := range queues[h] {
+					if ctx.Err() != nil {
+						break
+					}
+					r := v.one(ctx, v.o.Drafts[i])
+					results[i] = &r
+				}
+			}
+		}()
+	}
+	for _, h := range hosts {
+		next <- h
+	}
+	close(next)
+	wg.Wait()
+}

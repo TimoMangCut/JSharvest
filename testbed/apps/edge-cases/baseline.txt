@@ -1,0 +1,8 @@
+# Markers the capture must keep finding; written by testbed score -write-baseline.
+JSHMARK:eval:function
+JSHMARK:eval:timeout
+JSHMARK:eval:worker
+JSHMARK:worker:nested-parent
+JSHMARK:debugger:after
+JSHMARK:big:tail
+JSHMARK:resolve:in-scope

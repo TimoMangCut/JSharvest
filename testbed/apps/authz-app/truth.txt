@@ -1,0 +1,2 @@
+# authz-app: the markers each role's store holds (authz.truth.json is the authz truth).
+JSHMARK:authz:app            # app.js, every role

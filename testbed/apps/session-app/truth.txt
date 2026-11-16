@@ -1,0 +1,9 @@
+# session-app: crawled from /members/home with a saved login.
+JSHMARK:entry:main        # / (bench, anonymous)
+JSHMARK:members:home      # the members' home, only for a session the server knows
+JSHMARK:members:a
+JSHMARK:members:b
+JSHMARK:storage:local     # /members/c loads it only with localStorage.auth (put back after the wipe)
+JSHMARK:storage:session   # /members/d loads it only with sessionStorage.tab (which no profile keeps)
+JSHMARK:members:e         # after /account/expire: needs a new login
+JSHMARK:members:f

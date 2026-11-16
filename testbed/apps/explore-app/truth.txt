@@ -1,0 +1,2 @@
+# Ground truth: explore.truth.json (flows); this marker only proves the store.
+JSHMARK:explore:app           # app.js

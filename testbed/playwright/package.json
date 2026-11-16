@@ -1,0 +1,8 @@
+{
+  "name": "jsharvest-playwright-sample",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "playwright-core": "1.48.2"
+  }
+}

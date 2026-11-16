@@ -1,0 +1,12 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>archive-app</title>
+<!-- CF-04a: the 2023 front page, as the Wayback keeps it. It names
+     /assets/old-2023.js (archived, with a digest), /static/html-only.js
+     (archived, but in no listing: only this page names it), and
+     /assets/live-only.js (never archived; today's server still serves it). -->
+<link rel="modulepreload" href="/assets/live-only.js">
+</head><body>
+<script src="/assets/old-2023.js"></script>
+<script src="/static/html-only.js"></script>
+<script>fetch('/api/v1/inline-hook');</script>
+</body></html>

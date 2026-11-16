@@ -1,0 +1,2 @@
+# pipe-app: the marker of the app (gate 17 is testbed/pipeline-check.sh).
+JSHMARK:pipe:app

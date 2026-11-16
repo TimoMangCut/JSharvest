@@ -1,0 +1,2 @@
+# verify-app: the marker of its page (gate 18 is testbed/verify-check.sh).
+JSHMARK:verify:app

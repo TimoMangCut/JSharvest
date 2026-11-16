@@ -1,0 +1,5 @@
+<!doctype html>
+<title>other tab</title>
+<p>Stands for the user's own tab in attach mode: it POSTs every 300 ms and
+must not be held back by a guard that runs for another tab.</p>
+<script>let n = 0; setInterval(() => fetch('/api/other-tab?n=' + (n++), { method: 'POST', body: 'x' }), 300);</script>

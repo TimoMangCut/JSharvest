@@ -1,0 +1,12 @@
+{
+  "url": "http://127.0.0.1:8770/",
+  "pause_ms": 1500,
+  "steps": [
+    {"do": "click", "selector": "#publish", "expect": ["POST /api/articles"], "how": "causal"},
+    {"do": "click", "selector": "#follow", "expect": ["POST /api/profiles/jake/follow"], "how": "causal"},
+    {"do": "click", "selector": "#comment", "expect": ["POST /api/articles/hello/comments"], "how": "causal"},
+    {"do": "click", "selector": "#export", "expect": ["GET /api/export/csv"], "how": "causal"},
+    {"do": "click", "selector": "#feed", "expect": ["GET /api/articles/feed?limit=10&offset=10"], "how": "causal"},
+    {"do": "click", "selector": "#profile", "expect": ["GET /api/profiles/jake"], "how": "causal"}
+  ]
+}
