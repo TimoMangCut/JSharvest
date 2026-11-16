@@ -135,6 +135,9 @@ func Operations(u *url.URL, contentType, body string) []string {
 }
 
 func single(u *url.URL, contentType, body string) string {
+	if id := NextActionID(nil, contentType, body); id != "" {
+		return "next-action=" + id
+	}
 	op := ""
 	q := u.Query()
 	for _, d := range Discriminators {

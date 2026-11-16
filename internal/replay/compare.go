@@ -185,6 +185,9 @@ func kind(a Answer) string {
 		if json.Valid(t) && len(t) > 0 && (t[0] == '{' || t[0] == '[') {
 			return "json"
 		}
+		if _, ok := parseFlight(t); ok {
+			return "json"
+		}
 		if bytes.HasPrefix(bytes.ToLower(t), []byte("<!doctype html")) || bytes.HasPrefix(bytes.ToLower(t), []byte("<html")) {
 			return "html"
 		}
@@ -354,7 +357,78 @@ func mapError(m, ctl map[string]any) bool {
 	return unknown && noData(m)
 }
 
+func isFlightHex(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+}
+
+func looksLikeFlight(b []byte) bool {
+	t := bytes.TrimSpace(b)
+	if len(t) < 3 || !isFlightHex(t[0]) {
+		return false
+	}
+	colon := bytes.IndexByte(t[:min(len(t), 10)], ':')
+	if colon <= 0 || colon > 8 {
+		return false
+	}
+	for i := 0; i < colon; i++ {
+		if !isFlightHex(t[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// parseFlight decodes a React Server Components / Next.js Server Action Flight
+// wire stream ("0:[...]\n1:{...}\n") into a JSON-compatible map keyed by row id.
+func parseFlight(b []byte) (map[string]any, bool) {
+	if !looksLikeFlight(b) {
+		return nil, false
+	}
+	rows := map[string]any{}
+	for _, rawLine := range bytes.Split(bytes.TrimSpace(b), []byte("\n")) {
+		ln := bytes.TrimSpace(rawLine)
+		if len(ln) == 0 {
+			continue
+		}
+		colon := bytes.IndexByte(ln, ':')
+		if colon <= 0 || colon > 8 {
+			return nil, false
+		}
+		for i := 0; i < colon; i++ {
+			if !isFlightHex(ln[i]) {
+				return nil, false
+			}
+		}
+		id := string(ln[:colon])
+		rest := bytes.TrimSpace(ln[colon+1:])
+		if len(rest) == 0 {
+			continue
+		}
+		// Strip optional 1-2 uppercase RSC Flight row tag (I[...], E{...}, HL[...], D{...}).
+		tagEnd := 0
+		for tagEnd < len(rest) && tagEnd < 2 && rest[tagEnd] >= 'A' && rest[tagEnd] <= 'Z' {
+			tagEnd++
+		}
+		if tagEnd > 0 && tagEnd < len(rest) && (rest[tagEnd] == '{' || rest[tagEnd] == '[' || rest[tagEnd] == '"') {
+			rest = rest[tagEnd:]
+		}
+		if rest[0] == '{' || rest[0] == '[' || rest[0] == '"' ||
+			bytes.Equal(rest, []byte("null")) || bytes.Equal(rest, []byte("true")) || bytes.Equal(rest, []byte("false")) {
+			dec := json.NewDecoder(bytes.NewReader(rest))
+			dec.UseNumber()
+			var v any
+			if dec.Decode(&v) == nil {
+				rows[id] = v
+			}
+		}
+	}
+	return rows, len(rows) > 0
+}
+
 func decodeJSON(b []byte) (any, bool) {
+	if rows, ok := parseFlight(b); ok {
+		return rows, true
+	}
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.UseNumber()
 	var v any
@@ -520,10 +594,8 @@ func shorter(control, b map[string]string) bool {
 
 // flatten turns JSON into its leaves by path ($.a[0].b).
 func flatten(b []byte) (map[string]string, bool) {
-	dec := json.NewDecoder(bytes.NewReader(b))
-	dec.UseNumber()
-	var v any
-	if dec.Decode(&v) != nil {
+	v, ok := decodeJSON(b)
+	if !ok {
 		return nil, false
 	}
 	out := map[string]string{}

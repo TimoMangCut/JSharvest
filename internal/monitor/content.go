@@ -190,7 +190,7 @@ func build(dir string, runs []string, target string, inScope func(string) bool) 
 			// A GraphQL batch is one request at many endpoints: each
 			// operation is filed with the params of its own element.
 			type opBody struct{ op, body string }
-			sends := []opBody{{flow.Operation(u, ct, e.Body.Body), e.Body.Body}}
+			sends := []opBody{{flow.OperationWithHeaders(u, e.Headers, ct, e.Body.Body), e.Body.Body}}
 			if parts := flow.SplitBatch(e.Body.Body); parts != nil {
 				sends = sends[:0]
 				for _, p := range parts {

@@ -411,7 +411,7 @@ func (s *SeenSet) AddResponse(hdr map[string]string, body string) {
 	if t == "" {
 		return
 	}
-	if strings.HasPrefix(t, "{") || strings.HasPrefix(t, "[") {
+	if strings.HasPrefix(t, "{") || strings.HasPrefix(t, "[") || looksLikeFlight([]byte(t)) {
 		if v, ok := decodeJSON([]byte(t)); ok {
 			n := 0
 			s.walk(v, "", 0, &n)

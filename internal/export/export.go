@@ -394,7 +394,7 @@ func (x *exporter) endpoints() {
 		}
 		it.ep = ep
 		it.tmpl = strings.Join(segs, "/")
-		it.op = flow.Operation(u, it.e.Headers["content-type"], it.e.Body.Body)
+		it.op = flow.OperationWithHeaders(u, it.e.Headers, it.e.Headers["content-type"], it.e.Body.Body)
 		batch := flow.SplitBatch(it.e.Body.Body)
 		it.key = it.e.Method + " " + u.Host + it.tmpl
 		if it.op != "" {

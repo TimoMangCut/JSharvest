@@ -175,6 +175,12 @@ func Drafts(in Inputs) []Draft {
 		// a draft for each, or the dedup key would merge them.
 		var ops []string
 		for _, o := range e.Operations {
+			if strings.HasPrefix(o, "next-action=") {
+				if !slices.Contains(ops, o) {
+					ops = append(ops, o)
+				}
+				continue
+			}
 			if f := strings.Fields(o); len(f) > 0 && !slices.Contains(ops, "op="+f[len(f)-1]) {
 				ops = append(ops, "op="+f[len(f)-1])
 			}
@@ -186,6 +192,25 @@ func Drafts(in Inputs) []Draft {
 		for _, o := range ops {
 			cp := d
 			cp.Operation = o
+			if actHex, ok := strings.CutPrefix(o, "next-action="); ok {
+				cp.Headers = slices.Clone(d.Headers)
+				replaced := false
+				for hi := range cp.Headers {
+					if strings.EqualFold(cp.Headers[hi][0], "next-action") {
+						cp.Headers[hi] = [2]string{"Next-Action", actHex}
+						replaced = true
+					}
+				}
+				if !replaced {
+					cp.Headers = append(cp.Headers, [2]string{"Next-Action", actHex})
+				}
+				cp.Filled = slices.DeleteFunc(slices.Clone(d.Filled), func(s string) bool {
+					return strings.EqualFold(s, "header.next-action")
+				})
+				if cp.Tier == Parameterized && len(cp.Filled) == 0 {
+					cp.Tier = Ready
+				}
+			}
 			add(cp)
 		}
 	}

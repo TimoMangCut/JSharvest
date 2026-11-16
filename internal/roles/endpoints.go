@@ -58,12 +58,12 @@ func (c *comparer) endpoints(_ []Item, _ []Item) []Item {
 			var more []call // a GraphQL batch: a call for each operation after the first
 			if entry, err := d.res.Entry(q.Run, q.ID); err == nil {
 				ct := entry.Headers["content-type"]
-				cl.params, cl.op = paramNames(q.Method, u, ct, entry.Body.Body)
+				cl.params, cl.op = paramNamesWithHeaders(q.Method, u, entry.Headers, ct, entry.Body.Body)
 				slim.Initiator = entry.Initiator
 				if parts := flow.SplitBatch(entry.Body.Body); parts != nil {
 					for k, p := range parts {
 						c1 := call{role: i, req: q}
-						c1.params, c1.op = paramNames(q.Method, u, ct, p.Body)
+						c1.params, c1.op = paramNamesWithHeaders(q.Method, u, entry.Headers, ct, p.Body)
 						c1.op = p.Op
 						if k == 0 {
 							cl = c1
@@ -307,11 +307,15 @@ func shapeDiffers(states []State, ev []*Evidence) bool {
 // form:) and its operation: a GraphQL operation's name, or the value of a
 // discriminating query parameter.
 func paramNames(method string, u *url.URL, contentType, body string) (names []string, op string) {
+	return paramNamesWithHeaders(method, u, nil, contentType, body)
+}
+
+func paramNamesWithHeaders(method string, u *url.URL, headers map[string]string, contentType, body string) (names []string, op string) {
 	q := u.Query()
 	for k := range q {
 		names = append(names, "query:"+k)
 	}
-	op = flow.Operation(u, contentType, body)
+	op = flow.OperationWithHeaders(u, headers, contentType, body)
 	body = strings.TrimSpace(body)
 	switch {
 	case strings.Contains(contentType, "json") || strings.HasPrefix(body, "{") || strings.HasPrefix(body, "["):

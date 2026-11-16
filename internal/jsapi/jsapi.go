@@ -268,6 +268,8 @@ func extractWithMap(src, origSrc []byte, lm *esbuildLineMap, nested bool) (res R
 	x.cursor = 0
 	js.Walk(moduleVisitor{x}, ast)
 	x.cursor = 0
+	extractModernRPC(ast, x)
+	x.cursor = 0
 	js.Walk(stringVisitor{x: x}, ast)
 	res = x.result()
 	res.ClientAuthz = extractClientAuthz(ast, x)
