@@ -8,6 +8,8 @@ package endpoints
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -93,6 +95,7 @@ func SummarizeScripts(scripts []Script) AnalyzeStats {
 	}
 	return st
 }
+
 // Script is what the analysis found in one stored script.
 type Script struct {
 	jsapi.Result
@@ -193,6 +196,63 @@ func Analyze(dir string, workers int) ([]Script, error) {
 
 const heavyScriptBytes = 512 << 10
 
+func extractJS(src []byte, hint string, heavySem chan struct{}) jsapi.Result {
+	if len(src) > maxScript {
+		return jsapi.Result{Version: jsapi.Version, Error: fmt.Sprintf("not analysed: %d bytes", len(src))}
+	}
+	if heavySem != nil && len(src) >= heavyScriptBytes {
+		heavySem <- struct{}{}
+		defer func() { <-heavySem }()
+	}
+	res := jsapi.ExtractSource(src, hint)
+	if strings.HasPrefix(res.Error, "parse") {
+		parseErr := res.Error
+		res = jsapi.ExtractLoose(src)
+		res.LooseFallback = true
+		res.ParseError = parseErr
+	}
+	return res
+}
+
+func writeStaticCache(cache string, res jsapi.Result) {
+	b, err := json.Marshal(res)
+	if err != nil {
+		return
+	}
+	// A temporary file of its own: a watch's background analysis and
+	// the one at its end may write the same script's cache.
+	if f, err := os.CreateTemp(filepath.Dir(cache), filepath.Base(cache)+".*.tmp"); err == nil {
+		_ = f.Chmod(0o600)
+		_, werr := f.Write(b)
+		if f.Close() == nil && werr == nil {
+			_ = os.Rename(f.Name(), cache)
+		}
+		_ = os.Remove(f.Name())
+	}
+}
+
+// ExtractCached extracts JS/TS/SFC metadata for src using <dir>/static/<sha256>.json
+// so HTTP crawls that inspect scripts for frontier routes or Phase-2 spec probing
+// warm the exact cache Analyze reads at the end of the run instead of parsing AST twice.
+func ExtractCached(dir string, src []byte, hint string) jsapi.Result {
+	if dir == "" {
+		return extractJS(src, hint, nil)
+	}
+	rawSum := sha256.Sum256(src)
+	sum := hex.EncodeToString(rawSum[:])
+	cacheDir := filepath.Join(dir, CacheDir)
+	cache := filepath.Join(cacheDir, sum+".json")
+	var res jsapi.Result
+	if b, err := os.ReadFile(cache); err == nil && json.Unmarshal(b, &res) == nil && res.Version == jsapi.Version {
+		return res
+	}
+	res = extractJS(src, hint, nil)
+	if os.MkdirAll(cacheDir, 0o700) == nil {
+		writeStaticCache(cache, res)
+	}
+	return res
+}
+
 func analyzeOne(dir, sha string, info scriptInfo, heavySem chan struct{}) Script {
 	s := Script{SHA256: sha, URLs: info.urls, ThirdParty: info.thirdParty, Source: info.source, Load: sourceOf(dir, sha)}
 	cache := filepath.Join(dir, CacheDir, sha+".json")
@@ -211,29 +271,9 @@ func analyzeOne(dir, sha string, info scriptInfo, heavySem chan struct{}) Script
 	case info.openapi:
 		s.Result = jsapi.ExtractOpenAPI(src)
 	default:
-		if heavySem != nil && len(src) >= heavyScriptBytes {
-			heavySem <- struct{}{}
-			defer func() { <-heavySem }()
-		}
-		s.Result = jsapi.ExtractSource(src, sourceHint(info.urls))
-		if strings.HasPrefix(s.Result.Error, "parse") {
-			parseErr := s.Result.Error
-			s.Result = jsapi.ExtractLoose(src)
-			s.Result.LooseFallback = true
-			s.Result.ParseError = parseErr
-		}
+		s.Result = extractJS(src, sourceHint(info.urls), heavySem)
 	}
-	if b, err := json.Marshal(s.Result); err == nil {
-		// A temporary file of its own: a watch's background analysis and
-		// the one at its end may write the same script's cache.
-		if f, err := os.CreateTemp(filepath.Dir(cache), sha+".*.tmp"); err == nil {
-			_, werr := f.Write(b)
-			if f.Close() == nil && werr == nil {
-				os.Rename(f.Name(), cache)
-			}
-			os.Remove(f.Name())
-		}
-	}
+	writeStaticCache(cache, s.Result)
 	return s
 }
 

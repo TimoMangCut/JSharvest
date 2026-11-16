@@ -18,17 +18,18 @@ import (
 	"sync"
 	"time"
 
-	"github.com/chromedp/cdproto/cdp"
-	"github.com/chromedp/cdproto/network"
 	"github.com/TimoMangCut/JSharvest/internal/detect"
 	"github.com/TimoMangCut/JSharvest/internal/endpoints"
 	"github.com/TimoMangCut/JSharvest/internal/guard"
 	"github.com/TimoMangCut/JSharvest/internal/httpcrawl"
+	"github.com/TimoMangCut/JSharvest/internal/jsapi"
 	"github.com/TimoMangCut/JSharvest/internal/scope"
 	"github.com/TimoMangCut/JSharvest/internal/sourcemap"
 	"github.com/TimoMangCut/JSharvest/internal/store"
 	"github.com/TimoMangCut/JSharvest/internal/traffic"
 	"github.com/TimoMangCut/JSharvest/internal/uahints"
+	"github.com/chromedp/cdproto/cdp"
+	"github.com/chromedp/cdproto/network"
 )
 
 // HTTPOptions are what the HTTP engine takes on top of Config.
@@ -153,6 +154,9 @@ func RunHTTP(ctx context.Context, cfg Config, ho HTTPOptions) (Record, error) {
 		Probe: ho.Probe, NoSpecProbe: cfg.NoSpecProbe || ho.NoSpecProbe, SourceMaps: ho.SourceMaps, GuessMaps: ho.GuessMaps,
 		Destructive: func(u string) bool {
 			return guard.Destructive(u) || (cfg.GuardRules.Deny != nil && cfg.GuardRules.Deny.MatchString(u))
+		},
+		Extract: func(body []byte, urlHint string) jsapi.Result {
+			return endpoints.ExtractCached(st.Dir(), body, urlHint)
 		},
 		Log: func(f string, a ...any) { slog.Debug(fmt.Sprintf(f, a...)) },
 		Script: func(s httpcrawl.Script) {

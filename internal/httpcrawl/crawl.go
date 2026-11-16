@@ -89,6 +89,9 @@ type Options struct {
 	Request   func(traffic.Entry) // each request sent
 	Page      func(Page)          // each page visited, or listed
 	Log       func(format string, args ...any)
+	// Extract optionally parses a script once and caches its jsapi.Result
+	// (e.g. endpoints.ExtractCached); nil uses an in-memory SHA256 cache.
+	Extract func(body []byte, urlHint string) jsapi.Result
 }
 
 // Script is a script the crawl fetched, or inline code of a page.
@@ -258,6 +261,8 @@ type crawler struct {
 	onSeedLand   func(string)
 	webpack      resolve.WebpackLinker
 	specCtx      frontier.SpecCollector
+	extractMu    sync.Mutex
+	extracted    map[[32]byte]jsapi.Result
 }
 
 // originOf is a URL's scheme and host, lowercased.
@@ -855,6 +860,37 @@ func (cr *crawler) page(ctx context.Context, it frontier.Item, first bool, b *bu
 	return jobs, links, false
 }
 
+func (cr *crawler) extractScript(body []byte, hint string) jsapi.Result {
+	key := sha256.Sum256(body)
+	cr.extractMu.Lock()
+	if res, ok := cr.extracted[key]; ok {
+		cr.extractMu.Unlock()
+		return res
+	}
+	cr.extractMu.Unlock()
+
+	var res jsapi.Result
+	if cr.o.Extract != nil {
+		res = cr.o.Extract(body, hint)
+	} else {
+		res = jsapi.ExtractSource(body, hint)
+		if strings.HasPrefix(res.Error, "parse") {
+			parseErr := res.Error
+			res = jsapi.ExtractLoose(body)
+			res.LooseFallback = true
+			res.ParseError = parseErr
+		}
+	}
+
+	cr.extractMu.Lock()
+	if cr.extracted == nil {
+		cr.extracted = map[[32]byte]jsapi.Result{}
+	}
+	cr.extracted[key] = res
+	cr.extractMu.Unlock()
+	return res
+}
+
 // routes queues the pages a script names (its navigations and routes), and
 // gathers API origins and gateway context for two-phase spec probing.
 // A path in a script is the page's: its URL resolves against the page the
@@ -863,21 +899,23 @@ func (cr *crawler) routes(body []byte, scriptURL, page string, depth int, b *buc
 	if page == "" {
 		page = scriptURL
 	}
+	isNonApp := frontier.Vendor(scriptURL) || frontier.IsTrackerURL(scriptURL) || detect.InfraURL(scriptURL)
+	if cr.o.Depth == 0 && isNonApp {
+		return
+	}
 	base, err := url.Parse(page)
 	if err != nil || len(body) > 8<<20 {
 		return
 	}
-	r := jsapi.Extract(body)
+	r := cr.extractScript(body, scriptURL)
 	var fs []frontier.Found
 	if cr.o.Depth > 0 {
 		fs = frontier.FromScript(r, base, frontier.Vendor(scriptURL))
 	}
 	var origins []string
-	if cr.o.Probe && !cr.o.NoSpecProbe {
+	if cr.o.Probe && !cr.o.NoSpecProbe && !isNonApp {
 		cr.specCtx.AddScript(r, page, scriptURL)
-		if !frontier.Vendor(scriptURL) && !frontier.IsTrackerURL(scriptURL) && !detect.InfraURL(scriptURL) {
-			origins = frontier.APIOrigins(r, cr.o.InScope)
-		}
+		origins = frontier.APIOrigins(r, cr.o.InScope)
 	}
 	cr.mu.Lock()
 	defer cr.mu.Unlock()
