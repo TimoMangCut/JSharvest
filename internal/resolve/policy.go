@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/TimoMangCut/JSharvest/internal/netsafe"
 	"github.com/TimoMangCut/JSharvest/internal/scope"
 )
 
@@ -70,8 +71,11 @@ func (p *Policy) Check(raw string) Verdict {
 // host that does not resolve here (a name only the browser can map, say)
 // counts as public: scope already keeps it to the target's domain.
 func (p *Policy) public(host string) bool {
-	if a, err := netip.ParseAddr(host); err == nil {
-		return isPublic(a)
+	if netsafe.RefuseHost(host, true) != nil {
+		return false
+	}
+	if _, isLit, _ := netsafe.LiteralHost(host); isLit {
+		return true
 	}
 	p.mu.Lock()
 	if p.cache == nil {
@@ -88,7 +92,7 @@ func (p *Policy) public(host string) bool {
 	private = false
 	if err == nil {
 		for _, a := range addrs {
-			if !isPublic(a) {
+			if netsafe.PrivateAddr(a) {
 				private = true
 			}
 		}
@@ -100,15 +104,6 @@ func (p *Policy) public(host string) bool {
 }
 
 var errNoDNS = errors.New("name resolution left to the browser")
-
-// cgnat is the shared address space of RFC 6598, private in practice.
-var cgnat = netip.MustParsePrefix("100.64.0.0/10")
-
-func isPublic(a netip.Addr) bool {
-	a = a.Unmap()
-	return !(a.IsLoopback() || a.IsPrivate() || a.IsLinkLocalUnicast() || a.IsLinkLocalMulticast() ||
-		a.IsUnspecified() || a.IsMulticast() || cgnat.Contains(a))
-}
 
 func lookup(ctx context.Context, host string) ([]netip.Addr, error) {
 	return net.DefaultResolver.LookupNetIP(ctx, "ip", host)
