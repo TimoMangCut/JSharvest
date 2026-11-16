@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -227,8 +228,11 @@ export function loadPanel_%d(p: PanelProps_%d) {
 	var peakRSSMB float64
 	if cmd.ProcessState != nil {
 		if ru, ok := cmd.ProcessState.SysUsage().(*syscall.Rusage); ok {
-			// On Linux ru.Maxrss is in KiB.
+			// On Linux ru.Maxrss is in KiB; on Darwin/macOS it is in bytes.
 			peakRSSMB = float64(ru.Maxrss) / 1024.0
+			if runtime.GOOS == "darwin" {
+				peakRSSMB /= 1024.0
+			}
 		}
 	}
 

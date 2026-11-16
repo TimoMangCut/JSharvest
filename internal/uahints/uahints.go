@@ -107,6 +107,17 @@ var (
 	local   = map[string]string{}
 )
 
+func defaultChromeCandidates(goos string) []string {
+	cands := []string{"google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome"}
+	if goos == "darwin" {
+		cands = append(cands,
+			"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+			"/Applications/Chromium.app/Contents/MacOS/Chromium",
+		)
+	}
+	return cands
+}
+
 // LocalChromeMajor is the major version of the Chrome at path, or of the
 // first Chrome on PATH when path is "": what `chrome --version` prints,
 // asked once a process. "" when none answers.
@@ -118,7 +129,7 @@ func LocalChromeMajor(path string) string {
 	}
 	cands := []string{path}
 	if path == "" {
-		cands = []string{"google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome"}
+		cands = defaultChromeCandidates(runtime.GOOS)
 	}
 	v := ""
 	for _, c := range cands {

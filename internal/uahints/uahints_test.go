@@ -1,6 +1,9 @@
 package uahints
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 func TestHints(t *testing.T) {
 	linux := "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36"
@@ -26,5 +29,13 @@ func TestHints(t *testing.T) {
 	}
 	if got := ChromeUA("156"); ChromeMajor(got) != "156" {
 		t.Errorf("ChromeUA: %q", got)
+	}
+	darwinCands := defaultChromeCandidates("darwin")
+	if !slices.Contains(darwinCands, "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome") {
+		t.Errorf("darwin Chrome candidates missing .app bundle path: %v", darwinCands)
+	}
+	linuxCands := defaultChromeCandidates("linux")
+	if slices.Contains(linuxCands, "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome") {
+		t.Errorf("linux Chrome candidates unexpectedly included macOS .app path: %v", linuxCands)
 	}
 }
