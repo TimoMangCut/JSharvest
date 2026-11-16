@@ -405,7 +405,7 @@ func pickEvidence(cands []pair, answer []byte, refOK bool, refs []Answer) []Evid
 	return nil
 }
 
-var ownerPathRe = regexp.MustCompile(`(?i)owner|createdby|created_by|userid|user_id|authorid|author_id`)
+var ownerPathRe = regexp.MustCompile(`(?i)owner|createdby|created_by|userid|user_id|authorid|author_id|user_created`)
 
 // privateMarker says why an object B read is private to A, though the two
 // share an org: an explicit flag in A's answer, or the object being marked
@@ -430,7 +430,8 @@ func privateMarker(body []byte, ownerIDs, peerIDs []string) string {
 	sort.Strings(paths)
 	for _, p := range paths {
 		v := f[p]
-		switch k := strings.ToLower(lastKey(p)); k {
+		k := strings.ToLower(lastKey(p))
+		switch k {
 		case "private", "is_private", "isprivate":
 			if v == "true" {
 				return "the answer says " + lastKey(p) + ": true"
@@ -441,7 +442,7 @@ func privateMarker(body []byte, ownerIDs, peerIDs []string) string {
 				return fmt.Sprintf("the answer says %s: %s", lastKey(p), strings.ToLower(v))
 			}
 		}
-		if ownerPathRe.MatchString(p) && isA[v] {
+		if (k == "user" || ownerPathRe.MatchString(p)) && isA[v] {
 			return "the object is marked as A's own (" + p + ")"
 		}
 	}

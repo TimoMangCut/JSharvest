@@ -322,7 +322,7 @@ Khi `!Reveal`, mọi `EvidencePair.Value` và `EvidencePair.RefVal` được bă
 
 Đăng ký tool chỉ đọc `get_authz` trong `mcpserver.New` (`ReadOnlyHint: true`, `OpenWorldHint: &closed`, mô tả kèm `untrustedNote`):
 - **Đầu vào (`getAuthzIn`):**
-  - `mode`: `""`/`"all"` (mặc định: trả cả dọc và ngang nếu có), `"roles"` (chỉ `authz.json`), `"peers"` (chỉ `bola.json`).
+  - `mode`: `""` (mặc định: `"peers"` khi có `bola.json`, ngược lại `"roles"`), `"roles"` (chỉ `authz.json`), `"peers"` (chỉ `bola.json`). Không gộp cả hai file trong một lần gọi để tiết kiệm I/O và giữ nhẹ payload MCP dưới trần `maxReply`.
   - `verdict`: lọc theo kết luận (`bypass`, `shared`, `unauthenticated`, `needs-review`, `replay_broken`, `enforced`, `unclear`…).
   - `direction`: lọc chiều peer (ví dụ `"userA->userB"`).
   - `role`: lọc theo `trial.role` (dọc) hoặc `owner`/`as` (ngang).

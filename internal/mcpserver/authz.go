@@ -20,6 +20,8 @@ import (
 type getAuthzIn struct {
 	Mode        string `json:"mode,omitempty" jsonschema:"peers (authz -peers: bola.json) or roles (authz between roles: authz.json); default: peers when there is a bola.json"`
 	Verdict     string `json:"verdict,omitempty" jsonschema:"only items with this verdict (bypass, unauthenticated, shared, likely, needs-review, enforced, enforced-parent, replay_broken, unclear, skipped, blocked)"`
+	Direction   string `json:"direction,omitempty" jsonschema:"only peer items in this direction (e.g. userA->userB)"`
+	Role        string `json:"role,omitempty" jsonschema:"only items involving this role or peer (owner/as in peers mode, trial/sample_role in roles mode)"`
 	KeyContains string `json:"key_contains,omitempty" jsonschema:"only items whose endpoint key contains this text"`
 	Limit       int    `json:"limit,omitempty" jsonschema:"at most this many items (default 50, at most 500)"`
 	Offset      int    `json:"offset,omitempty" jsonschema:"skip this many of the matching items"`
@@ -87,7 +89,13 @@ func (s *server) getAuthz(ctx context.Context, _ *mcp.CallToolRequest, in getAut
 		if m == nil {
 			continue
 		}
-		if in.Verdict != "" && verdictOf(m) != in.Verdict {
+		if in.Verdict != "" && !verdictMatches(m, in.Verdict) {
+			continue
+		}
+		if in.Direction != "" && fmt.Sprint(m["direction"]) != in.Direction {
+			continue
+		}
+		if in.Role != "" && !roleMatches(m, in.Role) {
 			continue
 		}
 		if in.KeyContains != "" && !strings.Contains(fmt.Sprint(m["key"]), in.KeyContains) {
@@ -101,6 +109,43 @@ func (s *server) getAuthz(ctx context.Context, _ *mcp.CallToolRequest, in getAut
 	}
 	out.Report, _ = s.maskAuthz(rep, "").(map[string]any)
 	return reply(out)
+}
+
+func verdictMatches(m map[string]any, want string) bool {
+	if verdictOf(m) == want {
+		return true
+	}
+	if trials, ok := m["trials"].([]any); ok {
+		for _, t := range trials {
+			if tm, ok := t.(map[string]any); ok && verdictOf(tm) == want {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func roleMatches(m map[string]any, want string) bool {
+	for _, k := range []string{"owner", "as", "role", "sample_role"} {
+		if s, ok := m[k].(string); ok && s == want {
+			return true
+		}
+	}
+	if dir, ok := m["direction"].(string); ok {
+		if a, b, ok := strings.Cut(dir, "->"); ok && (a == want || b == want) {
+			return true
+		}
+	}
+	if trials, ok := m["trials"].([]any); ok {
+		for _, t := range trials {
+			if tm, ok := t.(map[string]any); ok {
+				if r, _ := tm["role"].(string); r == want {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // verdictOf reads an item's verdict: a top-level "verdict", or one nested

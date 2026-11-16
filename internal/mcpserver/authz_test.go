@@ -28,9 +28,9 @@ func TestGetAuthzPeers(t *testing.T) {
 
 	rep := map[string]any{"host": "app.test", "peers": []string{"alice", "bob"}, "relation": "same-org", "summary": map[string]int{"bypass": 1, "enforced": 1},
 		"items": []any{
-			map[string]any{"key": "GET app.test/api/notes/{}", "direction": "alice->bob", "verdict": "bypass", "reason": "values only A had",
+			map[string]any{"key": "GET app.test/api/notes/{}", "direction": "alice->bob", "owner": "alice", "as": "bob", "verdict": "bypass", "reason": "values only A had",
 				"evidence": []any{map[string]any{"path": "$.body", "value": secret}}, "ids": []any{map[string]any{"at": "path:3", "kind": "int_small", "value": "1101"}}},
-			map[string]any{"key": "GET app.test/api/prefs", "direction": "alice->bob", "verdict": "enforced", "reason": "the trial is B's own"},
+			map[string]any{"key": "GET app.test/api/prefs", "direction": "bob->charlie", "owner": "bob", "as": "charlie", "verdict": "enforced", "reason": "the trial is B's own"},
 		}}
 	os.MkdirAll(authz, 0o700)
 	b, _ := json.Marshal(rep)
@@ -67,6 +67,14 @@ func TestGetAuthzPeers(t *testing.T) {
 	only := text(cs, map[string]any{"verdict": "bypass"})
 	if err := json.Unmarshal([]byte(only), &out); err != nil || out.Total != 1 || len(out.Items) != 1 {
 		t.Fatalf("verdict filter: %s", only)
+	}
+	byDir := text(cs, map[string]any{"direction": "bob->charlie"})
+	if err := json.Unmarshal([]byte(byDir), &out); err != nil || out.Total != 1 || len(out.Items) != 1 || out.Items[0]["key"] != "GET app.test/api/prefs" {
+		t.Fatalf("direction filter: %s", byDir)
+	}
+	byRole := text(cs, map[string]any{"role": "charlie"})
+	if err := json.Unmarshal([]byte(byRole), &out); err != nil || out.Total != 1 || len(out.Items) != 1 {
+		t.Fatalf("role filter: %s", byRole)
 	}
 	revealed := text(connect(t, Options{Root: root, Reveal: true}), map[string]any{"mode": "peers"})
 	if !strings.Contains(revealed, secret) {

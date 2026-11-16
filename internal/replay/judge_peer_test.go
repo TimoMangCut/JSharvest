@@ -426,3 +426,19 @@ func TestReflectorBoundedUnescape(t *testing.T) {
 		t.Fatalf("reflector.hit on 100 KB multi-encoded leaf took %v (> 10ms quadratic blowup)", elapsed)
 	}
 }
+
+func TestPrivateMarkerUserAndUserCreatedKeys(t *testing.T) {
+	ownerIDs := []string{"u-alice-99"}
+	peerIDs := []string{"u-bob-88"}
+
+	if got := privateMarker([]byte(`{"data":{"user":"u-alice-99","note":"x"}}`), ownerIDs, peerIDs); got == "" {
+		t.Fatal("expected $.data.user matching ownerID to mark object private")
+	}
+	if got := privateMarker([]byte(`{"data":{"user_created":"u-alice-99","note":"x"}}`), ownerIDs, peerIDs); got == "" {
+		t.Fatal("expected $.data.user_created matching ownerID to mark object private")
+	}
+	// Non-owner fields containing "user" substring must NOT trigger privateMarker.
+	if got := privateMarker([]byte(`{"meta":{"user_agent":"u-alice-99"},"users":[{"id":"u-alice-99"}]}`), ownerIDs, peerIDs); got != "" {
+		t.Fatalf("unexpected false-positive privateMarker: %q", got)
+	}
+}
