@@ -3,6 +3,7 @@ package replay
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func jsAns(status int, body string) *Answer {
@@ -400,5 +401,28 @@ func TestSentValues(t *testing.T) {
 				t.Errorf("%q is sent as a value", no)
 			}
 		}
+	}
+}
+
+func TestReflectorBoundedUnescape(t *testing.T) {
+	r := newReflector([]string{"alpha/beta", "987654"})
+	// 1-layer and 2-layer URL-encoded echoes still match.
+	if !r.hit("path=alpha%2Fbeta") {
+		t.Fatal("1-layer URL-encoded echo did not match")
+	}
+	if !r.hit("path=alpha%252Fbeta") {
+		t.Fatal("2-layer URL-encoded echo did not match")
+	}
+	if !r.hit("id%3D987654") || r.hit("id=1987654") {
+		t.Fatal("whole-number digit boundary broken")
+	}
+
+	// Deeply nested %2525... leaf (50,000 layers ~ 100 KB) must run in O(1) passes (< 10 ms)
+	// without unbounded recursion or O(N^2) allocations.
+	deep := "%" + strings.Repeat("25", 50000) + "41"
+	start := time.Now()
+	_ = r.hit(deep)
+	if elapsed := time.Since(start); elapsed > 10*time.Millisecond {
+		t.Fatalf("reflector.hit on 100 KB multi-encoded leaf took %v (> 10ms quadratic blowup)", elapsed)
 	}
 }

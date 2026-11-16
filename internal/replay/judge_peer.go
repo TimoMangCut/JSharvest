@@ -160,17 +160,30 @@ func newReflector(lists ...[]string) *reflector {
 	return r
 }
 
+const maxReflectUnescapeLen = 8192
+
 func (r *reflector) hit(v string) bool {
-	if r == nil {
+	if r == nil || (len(r.plain) == 0 && len(r.digits) == 0) {
 		return false
 	}
-	l := strings.ToLower(v)
-	if d, err := url.QueryUnescape(v); err == nil && d != v {
-		// A leaf holding an escaped copy of what was sent is the echo too.
-		if r.hit(d) {
+	cur := v
+	for step := range 3 {
+		if r.matchLower(strings.ToLower(cur)) {
 			return true
 		}
+		if step == 2 || len(cur) > maxReflectUnescapeLen || !strings.ContainsAny(cur, "%+") {
+			break
+		}
+		d, err := url.QueryUnescape(cur)
+		if err != nil || d == cur {
+			break
+		}
+		cur = d
 	}
+	return false
+}
+
+func (r *reflector) matchLower(l string) bool {
 	for _, s := range r.plain {
 		if strings.Contains(l, s) {
 			return true
