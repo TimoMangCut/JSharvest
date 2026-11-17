@@ -515,7 +515,7 @@ func runCrawl(args []string) error {
 			ho.Fallback, ho.Archive = nil, nil
 			if *archiveFallback || *archiveAfter {
 				run := func(ctx context.Context) any {
-					args := []string{"-o", *out, "-target", t.Hostname(), "-scope", *scopeMode, "-sources", archiveSources}
+					args := []string{"-o", *out, "-target", t.Hostname(), "-scope", *scopeMode, "-sources", archiveSources, "-concurrency", fmt.Sprint(max(*tabs*2, 8))}
 					if *proxy != "" {
 						args = append(args, "-proxy", *proxy)
 					} else {

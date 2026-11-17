@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/TimoMangCut/JSharvest/internal/replay"
@@ -22,107 +23,206 @@ import (
 	"github.com/TimoMangCut/JSharvest/internal/store"
 )
 
+func (r *runner) prepareGroup(g *group) (needNetwork bool) {
+	if r.isDone(g.key) {
+		return false
+	}
+	u, err := url.Parse(g.latest.URL)
+	if err == nil && !r.o.Vendor && vendorRe.MatchString(path.Base(u.Path)) {
+		r.sum(func(s *Summary) { s.Skipped["vendor library"]++ })
+		return false
+	}
+	meta := &store.ArchiveSeen{First: g.first, Last: g.last, Captures: g.captures}
+	if g.digest != "" && r.cur.sha1[g.digest] {
+		r.sum(func(s *Summary) { s.Known++ })
+		r.markDone(g.key)
+		return false
+	}
+	if g.digest != "" {
+		if sha := r.store.BySHA1(g.digest); sha != "" {
+			same := false
+			if e, ok := r.store.Entry(sha); ok && e.Alive != nil && *e.Alive && slices.Contains(e.Sources, "live") {
+				same = true
+			}
+			for _, src := range g.sources {
+				r.store.Add(store.Record{SHA256: sha, URL: g.latest.URL, Source: src, Archive: meta, LiveSame: same})
+			}
+			r.sum(func(s *Summary) { s.Merged++ })
+			r.markDone(g.key)
+			return false
+		}
+	}
+	return true
+}
+
 func (r *runner) fetch(ctx context.Context) error {
 	gs, err := r.groups()
 	if err != nil {
 		return err
 	}
-	s := &r.st.Summary
-	s.Digests = len(gs)
-	// What a pass leaves out is counted by each pass (a resumed one looks
-	// at those again); the rest counts once, as it is done once.
-	s.Skipped["vendor library"], s.Skipped["over -max-files"] = 0, 0
-	defer func() {
-		for k, v := range s.Skipped {
-			if v == 0 {
-				delete(s.Skipped, k)
-			}
-		}
-	}()
-	n := 0
+	r.mu.Lock()
+	r.st.Summary.Digests = len(gs)
+	r.st.Summary.Skipped["vendor library"], r.st.Summary.Skipped["over -max-files"] = 0, 0
 	for _, g := range gs {
 		for _, u := range g.urls {
 			r.namedURLs[u] = true // filed already: a chunk naming it is not filed again
 		}
 	}
-	for i := 0; i < len(gs); i++ { // the fetched scripts' chunks join gs as it goes
-		g := gs[i]
+	r.mu.Unlock()
+
+	defer func() {
+		r.mu.Lock()
+		for k, v := range r.st.Summary.Skipped {
+			if v == 0 {
+				delete(r.st.Summary.Skipped, k)
+			}
+		}
+		r.mu.Unlock()
+	}()
+
+	var queue []*group
+	for _, g := range gs {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if r.done[g.key] {
-			continue
-		}
-		u, _ := url.Parse(g.latest.URL)
-		if !r.o.Vendor && vendorRe.MatchString(path.Base(u.Path)) {
-			s.Skipped["vendor library"]++
-			continue
-		}
-		meta := &store.ArchiveSeen{First: g.first, Last: g.last, Captures: g.captures}
-		if g.digest != "" && r.cur.sha1[g.digest] {
-			s.Known++ // today's crawls have it: its endpoints are theirs
-			r.markDone(g.key)
-			continue
-		}
-		if g.digest != "" {
-			if sha := r.store.BySHA1(g.digest); sha != "" {
-				// Fetched by a run before, under another listing (a URL
-				// OTX named): its archive side only.
-				// A live copy of the same bytes (a script an old page named,
-				// filed before this row was listed) makes it live_same.
-				same := false
-				if e, ok := r.store.Entry(sha); ok && e.Alive != nil && *e.Alive && slices.Contains(e.Sources, "live") {
-					same = true
-				}
-				for _, src := range g.sources {
-					r.store.Add(store.Record{SHA256: sha, URL: g.latest.URL, Source: src, Archive: meta, LiveSame: same})
-				}
-				s.Merged++
-				r.markDone(g.key)
-				continue
-			}
-		}
-		if r.o.MaxFiles > 0 && n >= r.o.MaxFiles {
-			s.Skipped["over -max-files"]++
-			continue
-		}
-		n++
-		var bodies [][]byte
-		if kind := assetKind(g.latest); kind == "map" || kind == "manifest" {
-			bodies, err = r.fetchAsset(ctx, g, meta, kind)
-		} else {
-			bodies, err = r.fetchOne(ctx, g, meta)
-		}
-		for _, b := range bodies {
-			more := r.chunks(g, b)
-			s.Digests += len(more)
-			gs = append(gs, more...)
-		}
-		if errors.Is(err, errNotArchived) {
-			s.NotArchived++
-			r.markDone(g.key)
-			continue
-		}
-		if err != nil {
-			if errors.Is(err, ErrBlocked) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return err
-			}
-			s.Failed++
-			r.o.Log("fetch %s: %v", g.latest.URL, err)
-			continue
-		}
-		r.markDone(g.key)
-		if n%20 == 0 {
-			r.store.Flush()
-			r.save()
+		if r.prepareGroup(g) {
+			queue = append(queue, g)
 		}
 	}
-	return nil
+	if len(queue) == 0 {
+		return nil
+	}
+
+	fctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var qMu sync.Mutex
+	cond := sync.NewCond(&qMu)
+	claimed := map[string]bool{}
+	for _, g := range queue {
+		claimed[g.key] = true
+	}
+	active := 0
+	n := 0
+	done := false
+	var fatal error
+
+	workers := r.workers()
+	if workers > len(queue) && workers > 4 {
+		workers = max(len(queue), 4)
+	}
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				qMu.Lock()
+				for len(queue) == 0 && !done {
+					if active == 0 {
+						done = true
+						cond.Broadcast()
+						break
+					}
+					cond.Wait()
+				}
+				if done && len(queue) == 0 {
+					qMu.Unlock()
+					return
+				}
+				if fctx.Err() != nil {
+					done = true
+					cond.Broadcast()
+					qMu.Unlock()
+					return
+				}
+				g := queue[0]
+				queue = queue[1:]
+				if r.o.MaxFiles > 0 && n >= r.o.MaxFiles {
+					qMu.Unlock()
+					r.sum(func(s *Summary) { s.Skipped["over -max-files"]++ })
+					continue
+				}
+				n++
+				curN := n
+				active++
+				qMu.Unlock()
+
+				meta := &store.ArchiveSeen{First: g.first, Last: g.last, Captures: g.captures}
+				var bodies [][]byte
+				var ferr error
+				if kind := assetKind(g.latest); kind == "map" || kind == "manifest" {
+					bodies, ferr = r.fetchAsset(fctx, g, meta, kind)
+				} else {
+					bodies, ferr = r.fetchOne(fctx, g, meta)
+				}
+
+				var discovered []*group
+				for _, b := range bodies {
+					more := r.chunks(g, b)
+					if len(more) > 0 {
+						r.sum(func(s *Summary) { s.Digests += len(more) })
+						for _, mg := range more {
+							if r.prepareGroup(mg) {
+								discovered = append(discovered, mg)
+							}
+						}
+					}
+				}
+
+				switch {
+				case errors.Is(ferr, errNotArchived):
+					r.sum(func(s *Summary) { s.NotArchived++ })
+					r.markDone(g.key)
+				case ferr != nil:
+					if errors.Is(ferr, ErrBlocked) || errors.Is(ferr, context.Canceled) || errors.Is(ferr, context.DeadlineExceeded) {
+						qMu.Lock()
+						if fatal == nil {
+							if ctx.Err() != nil {
+								fatal = ctx.Err()
+							} else {
+								fatal = ferr
+							}
+						}
+						done = true
+						active--
+						cancel()
+						cond.Broadcast()
+						qMu.Unlock()
+						return
+					}
+					r.sum(func(s *Summary) { s.Failed++ })
+					r.o.Log("fetch %s: %v", g.latest.URL, ferr)
+				default:
+					r.markDone(g.key)
+					if curN%20 == 0 {
+						r.store.Flush()
+						r.save()
+					}
+				}
+
+				qMu.Lock()
+				for _, mg := range discovered {
+					if !claimed[mg.key] {
+						claimed[mg.key] = true
+						queue = append(queue, mg)
+					}
+				}
+				active--
+				if len(queue) == 0 && active == 0 {
+					done = true
+				}
+				cond.Broadcast()
+				qMu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	return fatal
 }
 
 // fromWARC reads a content from Common Crawl's WARC file, and stores it.
 func (r *runner) fromWARC(ctx context.Context, g *group, meta *store.ArchiveSeen, alive *bool) ([]byte, bool) {
-	s := &r.st.Summary
 	rec, err := r.o.CC.Fetch(ctx, g.warc.WARC, r.o.MaxBody)
 	if err != nil || rec.Status != 200 || htmlLike(rec.Body) {
 		if err != nil {
@@ -133,14 +233,16 @@ func (r *runner) fromWARC(ctx context.Context, g *group, meta *store.ArchiveSeen
 	tags := []string{"archive", "commoncrawl-warc"}
 	if g.digest != "" && store.SHA1B32(rec.Body) != g.digest {
 		tags = append(tags, "digest-mismatch")
-		s.Mismatch++
+		r.sum(func(s *Summary) { s.Mismatch++ })
 	}
 	if _, err := r.store.Add(store.Record{Body: rec.Body, URL: g.warc.URL, Kind: "file", Via: "archive-warc", Source: "commoncrawl",
 		MIME: rec.Header.Get("Content-Type"), Tags: tags, Alive: alive, Archive: meta}); err != nil {
 		return nil, false
 	}
-	s.Fetched++
-	s.WARC++
+	r.sum(func(s *Summary) {
+		s.Fetched++
+		s.WARC++
+	})
 	return rec.Body, true
 }
 
@@ -150,7 +252,6 @@ func (r *runner) fromWARC(ctx context.Context, g *group, meta *store.ArchiveSeen
 // store (endpoints are read from them as from scripts); a manifest's
 // scripts are filed for the fetch, by chunks.
 func (r *runner) fetchAsset(ctx context.Context, g *group, meta *store.ArchiveSeen, kind string) ([][]byte, error) {
-	s := &r.st.Summary
 	c := g.latest
 	var body []byte
 	var alive *bool
@@ -186,31 +287,35 @@ func (r *runner) fetchAsset(ctx context.Context, g *group, meta *store.ArchiveSe
 		}
 	}
 	if htmlLike(body) {
-		s.NotJS++
+		r.sum(func(s *Summary) { s.NotJS++ })
 		return nil, nil
 	}
 	if kind == "manifest" {
-		s.Manifests++
+		r.sum(func(s *Summary) { s.Manifests++ })
 		return [][]byte{body}, nil
 	}
 	sm, err := sourcemap.Parse(body)
 	if err != nil {
-		s.NotJS++
+		r.sum(func(s *Summary) { s.NotJS++ })
 		return nil, nil
 	}
-	s.Maps++
+	r.sum(func(s *Summary) { s.Maps++ })
 	if os.MkdirAll(filepath.Join(r.o.Dir, "maps"), 0o700) == nil {
 		sum := sha256.Sum256(body)
 		os.WriteFile(filepath.Join(r.o.Dir, "maps", hex.EncodeToString(sum[:])+".map"), body, 0o600)
 	}
+	added := 0
 	for _, f := range sm.FilesFor(c.URL) {
 		if f.Vendor {
 			continue // a dependency's: noise for the target's endpoints
 		}
 		if _, err := r.store.Add(store.Record{Body: []byte(f.Content), URL: c.URL + "#" + f.Path, Kind: "source", Via: "archive-sourcemap",
 			Source: src, Tags: []string{"archive", "sourcemap", "source:" + f.Path}, Alive: alive, Archive: meta}); err == nil {
-			s.MapSources++
+			added++
 		}
+	}
+	if added > 0 {
+		r.sum(func(s *Summary) { s.MapSources += added })
 	}
 	return nil, nil
 }
@@ -268,7 +373,6 @@ var errNotArchived = errors.New("not archived")
 // kept, for the chunks they name.
 func (r *runner) fetchOne(ctx context.Context, g *group, meta *store.ArchiveSeen) ([][]byte, error) {
 	var kept [][]byte
-	s := &r.st.Summary
 	c := g.latest
 	var alive *bool
 	var live []byte
@@ -280,11 +384,11 @@ func (r *runner) fetchOne(ctx context.Context, g *group, meta *store.ArchiveSeen
 	if alive != nil && *alive && g.digest == "" && r.cur.sha1[store.SHA1B32(live)] {
 		// A URL without a digest (urlscan, OTX) that serves today's script:
 		// the crawls hold it; no history of it.
-		s.HeldAfter++
+		r.sum(func(s *Summary) { s.HeldAfter++ })
 		return nil, nil
 	}
 	if alive != nil && *alive {
-		s.Alive++
+		r.sum(func(s *Summary) { s.Alive++ })
 		tags := []string{"archive-url"}
 		if liveURL != c.URL {
 			tags = append(tags, "https-upgrade")
@@ -293,10 +397,12 @@ func (r *runner) fetchOne(ctx context.Context, g *group, meta *store.ArchiveSeen
 		kept = append(kept, live)
 	}
 	if liveSame {
-		s.LiveSame++
 		r.store.Add(store.Record{Body: live, URL: c.URL, Kind: "file", Via: "archive-live", Source: "wayback", Tags: []string{"archive"},
 			Alive: alive, LiveSame: true, Archive: meta})
-		s.Fetched++
+		r.sum(func(s *Summary) {
+			s.LiveSame++
+			s.Fetched++
+		})
 		return kept, nil
 	}
 	a, err := r.memento(ctx, g, c)
@@ -326,18 +432,18 @@ func (r *runner) fetchOne(ctx context.Context, g *group, meta *store.ArchiveSeen
 		// The digest is of the bytes the archive stored: a coded body, or a
 		// capture the archive moved to the nearest one.
 		tags = append(tags, "digest-mismatch")
-		s.Mismatch++
+		r.sum(func(s *Summary) { s.Mismatch++ })
 	}
 	body, err := decode(a.Header.Get("Content-Encoding"), a.Body, r.o.MaxBody)
 	if err != nil {
 		body, tags = a.Body, append(tags, "content-coded")
 	}
 	if g.digest == "" && r.cur.sha1[store.SHA1B32(body)] {
-		s.HeldAfter++ // today's script, archived under a URL listed without a digest
+		r.sum(func(s *Summary) { s.HeldAfter++ }) // today's script, archived under a URL listed without a digest
 		return kept, nil
 	}
 	if notScriptBody(a.Header.Get("Content-Type"), body) {
-		s.NotJS++ // an archived error page
+		r.sum(func(s *Summary) { s.NotJS++ }) // an archived error page
 		return kept, nil
 	}
 	if c.Source == fromHTML || c.Source == fromResolve {
@@ -347,7 +453,7 @@ func (r *runner) fetchOne(ctx context.Context, g *group, meta *store.ArchiveSeen
 		Tags: tags, Alive: alive, Archive: meta}); err != nil {
 		return kept, err
 	}
-	s.Fetched++
+	r.sum(func(s *Summary) { s.Fetched++ })
 	return append(kept, body), nil
 }
 
@@ -368,22 +474,42 @@ func (r *runner) liveCheckAs(ctx context.Context, raw, kind string) (*bool, []by
 		return nil, nil, ""
 	}
 	key := kind + " " + raw
-	r.livesMu.Lock()
-	if a, ok := r.lives[key]; ok {
-		r.livesMu.Unlock()
-		return a.alive, a.body, a.url
-	}
-	r.livesMu.Unlock()
-	alive, body, at := r.liveAsk(ctx, raw, kind)
-	if ctx.Err() == nil {
+	for {
 		r.livesMu.Lock()
-		if r.lives == nil {
-			r.lives = map[string]liveAns{}
+		if a, ok := r.lives[key]; ok {
+			r.livesMu.Unlock()
+			return a.alive, a.body, a.url
 		}
-		r.lives[key] = liveAns{alive, body, at}
+		if r.liveWait == nil {
+			r.liveWait = map[string]chan struct{}{}
+		}
+		if waitCh, inflight := r.liveWait[key]; inflight {
+			r.livesMu.Unlock()
+			select {
+			case <-waitCh:
+				continue
+			case <-ctx.Done():
+				return nil, nil, ""
+			}
+		}
+		waitCh := make(chan struct{})
+		r.liveWait[key] = waitCh
 		r.livesMu.Unlock()
+
+		alive, body, at := r.liveAsk(ctx, raw, kind)
+
+		r.livesMu.Lock()
+		if ctx.Err() == nil {
+			if r.lives == nil {
+				r.lives = map[string]liveAns{}
+			}
+			r.lives[key] = liveAns{alive, body, at}
+		}
+		delete(r.liveWait, key)
+		close(waitCh)
+		r.livesMu.Unlock()
+		return alive, body, at
 	}
-	return alive, body, at
 }
 
 func (r *runner) liveAsk(ctx context.Context, raw, kind string) (*bool, []byte, string) {

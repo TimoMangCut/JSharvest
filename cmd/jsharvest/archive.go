@@ -52,16 +52,23 @@ func archiveRun(ctx context.Context, args []string) (*archive.Summary, error) {
 	maxFiles := fs.Int("max-files", 0, "old scripts to fetch, at most, newest first (0: all)")
 	maxHTML := fs.Int("max-html", 10, "old pages (text/html captures) to read for the scripts they load, the root first (0: none)")
 	vendor := fs.Bool("vendor", false, "fetch vendor libraries too (jquery, react…)")
-	pageSize := fs.Int("page-size", 5000, "rows of a CDX page")
+	pageSize := fs.Int("page-size", 25000, "rows of a CDX page (when not using ZipNum sharding)")
 	maxPages := fs.Int("max-pages", 0, "CDX pages to list, at most (0: all)")
+	collapse := fs.String("collapse", "digest", "Wayback CDX field collapse (e.g. digest, urlkey, or none)")
+	concurrency := fs.Int("concurrency", 8, "concurrent archive listing, live-check and fetch workers")
 	ccCollections := fs.Int("cc-collections", 3, "Common Crawl's newest collections to list")
 	proxy := fs.String("proxy", "", "send everything through this proxy: the archives and the live checks (default JSHARVEST_PROXY, HTTPS_PROXY, HTTP_PROXY; none: no proxy)")
 	hostRules := fs.String("host-resolver-rules", env("JSHARVEST_HOST_RESOLVER_RULES", ""), `Chrome host resolver rules for the live check, e.g. "MAP *.example.test 127.0.0.1" (env JSHARVEST_HOST_RESOLVER_RULES)`)
 	insecure := fs.Bool("insecure", false, "the live check accepts any TLS certificate (a self-signed lab target)")
 	waitLock := waitLockFlag(fs)
 	fs.Parse(args)
+	given := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
 	if *target == "" {
 		return nil, errors.New("archive: -target is required")
+	}
+	if *concurrency < 1 {
+		return nil, errors.New("archive: -concurrency must be 1 or more")
 	}
 	in, err := scope.New(hostOnly(*target), *scopeMode)
 	if err != nil {
@@ -96,7 +103,7 @@ func archiveRun(ctx context.Context, args []string) (*archive.Summary, error) {
 	}
 	defer unlock()
 	o := archive.Options{Dir: dir, Root: *out, Host: hostOnly(*target), InScope: in, Since: from, Live: *live, MaxFiles: *maxFiles, MaxPages: *maxPages, MaxHTML: *maxHTML,
-		Vendor: *vendor, MaxBody: 32 << 20, Sources: strings.Split(*sources, ","),
+		Vendor: *vendor, MaxBody: 32 << 20, Workers: *concurrency, Sources: strings.Split(*sources, ","),
 		Log: func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) }}
 
 	// Patient budgets (EDGI's client keeps under 0.4/s for the CDX server
@@ -124,8 +131,21 @@ func archiveRun(ctx context.Context, args []string) (*archive.Summary, error) {
 		}
 		return nil
 	}
-	o.Wayback = &archive.Wayback{Base: wbBase, Client: client, Index: &archive.Budget{Gap: gap(4 * time.Second)},
-		Files: &archive.Budget{Gap: gap(time.Second)}, PageSize: *pageSize}
+	shardedWB := !given["page-size"] && os.Getenv("JSHARVEST_WAYBACK_URL") == ""
+	collapseVal := *collapse
+	if collapseVal == "none" || (!shardedWB && !given["collapse"]) {
+		collapseVal = ""
+	}
+	wbIndexGap := gap(4 * time.Second)
+	if shardedWB {
+		wbIndexGap = gap(1500 * time.Millisecond)
+	}
+	wbFilesGap := gap(time.Second)
+	if *concurrency > 1 {
+		wbFilesGap = gap(250 * time.Millisecond)
+	}
+	o.Wayback = &archive.Wayback{Base: wbBase, Client: client, Index: &archive.Budget{Gap: wbIndexGap},
+		Files: &archive.Budget{Gap: wbFilesGap}, PageSize: *pageSize, Collapse: collapseVal, Sharded: shardedWB}
 	o.OTX = &archive.OTX{Base: env("JSHARVEST_OTX_URL", "https://otx.alienvault.com"), Client: client, Budget: &archive.Budget{Gap: gap(2 * time.Second)}}
 	// Common Crawl's index answers 504 when busy: three tries, 15 s apart,
 	// then the next collection (MAX-01).
@@ -168,7 +188,7 @@ func archiveRun(ctx context.Context, args []string) (*archive.Summary, error) {
 			hosts[liveHost(*target)] = true
 			hosts[hostOnly(*target)] = true
 		}
-		so := replay.SenderOptions{Hosts: hosts, Recorded: recorded, Max: 10 * *maxFiles, Rate: time.Duration(float64(time.Second) / *liveRate),
+		so := replay.SenderOptions{Hosts: hosts, Recorded: recorded, Max: 10 * *maxFiles, Concurrency: *concurrency, Rate: time.Duration(float64(time.Second) / *liveRate),
 			Log: filepath.Join(dir, "live-checks.jsonl"), Insecure: *insecure,
 			UserAgent: observedUA(filepath.Join(root, "*"), filepath.Join(*out, hostOnly(*target)+"_*", "*"))}
 		so.Proxy, so.HostRules = proxyURL, hostRuleSet

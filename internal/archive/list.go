@@ -84,6 +84,41 @@ func (r *runner) took(caps []Capture, move func()) {
 }
 
 func (r *runner) listWayback(ctx context.Context) error {
+	if r.st.Wayback.Done {
+		return nil
+	}
+	if r.o.Wayback.Sharded && r.st.Wayback.Resume == "" {
+		r.mu.Lock()
+		np := r.st.Wayback.NumPages
+		r.mu.Unlock()
+		supported := np > 0
+		if np == 0 {
+			var err error
+			np, supported, err = r.o.Wayback.NumPages(ctx, r.o.Host)
+			if err != nil {
+				return err
+			}
+			if supported {
+				if np == 0 {
+					r.mu.Lock()
+					r.st.Wayback.Done = true
+					r.saveLocked()
+					r.mu.Unlock()
+					return nil
+				}
+				r.mu.Lock()
+				r.st.Wayback.NumPages = np
+				if r.st.Wayback.PagesDone == nil {
+					r.st.Wayback.PagesDone = map[int]bool{}
+				}
+				r.saveLocked()
+				r.mu.Unlock()
+			}
+		}
+		if supported && np > 0 {
+			return r.listWaybackSharded(ctx, np)
+		}
+	}
 	for pages := 0; !r.st.Wayback.Done; pages++ {
 		if r.o.MaxPages > 0 && pages >= r.o.MaxPages {
 			// Its place is kept: the next run lists on from it (Reviewer
@@ -107,6 +142,98 @@ func (r *runner) listWayback(ctx context.Context) error {
 	return nil
 }
 
+func (r *runner) listWaybackSharded(ctx context.Context, numPages int) error {
+	var pending []int
+	r.mu.Lock()
+	if r.st.Wayback.PagesDone == nil {
+		r.st.Wayback.PagesDone = map[int]bool{}
+	}
+	for p := 0; p < numPages; p++ {
+		if r.st.Wayback.PagesDone[p] {
+			continue
+		}
+		if r.o.MaxPages > 0 && len(pending) >= r.o.MaxPages {
+			r.noteLocked("wayback: stopped at -max-pages; more remain, which the next run lists on")
+			r.partial = true
+			break
+		}
+		pending = append(pending, p)
+	}
+	r.mu.Unlock()
+
+	if len(pending) > 0 {
+		sctx, cancel := context.WithCancel(ctx)
+		defer cancel()
+
+		cdxWorkers := min(max(r.workers()/2, 2), 6)
+		if cdxWorkers > len(pending) {
+			cdxWorkers = len(pending)
+		}
+		ch := make(chan int, len(pending))
+		for _, p := range pending {
+			ch <- p
+		}
+		close(ch)
+
+		var wg sync.WaitGroup
+		var errMu sync.Mutex
+		var fatal error
+		var failed []string
+
+		for range cdxWorkers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for p := range ch {
+					if sctx.Err() != nil {
+						return
+					}
+					caps, err := r.o.Wayback.ShardPage(sctx, r.o.Host, p)
+					if err != nil {
+						errMu.Lock()
+						if errors.Is(err, ErrBlocked) || errors.Is(err, ErrExcluded) || ctx.Err() != nil {
+							if fatal == nil {
+								fatal = err
+							}
+							cancel()
+						} else {
+							failed = append(failed, fmt.Sprintf("page %d: %v", p, err))
+						}
+						errMu.Unlock()
+						continue
+					}
+					r.took(caps, func() {
+						r.st.Wayback.PagesDone[p] = true
+					})
+					r.mu.Lock()
+					n := r.st.Summary.Listed["wayback"]
+					doneCnt := len(r.st.Wayback.PagesDone)
+					r.mu.Unlock()
+					if doneCnt%5 == 0 || doneCnt == numPages {
+						r.o.Log("wayback: %d/%d shards (%d captures listed)", doneCnt, numPages, n)
+					}
+				}
+			}()
+		}
+		wg.Wait()
+
+		if fatal != nil {
+			return fatal
+		}
+		if len(failed) > 0 {
+			return fmt.Errorf("%d of %d shards failed (%s)", len(failed), numPages, failed[0])
+		}
+	}
+
+	r.mu.Lock()
+	if len(r.st.Wayback.PagesDone) >= numPages {
+		r.st.Wayback.Done = true
+		r.saveLocked()
+	}
+	r.mu.Unlock()
+	return nil
+}
+
 func (r *runner) listOTX(ctx context.Context) error {
 	for !r.st.OTX.Done {
 		page := r.st.OTX.Page + 1
@@ -116,9 +243,9 @@ func (r *runner) listOTX(ctx context.Context) error {
 		}
 		r.took(caps, func() { r.st.OTX.Page, r.st.OTX.Done = page, !more })
 	}
-	return r.extra("otx", func(host string) error {
+	return r.extra(ctx, "otx", func(hctx context.Context, host string) error {
 		for page := 1; page <= extraPages; page++ {
-			caps, more, err := r.o.OTX.Page(ctx, host, page)
+			caps, more, err := r.o.OTX.Page(hctx, host, page)
 			if err != nil {
 				return err
 			}
@@ -138,31 +265,81 @@ const (
 	extraPages    = 5
 )
 
-// extra lists a source's captures of each other host not listed yet.
-func (r *runner) extra(src string, list func(host string) error) error {
+// extra lists a source's captures of each other host not listed yet,
+// running multiple subdomains concurrently within the source's rate budget.
+func (r *runner) extra(ctx context.Context, src string, list func(ctx context.Context, host string) error) error {
+	var todo []string
+	r.mu.Lock()
 	for i, h := range r.o.ExtraHosts {
 		if MaxExtraHosts > 0 && i >= MaxExtraHosts {
 			break
 		}
 		key := src + " " + h
-		r.mu.Lock()
-		done := r.st.Extra[key]
-		r.mu.Unlock()
-		if done || strings.EqualFold(h, r.o.Host) {
+		if r.st.Extra[key] || strings.EqualFold(h, r.o.Host) {
 			continue
 		}
-		if err := list(h); err != nil {
-			return fmt.Errorf("%s: %w", h, err)
-		}
-		r.mu.Lock()
-		if r.st.Extra == nil {
-			r.st.Extra = map[string]bool{}
-		}
-		r.st.Extra[key] = true
-		r.saveLocked()
-		r.mu.Unlock()
+		todo = append(todo, h)
 	}
-	return nil
+	r.mu.Unlock()
+	if len(todo) == 0 {
+		return nil
+	}
+
+	ectx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	workers := min(max(r.workers()/2, 2), 4)
+	if workers > len(todo) {
+		workers = len(todo)
+	}
+	ch := make(chan string, len(todo))
+	for _, h := range todo {
+		ch <- h
+	}
+	close(ch)
+
+	var wg sync.WaitGroup
+	var errMu sync.Mutex
+	var fatal error
+	var firstErr error
+
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for h := range ch {
+				if ectx.Err() != nil {
+					return
+				}
+				if err := list(ectx, h); err != nil {
+					errMu.Lock()
+					if errors.Is(err, ErrBlocked) || ctx.Err() != nil {
+						if fatal == nil {
+							fatal = fmt.Errorf("%s: %w", h, err)
+						}
+						cancel()
+					} else if firstErr == nil {
+						firstErr = fmt.Errorf("%s: %w", h, err)
+					}
+					errMu.Unlock()
+					continue
+				}
+				key := src + " " + h
+				r.mu.Lock()
+				if r.st.Extra == nil {
+					r.st.Extra = map[string]bool{}
+				}
+				r.st.Extra[key] = true
+				r.saveLocked()
+				r.mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if fatal != nil {
+		return fatal
+	}
+	return firstErr
 }
 
 func (r *runner) listCC(ctx context.Context) error {

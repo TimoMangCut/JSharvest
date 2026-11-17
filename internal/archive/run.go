@@ -45,6 +45,7 @@ type Options struct {
 	MaxHTML int
 	Vendor  bool // fetch vendor libraries too
 	MaxBody int
+	Workers int // concurrent listing/fetch workers (0: default 8)
 	Wayback *Wayback
 	OTX     *OTX
 	CC      *CommonCrawl
@@ -97,8 +98,10 @@ const stateVersion = 2
 type state struct {
 	Query   string `json:"query"` // the listing's parameters: a resume key fits these only
 	Wayback struct {
-		Resume string `json:"resume,omitempty"`
-		Done   bool   `json:"done"`
+		Resume    string       `json:"resume,omitempty"`
+		NumPages  int          `json:"num_pages,omitempty"`
+		PagesDone map[int]bool `json:"pages_done,omitempty"`
+		Done      bool         `json:"done"`
 	} `json:"wayback"`
 	OTX struct {
 		Page int  `json:"page"`
@@ -145,8 +148,22 @@ type runner struct {
 	partial bool
 	// lives are the live checks made, by kind and URL: a URL the archive
 	// holds in several versions is asked once.
-	livesMu sync.Mutex
-	lives   map[string]liveAns
+	livesMu  sync.Mutex
+	lives    map[string]liveAns
+	liveWait map[string]chan struct{}
+}
+
+func (r *runner) workers() int {
+	if r.o.Workers > 0 {
+		return r.o.Workers
+	}
+	return 8
+}
+
+func (r *runner) sum(fn func(*Summary)) {
+	r.mu.Lock()
+	fn(&r.st.Summary)
+	r.mu.Unlock()
 }
 
 type liveAns struct {
@@ -162,11 +179,15 @@ func Run(ctx context.Context, o Options) (*Summary, error) {
 	if err := os.MkdirAll(o.Dir, 0o700); err != nil {
 		return nil, err
 	}
-	r := &runner{o: o, done: map[string]bool{}, cred: map[string]bool{}, namedURLs: map[string]bool{}, lives: map[string]liveAns{}}
+	r := &runner{o: o, done: map[string]bool{}, cred: map[string]bool{}, namedURLs: map[string]bool{}, lives: map[string]liveAns{}, liveWait: map[string]chan struct{}{}}
+	wbMode := ""
+	if o.Wayback != nil && (o.Wayback.Sharded || o.Wayback.Collapse != "") {
+		wbMode = fmt.Sprintf("|wb:%v:%s", o.Wayback.Sharded, o.Wayback.Collapse)
+	}
 	// stateVersion is in the key: a checkpoint of an older jsharvest, whose
 	// listing kept less (before 2: no html.jsonl, so no old page read), is
 	// listed again rather than resumed.
-	q := sha256.Sum256([]byte(fmt.Sprint(stateVersion, "|", o.Host, "|", o.Sources, "|", o.Since.Format(time.DateOnly))))
+	q := sha256.Sum256([]byte(fmt.Sprint(stateVersion, "|", o.Host, "|", o.Sources, "|", o.Since.Format(time.DateOnly), wbMode)))
 	query := hex.EncodeToString(q[:8])
 	if b, err := os.ReadFile(filepath.Join(o.Dir, "archive.json")); err == nil && json.Unmarshal(b, &r.st) == nil && r.st.Query == query {
 		o.Log("resuming: the listing %s", map[bool]string{true: "is done", false: "goes on"}[r.st.Listed])
@@ -193,6 +214,9 @@ func Run(ctx context.Context, o Options) (*Summary, error) {
 	}
 	if r.st.Extra == nil {
 		r.st.Extra = map[string]bool{}
+	}
+	if r.st.Wayback.PagesDone == nil {
+		r.st.Wayback.PagesDone = map[int]bool{}
 	}
 	var err error
 	if r.urls, err = appendFile(filepath.Join(o.Dir, "urls.jsonl")); err != nil {

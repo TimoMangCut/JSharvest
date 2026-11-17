@@ -27,7 +27,18 @@ func (r *runner) loadDone() {
 	}
 }
 
+func (r *runner) isDone(key string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.done[key]
+}
+
 func (r *runner) markDone(key string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.done[key] {
+		return
+	}
 	r.done[key] = true
 	f, err := appendFile(filepath.Join(r.o.Dir, "done.log"))
 	if err != nil {

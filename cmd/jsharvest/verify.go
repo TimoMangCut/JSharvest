@@ -39,7 +39,7 @@ func runVerify(args []string) error {
 	includeSourceOnly := fs.Bool("include-source-only", false, "probe endpoints found only in sourcemaps (tree-shaken from active bundles)")
 	noCloudProbe := fs.Bool("no-cloud-probe", false, "skip safe ACL checks of cloud storage URLs in intel.json")
 	scopeMode := fs.String("scope", "", "rdn or fqdn: the hosts requests may go to; default: the crawl's -scope")
-	concurrency := fs.Int("concurrency", 1, "hosts verified at once, each one request at a time (-rate stays the ceiling on all requests)")
+	concurrency := fs.Int("concurrency", 8, "hosts verified at once, each one request at a time (-rate stays the ceiling on all requests)")
 	gateAfter := fs.Int("gate-after", 0, "probes in a row on a host that all answer alike, as their canaries (a login, a device or app header before every route): the host's other drafts are not sent (0: never)")
 	rf := addReplayFlags(fs)
 	fs.Parse(args)

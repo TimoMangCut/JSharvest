@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -33,9 +34,89 @@ type Wayback struct {
 	Index    *Budget // the CDX server: slow
 	Files    *Budget // mementos
 	PageSize int
+	Collapse string // adjacent field collapse (e.g. "digest")
+	Sharded  bool   // use ZipNum showNumPages + parallel page=0..N-1 shards
 }
 
 var cdxFields = []string{"timestamp", "original", "mimetype", "statuscode", "digest"}
+
+func (w *Wayback) getCDX(ctx context.Context, u string) ([]byte, error) {
+	for try := 1; ; try++ {
+		a, err := w.Client.Get(ctx, w.Index, u, 512<<20)
+		if err != nil {
+			return nil, err
+		}
+		if a.Status == 403 && bytes.Contains(a.Body, []byte("AdministrativeAccessControlException")) {
+			return nil, ErrExcluded
+		}
+		if a.Status == 200 && offline(a.Body) {
+			// The Internet Archive's "Temporarily Offline" page, sent as a
+			// 200 (ARC-05): the same page again, after a while.
+			if try >= w.Client.Tries {
+				return nil, fmt.Errorf("%w: the CDX server answered %d times with a page: %s", ErrUnavailable, try, head(a.Body, 120))
+			}
+			if err := sleep(ctx, w.Client.Wait); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if a.Status != 200 {
+			return nil, fmt.Errorf("CDX: %d %s", a.Status, head(a.Body, 200))
+		}
+		return a.Body, nil
+	}
+}
+
+// NumPages asks the CDX server how many ZipNum block pages exist for host.
+// If the server is a mock/older endpoint that ignores showNumPages and returns
+// a CDX JSON array instead, supported is false so the caller falls back to resumeKey.
+func (w *Wayback) NumPages(ctx context.Context, host string) (pages int, supported bool, err error) {
+	q := url.Values{}
+	q.Set("url", host)
+	q.Set("matchType", "domain")
+	q.Set("showNumPages", "true")
+	if w.Collapse != "" {
+		q.Set("collapse", w.Collapse)
+	}
+	body, err := w.getCDX(ctx, w.Base+"/cdx/search/cdx?"+q.Encode())
+	if err != nil {
+		return 0, false, err
+	}
+	trimmed := strings.TrimSpace(string(body))
+	if trimmed == "" {
+		return 0, true, nil
+	}
+	if n, err := strconv.Atoi(trimmed); err == nil && n >= 0 {
+		return n, true, nil
+	}
+	var obj struct {
+		Pages int `json:"pages"`
+	}
+	if strings.HasPrefix(trimmed, "{") && json.Unmarshal([]byte(trimmed), &obj) == nil {
+		return obj.Pages, true, nil
+	}
+	return 0, false, nil
+}
+
+// ShardPage fetches a single independent ZipNum block shard (page=0..N-1),
+// safe for concurrent workers and bounded on the server to one ZipNum slice.
+func (w *Wayback) ShardPage(ctx context.Context, host string, page int) ([]Capture, error) {
+	q := url.Values{}
+	q.Set("url", host)
+	q.Set("matchType", "domain")
+	q.Set("output", "json")
+	q.Set("fl", strings.Join(cdxFields, ","))
+	q.Set("page", strconv.Itoa(page))
+	if w.Collapse != "" {
+		q.Set("collapse", w.Collapse)
+	}
+	body, err := w.getCDX(ctx, w.Base+"/cdx/search/cdx?"+q.Encode())
+	if err != nil {
+		return nil, err
+	}
+	caps, _, err := parseCDX(body)
+	return caps, err
+}
 
 // Page lists one page of a host's captures (its subdomains too), from a
 // resume key ("" for the first). It returns the next page's key, "" when
@@ -49,34 +130,17 @@ func (w *Wayback) Page(ctx context.Context, host, resume string) ([]Capture, str
 	q.Set("fl", strings.Join(cdxFields, ","))
 	q.Set("showResumeKey", "true")
 	q.Set("limit", fmt.Sprint(w.PageSize))
+	if w.Collapse != "" && !w.Sharded {
+		q.Set("collapse", w.Collapse)
+	}
 	if resume != "" {
 		q.Set("resumeKey", resume)
 	}
-	u := w.Base + "/cdx/search/cdx?" + q.Encode()
-	for try := 1; ; try++ {
-		a, err := w.Client.Get(ctx, w.Index, u, 512<<20)
-		if err != nil {
-			return nil, "", err
-		}
-		if a.Status == 403 && bytes.Contains(a.Body, []byte("AdministrativeAccessControlException")) {
-			return nil, "", ErrExcluded
-		}
-		if a.Status == 200 && offline(a.Body) {
-			// The Internet Archive's "Temporarily Offline" page, sent as a
-			// 200 (ARC-05): the same page again, after a while.
-			if try >= w.Client.Tries {
-				return nil, "", fmt.Errorf("%w: the CDX server answered %d times with a page: %s", ErrUnavailable, try, head(a.Body, 120))
-			}
-			if err := sleep(ctx, w.Client.Wait); err != nil {
-				return nil, "", err
-			}
-			continue
-		}
-		if a.Status != 200 {
-			return nil, "", fmt.Errorf("CDX: %d %s", a.Status, head(a.Body, 200))
-		}
-		return parseCDX(a.Body)
+	body, err := w.getCDX(ctx, w.Base+"/cdx/search/cdx?"+q.Encode())
+	if err != nil {
+		return nil, "", err
 	}
+	return parseCDX(body)
 }
 
 // offline reports an answer that is a page, not the CDX server's JSON.

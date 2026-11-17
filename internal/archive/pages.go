@@ -215,6 +215,8 @@ func (r *runner) named(raw string) bool {
 	if credential(u) || detect.ChallengeURL(raw) || detect.InfraURL(raw) {
 		return false
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.namedURLs[raw] {
 		return false
 	}
@@ -232,7 +234,6 @@ func (r *runner) chunks(g *group, body []byte) []*group {
 	}
 	c := g.latest
 	var out []*group
-	jsEnc := json.NewEncoder(r.js)
 	// The page that ran it is not known: its origin's root stands for it
 	// (ARC-04). A worker's or Vite's path is the document's, not the
 	// script's; webpack's chunks go by the script's URL either way.
@@ -259,8 +260,10 @@ func (r *runner) chunks(g *group, body []byte) []*group {
 			continue
 		}
 		nc := Capture{URL: u, Time: c.Time, Timestamp: c.Timestamp, Source: fromResolve}
-		jsEnc.Encode(nc)
+		r.mu.Lock()
+		json.NewEncoder(r.js).Encode(nc)
 		r.st.Summary.Resolved++
+		r.mu.Unlock()
 		out = append(out, &group{key: "url:" + u, latest: nc, urls: []string{u}, sources: []string{fromResolve},
 			first: c.Time, last: c.Time, captures: 1})
 	}

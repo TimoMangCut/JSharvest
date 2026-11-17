@@ -447,11 +447,30 @@ func Crawl(ctx context.Context, o Options) (*Result, error) {
 		if probeRef == "" {
 			probeRef = o.Target.String()
 		}
-		for _, origin := range origins {
-			if cr.stop() != "" || ctx.Err() != nil {
-				break
+		if len(origins) > 0 {
+			specWorkers := min(max(cr.o.Workers, 4), 8)
+			if specWorkers > len(origins) {
+				specWorkers = len(origins)
 			}
-			cr.specProbeWithScope(ctx, origin, probeRef, cr.specCtx.HeadersFor(origin, o.InScope), nil, true)
+			ch := make(chan string, len(origins))
+			for _, origin := range origins {
+				ch <- origin
+			}
+			close(ch)
+			var wg sync.WaitGroup
+			for range specWorkers {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for origin := range ch {
+						if cr.stop() != "" || ctx.Err() != nil {
+							return
+						}
+						cr.specProbeWithScope(ctx, origin, probeRef, cr.specCtx.HeadersFor(origin, o.InScope), nil, true)
+					}
+				}()
+			}
+			wg.Wait()
 		}
 		if cr.stop() == "" && ctx.Err() == nil {
 			cr.specProbePhase2(ctx, probeRef)
@@ -1275,11 +1294,30 @@ func (cr *crawler) politeSpecAt(a answer, base, referer string, postPages bool) 
 	}
 }
 
-func (cr *crawler) specProbe(ctx context.Context, base, referer string, hdrs []jsapi.Header, budget *int) {
+func tryTakeSpecBudget(budget *atomic.Int64) bool {
+	if budget == nil {
+		return true
+	}
+	for {
+		cur := budget.Load()
+		if cur <= 0 {
+			return false
+		}
+		if budget.CompareAndSwap(cur, cur-1) {
+			return true
+		}
+	}
+}
+
+func specBudgetExhausted(budget *atomic.Int64) bool {
+	return budget != nil && budget.Load() <= 0
+}
+
+func (cr *crawler) specProbe(ctx context.Context, base, referer string, hdrs []jsapi.Header, budget *atomic.Int64) {
 	cr.specProbeWithScope(ctx, base, referer, hdrs, budget, false)
 }
 
-func (cr *crawler) specProbeWithScope(ctx context.Context, base, referer string, hdrs []jsapi.Header, budget *int, postPages bool) {
+func (cr *crawler) specProbeWithScope(ctx context.Context, base, referer string, hdrs []jsapi.Header, budget *atomic.Int64, postPages bool) {
 	base = strings.TrimRight(base, "/")
 	if _, err := url.Parse(base); err != nil || cr.specPolicy.Check(base+"/") != resolve.Allow || cr.specHostBlocked(base) {
 		return
@@ -1288,14 +1326,14 @@ func (cr *crawler) specProbeWithScope(ctx context.Context, base, referer string,
 		if cr.stop() != "" || cr.specHostBlocked(targetURL) || ctx.Err() != nil {
 			return answer{}, false
 		}
-		if budget != nil && *budget <= 0 {
+		if specBudgetExhausted(budget) {
 			return answer{}, false
 		}
 		if ok, _ := cr.claim(targetURL); !ok {
 			return answer{}, false
 		}
-		if budget != nil {
-			*budget--
+		if !tryTakeSpecBudget(budget) {
+			return answer{}, false
 		}
 		a := cr.fetchWithHeaders(ctx, targetURL, referer, dataReq, "Other", hdrs)
 		cr.politeSpecAt(a, base, referer, postPages)
@@ -1323,14 +1361,14 @@ func (cr *crawler) specProbeWithScope(ctx context.Context, base, referer string,
 	}
 
 	for _, p := range frontier.SpecPaths {
-		if cr.stop() != "" || cr.specHostBlocked(base) || ctx.Err() != nil || (budget != nil && *budget <= 0) {
+		if cr.stop() != "" || cr.specHostBlocked(base) || ctx.Err() != nil || specBudgetExhausted(budget) {
 			return
 		}
 		targetURL := frontier.JoinSpecBase(base, p)
 		a, stored := fetchSpec(targetURL, p)
 		if !stored && p == "/swagger-resources" && a.Err == nil && a.Status == 200 && !htmlLike(a.Body) {
 			for _, rel := range jsapi.SwaggerResources(a.Body) {
-				if cr.stop() != "" || cr.specHostBlocked(base) || ctx.Err() != nil || (budget != nil && *budget <= 0) {
+				if cr.stop() != "" || cr.specHostBlocked(base) || ctx.Err() != nil || specBudgetExhausted(budget) {
 					break
 				}
 				docURL := frontier.JoinSpecBase(base, rel)
@@ -1350,22 +1388,42 @@ func (cr *crawler) specProbePhase2(ctx context.Context, referer string) {
 	cr.mu.Unlock()
 
 	plan := cr.specCtx.Plan(seedOrig, cr.o.InScope)
-	var budgetPtr *int
+	var budgetPtr *atomic.Int64
 	if frontier.MaxPhase2SpecProbes > 0 {
-		b := frontier.MaxPhase2SpecProbes
+		var b atomic.Int64
+		b.Store(int64(frontier.MaxPhase2SpecProbes))
 		budgetPtr = &b
 	}
 
-	// (a) Gateway / Base Spec Probe.
-	for _, base := range plan.Bases {
-		if cr.stop() != "" || ctx.Err() != nil || (budgetPtr != nil && *budgetPtr <= 0) {
-			return
+	// (a) Gateway / Base Spec Probe (concurrent across discovered bases).
+	if len(plan.Bases) > 0 {
+		baseWorkers := min(max(cr.o.Workers, 4), 8)
+		if baseWorkers > len(plan.Bases) {
+			baseWorkers = len(plan.Bases)
 		}
-		if cr.specHostBlocked(base) {
-			continue
+		bch := make(chan string, len(plan.Bases))
+		for _, base := range plan.Bases {
+			bch <- base
 		}
-		hdrs := cr.specCtx.HeadersFor(base, cr.o.InScope)
-		cr.specProbeWithScope(ctx, base, referer, hdrs, budgetPtr, true)
+		close(bch)
+		var bwg sync.WaitGroup
+		for range baseWorkers {
+			bwg.Add(1)
+			go func() {
+				defer bwg.Done()
+				for base := range bch {
+					if cr.stop() != "" || ctx.Err() != nil || specBudgetExhausted(budgetPtr) {
+						return
+					}
+					if cr.specHostBlocked(base) {
+						continue
+					}
+					hdrs := cr.specCtx.HeadersFor(base, cr.o.InScope)
+					cr.specProbeWithScope(ctx, base, referer, hdrs, budgetPtr, true)
+				}
+			}()
+		}
+		bwg.Wait()
 	}
 
 	// (b) Service Sub-Prefix Doc Probe + D3 Auto-Brake.
@@ -1378,7 +1436,7 @@ func (cr *crawler) specProbePhase2(ctx context.Context, referer string) {
 	gates := map[string]*gateState{}
 
 	for _, svc := range plan.Services {
-		if cr.stop() != "" || ctx.Err() != nil || (budgetPtr != nil && *budgetPtr <= 0) {
+		if cr.stop() != "" || ctx.Err() != nil || specBudgetExhausted(budgetPtr) {
 			return
 		}
 		if cr.specPolicy.Check(svc.PrefixURL+"/") != resolve.Allow || cr.specHostBlocked(svc.PrefixURL) {
@@ -1394,15 +1452,15 @@ func (cr *crawler) specProbePhase2(ctx context.Context, referer string) {
 		}
 		hdrs := cr.specCtx.HeadersFor(svc.PrefixURL, cr.o.InScope)
 		for _, p := range frontier.ServiceDocPaths {
-			if cr.stop() != "" || cr.specHostBlocked(svc.PrefixURL) || ctx.Err() != nil || (budgetPtr != nil && *budgetPtr <= 0) || gs.braked {
+			if cr.stop() != "" || cr.specHostBlocked(svc.PrefixURL) || ctx.Err() != nil || specBudgetExhausted(budgetPtr) || gs.braked {
 				break
 			}
 			targetURL := frontier.JoinSpecBase(svc.PrefixURL, p)
 			if ok, _ := cr.claim(targetURL); !ok {
 				continue
 			}
-			if budgetPtr != nil {
-				*budgetPtr--
+			if !tryTakeSpecBudget(budgetPtr) {
+				break
 			}
 			a := cr.fetchWithHeaders(ctx, targetURL, referer, dataReq, "Other", hdrs)
 			cr.politeSpecAt(a, svc.PrefixURL, referer, true)

@@ -169,10 +169,10 @@ func (r *runner) listURLScan(ctx context.Context) error {
 			st.After, st.Searched = next, next == ""
 		})
 	}
-	err := r.extra("urlscan", func(host string) error {
+	err := r.extra(ctx, "urlscan", func(hctx context.Context, host string) error {
 		after := ""
 		for page := 0; page < 2; page++ {
-			caps, scans, next, err := r.o.URLScan.Search(ctx, host, after)
+			caps, scans, next, err := r.o.URLScan.Search(hctx, host, after)
 			if err != nil {
 				return err
 			}
