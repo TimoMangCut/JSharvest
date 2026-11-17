@@ -29,6 +29,7 @@ type BatchPart struct {
 	Op    string
 	Index int
 	Body  string
+	URL   string
 }
 
 // batchElements reads a body that is a JSON array. It is nil for anything

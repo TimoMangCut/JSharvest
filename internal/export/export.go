@@ -92,22 +92,47 @@ func (it *item) split(p flow.BatchPart, u *url.URL) *item {
 	c := *it
 	c.parts = nil
 	c.op = p.Op
-	c.key = it.e.Method + " " + u.Host + it.tmpl
+	pu := u
+	if p.URL != "" {
+		c.e.URL = p.URL
+		if parsed, err := url.Parse(p.URL); err == nil {
+			pu = parsed
+			c.tmpl = flow.ByShape(parsed.EscapedPath())
+		}
+	}
+	c.key = it.e.Method + " " + pu.Host + c.tmpl
 	if p.Op != "" {
 		c.key += " " + p.Op
 	}
 	// The places that came from earlier responses were named on the whole
-	// batch: this request's element is $[0], and the others' are not its.
+	// batch: this request's element is $[0] (or $.0), and the others' are not its.
 	if it.derived != nil {
-		at := "body:$[" + strconv.Itoa(p.Index) + "]"
+		idx := strconv.Itoa(p.Index)
+		arrAt := "body:$[" + idx + "]"
+		objAt := "body:$." + idx
+		qObjAt := "query:input$." + idx
+		qArrAt := "query:input$[" + idx + "]"
 		d := make(map[string]flow.LinkEnd, len(it.derived))
 		for k, v := range it.derived {
-			if !strings.HasPrefix(k, "body:$[") {
+			switch {
+			case strings.HasPrefix(k, "body:$["):
+				if rest, ok := strings.CutPrefix(k, arrAt); ok && (rest == "" || rest[0] == '.' || rest[0] == '[') {
+					d["body:$[0]"+rest] = v
+				}
+			case p.URL != "" && strings.HasPrefix(k, "body:$.") && len(k) > len("body:$.") && k[len("body:$.")] >= '0' && k[len("body:$.")] <= '9':
+				if rest, ok := strings.CutPrefix(k, objAt); ok && (rest == "" || rest[0] == '.' || rest[0] == '[') {
+					d["body:$.0"+rest] = v
+				}
+			case p.URL != "" && strings.HasPrefix(k, "query:input$."):
+				if rest, ok := strings.CutPrefix(k, qObjAt); ok && (rest == "" || rest[0] == '.' || rest[0] == '[') {
+					d["query:input$.0"+rest] = v
+				}
+			case p.URL != "" && strings.HasPrefix(k, "query:input$["):
+				if rest, ok := strings.CutPrefix(k, qArrAt); ok && (rest == "" || rest[0] == '.' || rest[0] == '[') {
+					d["query:input$[0]"+rest] = v
+				}
+			default:
 				d[k] = v
-				continue
-			}
-			if rest, ok := strings.CutPrefix(k, at); ok && (rest == "" || rest[0] == '.' || rest[0] == '[') {
-				d["body:$[0]"+rest] = v
 			}
 		}
 		c.derived = d
@@ -395,7 +420,7 @@ func (x *exporter) endpoints() {
 		it.ep = ep
 		it.tmpl = strings.Join(segs, "/")
 		it.op = flow.OperationWithHeaders(u, it.e.Headers, it.e.Headers["content-type"], it.e.Body.Body)
-		batch := flow.SplitBatch(it.e.Body.Body)
+		batch := flow.SplitBatchWithURL(u, it.e.Headers["content-type"], it.e.Body.Body)
 		it.key = it.e.Method + " " + u.Host + it.tmpl
 		if it.op != "" {
 			it.key += " " + it.op

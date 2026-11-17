@@ -102,6 +102,10 @@ func RequestValues(e traffic.Entry) []Value {
 		for k, vs := range u.Query() {
 			for _, v := range vs {
 				c.add(v, "query:"+k)
+				tv := strings.TrimSpace(v)
+				if (strings.HasPrefix(tv, "{") && strings.HasSuffix(tv, "}")) || (strings.HasPrefix(tv, "[") && strings.HasSuffix(tv, "]")) {
+					bodyValues(&c, tv, "application/json", "query:"+k)
+				}
 			}
 		}
 	}

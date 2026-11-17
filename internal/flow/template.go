@@ -148,7 +148,7 @@ func oneVarying(shapes [][]string, idx []int) (int, bool) {
 			fixedName = true
 		}
 	}
-	if pos < 0 || !fixedName {
+	if pos < 0 || !fixedName || isProtectedRPCSegment(shapes, idx, pos) {
 		return 0, false
 	}
 	values := map[string]bool{}

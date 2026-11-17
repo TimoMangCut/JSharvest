@@ -283,3 +283,131 @@ func TestNextServerActionsExportDiffAndBola(t *testing.T) {
 		t.Fatalf("JudgePeer on RSC Flight response = %+v, want bypass with structured evidence", pj)
 	}
 }
+
+func TestTRPCBatchExportAndBola(t *testing.T) {
+	const (
+		invAlice = "7a11ce00-1111-4111-8111-000000000001"
+		invBob   = "7b0b0000-2222-4222-8222-000000000002"
+	)
+	invoices := map[string][2]string{
+		invAlice: {"alice@acme.test", "TRPC-ALICE-MEMO-77123"},
+		invBob:   {"bob@acme.test", "TRPC-BOB-MEMO-55210"},
+	}
+	sessions := map[string]string{
+		"tok-trpc-alice-0001": "alice",
+		"tok-trpc-bob-000002": "bob",
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := r.Cookie("sess")
+		user := ""
+		if err == nil {
+			user = sessions[c.Value]
+		}
+		if user == "" {
+			w.WriteHeader(401)
+			return
+		}
+		const prefix = "/api/trpc/"
+		if r.Method != "GET" || !strings.HasPrefix(r.URL.Path, prefix) {
+			w.WriteHeader(404)
+			return
+		}
+		procs := strings.Split(strings.TrimPrefix(r.URL.Path, prefix), ",")
+		var inputs map[string]struct {
+			JSON map[string]string `json:"json"`
+		}
+		_ = json.Unmarshal([]byte(r.URL.Query().Get("input")), &inputs)
+
+		out := make([]any, len(procs))
+		for i, proc := range procs {
+			idx := fmt.Sprintf("%d", i)
+			switch proc {
+			case "user.me":
+				out[i] = map[string]any{"result": map[string]any{"data": map[string]any{"json": map[string]any{"user": user}}}}
+			case "invoice.byId":
+				id := inputs[idx].JSON["id"]
+				if inv, ok := invoices[id]; ok {
+					// Deliberate BOLA flaw: returns invoice by ID without checking owner!
+					out[i] = map[string]any{"result": map[string]any{"data": map[string]any{"json": map[string]any{
+						"id":         id,
+						"ownerEmail": inv[0],
+						"secretMemo": inv[1],
+					}}}}
+				} else {
+					out[i] = map[string]any{"result": map[string]any{"data": map[string]any{"json": nil}}}
+				}
+			default:
+				w.WriteHeader(404)
+				return
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		json.NewEncoder(w).Encode(out)
+	}))
+	defer srv.Close()
+
+	root := t.TempDir()
+	host := strings.TrimPrefix(srv.URL, "http://")
+
+	recordTRPCBatch := func(role, tok, invID string) {
+		rawInput := fmt.Sprintf(`{"0":{"json":null},"1":{"json":{"id":%q}}}`, invID)
+		path := "/api/trpc/user.me,invoice.byId?batch=1&input=" + strings.ReplaceAll(
+			strings.ReplaceAll(strings.ReplaceAll(rawInput, `{`, `%7B`), `}`, `%7D`),
+			`"`, `%22`)
+		path = strings.ReplaceAll(path, `:`, `%3A`)
+		path = strings.ReplaceAll(path, `,`, `%2C`)
+		// Restore comma in procedure path segment!
+		path = strings.Replace(path, "/api/trpc/user.me%2Cinvoice.byId", "/api/trpc/user.me,invoice.byId", 1)
+		recordDir(t, srv.URL, filepath.Join(root, role), tok, []rq{{method: "GET", path: path}}, nil)
+	}
+	recordTRPCBatch("alice", "tok-trpc-alice-0001", invAlice)
+	recordTRPCBatch("bob", "tok-trpc-bob-000002", invBob)
+
+	// 1. Export splits the batched request into two independent procedure endpoints.
+	mod, err := export.Load(export.Options{Dir: filepath.Join(root, "alice")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantMe := "GET " + host + "/api/trpc/user.me"
+	wantInv := "GET " + host + "/api/trpc/invoice.byId"
+	seen := map[string]bool{}
+	for _, r := range mod.Requests {
+		seen[r.Key] = true
+	}
+	if !seen[wantMe] || !seen[wantInv] {
+		t.Fatalf("export.Load keys = %v, want %q and %q", seen, wantMe, wantInv)
+	}
+
+	// 2. Bola isolates invoice.byId from user.me, patches Bogus UUID inside URL-encoded input JSON, and proves Bypass!
+	snd, err := NewSender(SenderOptions{AllowPrivate: true, Max: 500, Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer snd.Close()
+	rep, err := Bola(context.Background(), BolaOptions{
+		Root:     root,
+		Peers:    [2]string{"alice", "bob"},
+		Relation: RelCrossOrg,
+		Sender:   snd,
+		InScope:  func(string) bool { return true },
+		Out:      filepath.Join(root, "authz"),
+		Reveal:   true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundInv := false
+	for _, it := range rep.Items {
+		if it.Key == wantInv && it.Direction == "alice->bob" {
+			if it.Verdict != Bypass {
+				t.Fatalf("Bola verdict for %s = %s (%s), want bypass", it.Key, it.Verdict, it.Reason)
+			}
+			foundInv = true
+		}
+	}
+	if !foundInv {
+		t.Fatalf("did not find alice->bob trial on %q in %+v", wantInv, rep.Items)
+	}
+}

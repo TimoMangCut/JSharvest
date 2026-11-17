@@ -158,9 +158,84 @@ func pairs(s string, off int, in string, add func(Param)) {
 				start++
 			}
 			add(Param{In: in, Name: name, Value: dv, Start: start, End: off + len(kv)})
+			if in == "query" {
+				scanQueryJSON(v, start, name, add)
+			}
 		}
 		off += len(kv) + 1
 	}
+}
+
+func scanQueryJSON(rawVal string, valStart int, name string, add func(Param)) {
+	dec, offs, ok := unescapeQueryWithOffsets(rawVal)
+	if !ok || len(dec) < 2 {
+		return
+	}
+	if !((dec[0] == '{' && dec[len(dec)-1] == '}') || (dec[0] == '[' && dec[len(dec)-1] == ']')) {
+		return
+	}
+	if !json.Valid([]byte(dec)) {
+		return
+	}
+	s := &jscan{
+		b:    []byte(dec),
+		base: 0,
+		add: func(jp Param) {
+			if jp.In != "json" || jp.Start < 0 || jp.End > len(dec) {
+				return
+			}
+			add(Param{
+				In:    "query",
+				Name:  name + jp.Name,
+				Value: jp.Value,
+				Start: valStart + offs[jp.Start],
+				End:   valStart + offs[jp.End],
+			})
+		},
+	}
+	s.ws()
+	s.value("$", 0)
+}
+
+func unescapeQueryWithOffsets(s string) (string, []int, bool) {
+	var b strings.Builder
+	offs := make([]int, 0, len(s)+1)
+	for i := 0; i < len(s); {
+		offs = append(offs, i)
+		switch s[i] {
+		case '%':
+			if i+2 >= len(s) {
+				return "", nil, false
+			}
+			hi, ok1 := fromHex(s[i+1])
+			lo, ok2 := fromHex(s[i+2])
+			if !ok1 || !ok2 {
+				return "", nil, false
+			}
+			b.WriteByte(hi<<4 | lo)
+			i += 3
+		case '+':
+			b.WriteByte(' ')
+			i++
+		default:
+			b.WriteByte(s[i])
+			i++
+		}
+	}
+	offs = append(offs, len(s))
+	return b.String(), offs, true
+}
+
+func fromHex(c byte) (byte, bool) {
+	switch {
+	case c >= '0' && c <= '9':
+		return c - '0', true
+	case c >= 'a' && c <= 'f':
+		return c - 'a' + 10, true
+	case c >= 'A' && c <= 'F':
+		return c - 'A' + 10, true
+	}
+	return 0, false
 }
 
 var (

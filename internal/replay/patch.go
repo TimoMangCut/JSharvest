@@ -30,6 +30,27 @@ func Patch(raw []byte, at, value string) ([]byte, error) {
 		// A JSON number, boolean or null has no quotes: another value
 		// goes in as one only when it is one, else as a string.
 		bare := p.In == "json" && (p.Start == 0 || raw[p.Start-1] != '"')
+		queryJSON := p.In == "query" && strings.Contains(p.Name, "$")
+		if queryJSON {
+			quoted := (p.Start > 0 && raw[p.Start-1] == '"') ||
+				(p.Start >= 3 && raw[p.Start-3] == '%' && raw[p.Start-2] == '2' && raw[p.Start-1] == '2')
+			var enc string
+			switch {
+			case quoted:
+				jb, _ := json.Marshal(value)
+				enc = url.QueryEscape(string(jb[1 : len(jb)-1]))
+			case jsonScalarRe.MatchString(value):
+				enc = url.QueryEscape(value)
+			default:
+				jb, _ := json.Marshal(value)
+				enc = url.QueryEscape(string(jb))
+			}
+			out := make([]byte, 0, len(raw)+len(enc))
+			out = append(out, raw[:p.Start]...)
+			out = append(out, enc...)
+			out = append(out, raw[p.End:]...)
+			return SetLength(out), nil
+		}
 		enc, err := encode(p, value)
 		if bare && !jsonScalarRe.MatchString(value) {
 			b, _ := json.Marshal(value)

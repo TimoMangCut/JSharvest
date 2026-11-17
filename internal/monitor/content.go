@@ -189,16 +189,26 @@ func build(dir string, runs []string, target string, inScope func(string) bool) 
 			ct := e.Headers["content-type"]
 			// A GraphQL batch is one request at many endpoints: each
 			// operation is filed with the params of its own element.
-			type opBody struct{ op, body string }
-			sends := []opBody{{flow.OperationWithHeaders(u, e.Headers, ct, e.Body.Body), e.Body.Body}}
-			if parts := flow.SplitBatch(e.Body.Body); parts != nil {
+			type opBody struct {
+				u    *url.URL
+				op   string
+				body string
+			}
+			sends := []opBody{{u, flow.OperationWithHeaders(u, e.Headers, ct, e.Body.Body), e.Body.Body}}
+			if parts := flow.SplitBatchWithURL(u, ct, e.Body.Body); parts != nil {
 				sends = sends[:0]
 				for _, p := range parts {
-					sends = append(sends, opBody{p.Op, p.Body})
+					pu := u
+					if p.URL != "" {
+						if parsed, err := url.Parse(p.URL); err == nil {
+							pu = parsed
+						}
+					}
+					sends = append(sends, opBody{pu, p.Op, p.Body})
 				}
 			}
 			for _, sd := range sends {
-				ep := &Endpoint{Method: q.Method, Host: u.Host, Path: normPath(u.EscapedPath()), Traffic: true, Params: map[string]bool{},
+				ep := &Endpoint{Method: q.Method, Host: sd.u.Host, Path: normPath(sd.u.EscapedPath()), Traffic: true, Params: map[string]bool{},
 					Op: sd.op}
 				got := c.add(ep)
 				switch s := q.Status; {
@@ -207,7 +217,7 @@ func build(dir string, runs []string, target string, inScope func(string) bool) 
 				case s == 401 || s == 403:
 					got.Refused++
 				}
-				for _, n := range requestParams(u, ct, sd.body) {
+				for _, n := range requestParams(sd.u, ct, sd.body) {
 					seen[got.Key()+"|"+n]++
 					if seen[got.Key()+"|"+n] >= 2 {
 						got.Params[n] = true // a name seen once in traffic is no sign

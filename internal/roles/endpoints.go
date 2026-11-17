@@ -55,20 +55,37 @@ func (c *comparer) endpoints(_ []Item, _ []Item) []Item {
 			}
 			cl := call{role: i, req: q}
 			slim := traffic.Entry{Method: q.Method, URL: q.URL}
-			var more []call // a GraphQL batch: a call for each operation after the first
+			type extraCall struct {
+				cl   call
+				slim traffic.Entry
+			}
+			var more []extraCall // a GraphQL or tRPC batch: a call for each operation after the first
 			if entry, err := d.res.Entry(q.Run, q.ID); err == nil {
 				ct := entry.Headers["content-type"]
 				cl.params, cl.op = paramNamesWithHeaders(q.Method, u, entry.Headers, ct, entry.Body.Body)
 				slim.Initiator = entry.Initiator
-				if parts := flow.SplitBatch(entry.Body.Body); parts != nil {
+				if parts := flow.SplitBatchWithURL(u, ct, entry.Body.Body); parts != nil {
 					for k, p := range parts {
-						c1 := call{role: i, req: q}
-						c1.params, c1.op = paramNamesWithHeaders(q.Method, u, entry.Headers, ct, p.Body)
+						pu := u
+						qPart := q
+						slimPart := slim
+						if p.URL != "" {
+							if parsed, err := url.Parse(p.URL); err == nil {
+								pu = parsed
+								qCopy := *q
+								qCopy.URL = p.URL
+								qPart = &qCopy
+								slimPart.URL = p.URL
+							}
+						}
+						c1 := call{role: i, req: qPart}
+						c1.params, c1.op = paramNamesWithHeaders(q.Method, pu, entry.Headers, ct, p.Body)
 						c1.op = p.Op
 						if k == 0 {
 							cl = c1
+							slim = slimPart
 						} else {
-							more = append(more, c1)
+							more = append(more, extraCall{c1, slimPart})
 						}
 					}
 				}
@@ -76,8 +93,8 @@ func (c *comparer) endpoints(_ []Item, _ []Item) []Item {
 			calls = append(calls, cl)
 			tcalls = append(tcalls, slim)
 			for _, m := range more {
-				calls = append(calls, m)
-				tcalls = append(tcalls, slim)
+				calls = append(calls, m.cl)
+				tcalls = append(tcalls, m.slim)
 			}
 		}
 	}
