@@ -40,12 +40,19 @@ func (r *runner) markDone(key string) {
 		return
 	}
 	r.done[key] = true
-	f, err := appendFile(filepath.Join(r.o.Dir, "done.log"))
-	if err != nil {
+	if r.o.Dir == "" {
 		return
 	}
-	fmt.Fprintln(f, key)
-	f.Close()
+	if r.doneBuf == nil {
+		f, err := appendFile(filepath.Join(r.o.Dir, "done.log"))
+		if err != nil {
+			return
+		}
+		r.doneFile = f
+		r.doneBuf = bufio.NewWriterSize(f, 64<<10)
+	}
+	fmt.Fprintln(r.doneBuf, key)
+	_ = r.doneBuf.Flush()
 }
 
 // group is one content of the archives: the captures of one digest, or
@@ -67,6 +74,7 @@ type group struct {
 var vendorRe = regexp.MustCompile(`(?i)(^|[/._-])(vendors?|chunk-vendors|polyfills?|jquery|react(-dom)?|angular|vue|lodash|moment|bootstrap|gtag|analytics|gtm|recaptcha|hotjar|sentry|zone)([/._~-]|$)`)
 
 func (r *runner) groups() ([]*group, error) {
+	r.flushFiles()
 	f, err := os.Open(filepath.Join(r.o.Dir, "js.jsonl"))
 	if err != nil {
 		return nil, err
@@ -75,7 +83,7 @@ func (r *runner) groups() ([]*group, error) {
 	by := map[string]*group{}
 	digestOf := map[string]string{} // URL → a digest the CDX gives it
 	var noDigest []Capture
-	dec := json.NewDecoder(f)
+	dec := json.NewDecoder(bufio.NewReaderSize(f, 1<<20))
 	for {
 		var c Capture
 		if err := dec.Decode(&c); err == io.EOF {

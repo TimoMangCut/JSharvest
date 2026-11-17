@@ -120,7 +120,7 @@ func (u *URLScan) get(ctx context.Context, raw string) (*Answer, error) {
 	if u.Key != "" {
 		h = http.Header{"Api-Key": {u.Key}}
 	}
-	a, err := u.Client.GetWith(ctx, u.Budget, raw, 64<<20, h)
+	a, err := u.Client.GetIndexWith(ctx, u.Budget, raw, 64<<20, h)
 	if err != nil {
 		return nil, err
 	}

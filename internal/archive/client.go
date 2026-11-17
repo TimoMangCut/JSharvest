@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -89,6 +90,9 @@ func NewClientSafe(proxy *url.URL, rules netsafe.Rules, services []string) *Clie
 	tr.Proxy = netsafe.ProxyFunc(proxy, rules)
 	tr.DialContext = d.DialContext
 	tr.DisableCompression = true
+	tr.MaxIdleConns = 64
+	tr.MaxIdleConnsPerHost = 32
+	tr.IdleConnTimeout = 90 * time.Second
 	g := netsafe.Guard{Next: tr, AllowHost: isAllowed, Rules: rules}
 	return &Client{HTTP: &http.Client{Transport: g, Timeout: 120 * time.Second}, UA: "jsharvest (archive; +https://github.com/TimoMangCut/JSharvest)",
 		Wait: 60 * time.Second, Tries: 4}
@@ -103,14 +107,30 @@ type Answer struct {
 }
 
 // Get gets a URL within a budget, reading at most max bytes of the body.
-// It retries 429, 502, 503 and 504 after Retry-After or Wait, and a broken
-// connection; connections refused again and again give ErrBlocked.
+// It sends Accept-Encoding: identity so raw archived payloads match their
+// SHA-1 base32 digest.
 func (c *Client) Get(ctx context.Context, b *Budget, rawURL string, max int64) (*Answer, error) {
-	return c.GetWith(ctx, b, rawURL, max, nil)
+	return c.getWithOpts(ctx, b, rawURL, max, nil, false)
 }
 
 // GetWith is Get with headers of the caller's (a Range).
 func (c *Client) GetWith(ctx context.Context, b *Budget, rawURL string, max int64, h http.Header) (*Answer, error) {
+	return c.getWithOpts(ctx, b, rawURL, max, h, false)
+}
+
+// GetIndex gets an archive index/API JSON endpoint with Accept-Encoding: gzip
+// and transparently decompresses the body, cutting CDX/index network payloads
+// by ~10-15x while keeping raw byte identity for mementos and WARC ranges.
+func (c *Client) GetIndex(ctx context.Context, b *Budget, rawURL string, max int64) (*Answer, error) {
+	return c.getWithOpts(ctx, b, rawURL, max, nil, true)
+}
+
+// GetIndexWith is GetIndex with custom request headers (e.g. URLScan Api-Key).
+func (c *Client) GetIndexWith(ctx context.Context, b *Budget, rawURL string, max int64, h http.Header) (*Answer, error) {
+	return c.getWithOpts(ctx, b, rawURL, max, h, true)
+}
+
+func (c *Client) getWithOpts(ctx context.Context, b *Budget, rawURL string, maxBytes int64, h http.Header, gzipOK bool) (*Answer, error) {
 	var last error
 	for try := 0; try < c.Tries; try++ {
 		if err := b.wait(ctx); err != nil {
@@ -124,7 +144,11 @@ func (c *Client) GetWith(ctx context.Context, b *Budget, rawURL string, max int6
 			req.Header[k] = vs
 		}
 		req.Header.Set("User-Agent", c.UA)
-		req.Header.Set("Accept-Encoding", "identity")
+		if gzipOK {
+			req.Header.Set("Accept-Encoding", "gzip")
+		} else {
+			req.Header.Set("Accept-Encoding", "identity")
+		}
 		resp, err := c.HTTP.Do(req)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -143,7 +167,7 @@ func (c *Client) GetWith(ctx context.Context, b *Budget, rawURL string, max int6
 					return nil, ErrBlocked
 				}
 			}
-			if err := sleep(ctx, c.Wait/4); err != nil {
+			if err := sleep(ctx, adaptiveBackoff(c.Wait, try)); err != nil {
 				return nil, err
 			}
 			continue
@@ -151,27 +175,56 @@ func (c *Client) GetWith(ctx context.Context, b *Budget, rawURL string, max int6
 		c.mu.Lock()
 		c.refused = 0
 		c.mu.Unlock()
-		body, err := io.ReadAll(io.LimitReader(resp.Body, max+1))
+		body, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
 		resp.Body.Close()
 		if err != nil {
 			last = err
 			continue
 		}
+		if gzipOK && int64(len(body)) <= maxBytes {
+			if ce := resp.Header.Get("Content-Encoding"); ce != "" && !strings.EqualFold(ce, "identity") {
+				if dec, derr := decode(ce, body, int(min(maxBytes, 512<<20))); derr == nil {
+					body = dec
+					resp.Header.Del("Content-Encoding")
+				}
+			}
+		}
 		a := &Answer{Status: resp.StatusCode, Header: resp.Header, Body: body, URL: resp.Request.URL.String()}
 		switch resp.StatusCode {
 		case 429, 502, 503, 504:
 			last = fmt.Errorf("%s: %d", rawURL, resp.StatusCode)
-			if err := sleep(ctx, retryAfter(resp.Header, c.Wait)); err != nil {
+			if err := sleep(ctx, retryAfter(resp.Header, adaptiveBackoff(c.Wait, try))); err != nil {
 				return nil, err
 			}
 			continue
 		}
-		if int64(len(body)) > max {
-			return a, fmt.Errorf("%s: over %d bytes", rawURL, max)
+		if int64(len(body)) > maxBytes {
+			return a, fmt.Errorf("%s: over %d bytes", rawURL, maxBytes)
 		}
 		return a, nil
 	}
 	return nil, fmt.Errorf("after %d tries: %w", c.Tries, last)
+}
+
+func adaptiveBackoff(base time.Duration, try int) time.Duration {
+	if base <= 0 {
+		return 0
+	}
+	var d time.Duration
+	switch try {
+	case 0:
+		d = max(base/12, min(base, 50*time.Millisecond))
+	case 1:
+		d = max(base/4, min(base, 150*time.Millisecond))
+	default:
+		d = base
+	}
+	if d >= 500*time.Millisecond {
+		// +/- 15% jitter so concurrent shard workers do not retry in lockstep.
+		jitter := float64(d) * (0.85 + 0.30*rand.Float64())
+		d = time.Duration(jitter)
+	}
+	return d
 }
 
 // retryAfter reads Retry-After's seconds; def when there are none.

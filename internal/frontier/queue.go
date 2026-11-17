@@ -23,11 +23,12 @@ const (
 	API         = "api"         // an API call the scripts make; in endpoints.jsonl
 	Destructive = "destructive" // logout, delete…: the guard's rules
 	CDNInfra    = "cdn-infra"   // the CDN's own /cdn-cgi/ paths: never the site's pages
-	Template    = "template"    // a path a script builds, its {placeholders} unfilled
-	SPARoute    = "spa-route"   // a client route of an app whose server answers every path with its shell
-	TooDeep     = "depth"
-	Limit       = "limit"
-	seenAlready = "seen"
+	Template          = "template"           // a path a script builds, its {placeholders} unfilled
+	SPARoute          = "spa-route"          // a client route of an app whose server answers every path with its shell
+	TemplateSaturated = "template-saturated" // an SSR/MPA path template that yielded 0 new info across repeated samples
+	TooDeep           = "depth"
+	Limit             = "limit"
+	seenAlready       = "seen"
 )
 
 var (
@@ -80,7 +81,13 @@ type Item struct {
 	Depth int    `json:"depth"`
 	From  string `json:"from,omitempty"`
 	How   string `json:"how"`
+	vtime int64
 	seq   int
+}
+
+type bandKey struct {
+	depth int
+	r     int
 }
 
 // Listed is a URL found and not visited, with why.
@@ -101,24 +108,82 @@ type Options struct {
 	Destructive func(rawURL string) bool
 }
 
-// Queue is the frontier: the pages to visit, breadth first, and the ones
+// Queue is the frontier: the pages to visit, breadth first with fair-share
+// Weighted DRR across hosts at the same (depth, how) tier, and the ones
 // that will not be, with why.
 type Queue struct {
-	o       Options
-	h       items
-	seen    map[string]bool // normalised URLs queued or visited
-	listed  map[string]bool
-	Listed  []Listed
-	taken   int
-	seq     int
-	dropped int // pages over the limit
+	o           Options
+	h           items
+	seen        map[string]bool // normalised URLs queued or visited
+	listed      map[string]bool
+	Listed      []Listed
+	taken       int
+	seq         int
+	dropped     int // pages over the limit
+	bandFloor   map[bandKey]int64
+	bandHostVT  map[bandKey]map[string]int64
+	hostWeight  map[string]int
+	emptyStreak map[string]int
 }
 
 func NewQueue(o Options) *Queue {
 	if o.Destructive == nil {
 		o.Destructive = func(string) bool { return false }
 	}
-	return &Queue{o: o, seen: map[string]bool{}, listed: map[string]bool{}}
+	return &Queue{
+		o:           o,
+		seen:        map[string]bool{},
+		listed:      map[string]bool{},
+		bandFloor:   map[bandKey]int64{},
+		bandHostVT:  map[bandKey]map[string]int64{},
+		hostWeight:  map[string]int{},
+		emptyStreak: map[string]int{},
+	}
+}
+
+// Feedback updates a host's fair-share weight (1..4) from whether visiting
+// rawURL yielded marginal information (new scripts, endpoints, OpenAPI, forms).
+// Three consecutive zero-gain visits decay a boosted weight back toward 1.
+func (q *Queue) Feedback(rawURL string, gained bool) {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Hostname() == "" {
+		return
+	}
+	h := strings.ToLower(u.Hostname())
+	w := q.hostWeight[h]
+	if w < 1 {
+		w = 1
+	}
+	if gained {
+		q.emptyStreak[h] = 0
+		if w < 4 {
+			q.hostWeight[h] = w + 1
+		}
+		return
+	}
+	q.emptyStreak[h]++
+	if q.emptyStreak[h] >= 3 && w > 1 {
+		q.hostWeight[h] = w - 1
+		q.emptyStreak[h] = 0
+	}
+}
+
+func (q *Queue) nextVTime(rawURL string, depth int, how string) int64 {
+	h := ""
+	if u, err := url.Parse(rawURL); err == nil {
+		h = strings.ToLower(u.Hostname())
+	}
+	bk := bandKey{depth: depth, r: rank[how]}
+	if q.bandHostVT[bk] == nil {
+		q.bandHostVT[bk] = map[string]int64{}
+	}
+	vt := q.bandHostVT[bk][h]
+	if floor := q.bandFloor[bk]; vt < floor {
+		vt = floor
+	}
+	w := max(1, min(4, q.hostWeight[h]))
+	q.bandHostVT[bk][h] = vt + int64(12/w)
+	return vt
 }
 
 // Add queues a found URL, depth links away from the seed, or records why
@@ -130,7 +195,8 @@ func (q *Queue) Add(f Found, depth int, from string) string {
 		n, _ := Normalize(f.URL)
 		q.seen[n] = true
 		q.seq++
-		heap.Push(&q.h, Item{URL: f.URL, Depth: depth, From: from, How: f.How, seq: q.seq})
+		vt := q.nextVTime(f.URL, depth, f.How)
+		heap.Push(&q.h, Item{URL: f.URL, Depth: depth, From: from, How: f.How, vtime: vt, seq: q.seq})
 	case seenAlready:
 	default:
 		key := f.URL + " " + f.Method + " " + reason
@@ -204,13 +270,19 @@ func (q *Queue) ListAs(f Found, from, reason string) {
 	}
 }
 
-// Next takes the next page: the shallowest, then by how it was found.
+// Next takes the next page: the shallowest, then by how it was found,
+// interleaved fairly across hosts by Weighted DRR.
 func (q *Queue) Next() (Item, bool) {
 	if q.h.Len() == 0 {
 		return Item{}, false
 	}
 	q.taken++
-	return heap.Pop(&q.h).(Item), true
+	it := heap.Pop(&q.h).(Item)
+	bk := bandKey{depth: it.Depth, r: rank[it.How]}
+	if it.vtime > q.bandFloor[bk] {
+		q.bandFloor[bk] = it.vtime
+	}
+	return it, true
 }
 
 // Peek is the page Next would take, without taking it.
@@ -227,6 +299,7 @@ func (q *Queue) Retry(it Item) {
 	q.taken--
 	q.seq++
 	it.seq = q.seq
+	it.vtime = q.nextVTime(it.URL, it.Depth, it.How)
 	heap.Push(&q.h, it)
 }
 
@@ -235,6 +308,14 @@ func (q *Queue) Retry(it Item) {
 func (q *Queue) Visited(raw string) {
 	if n, ok := Normalize(raw); ok {
 		q.seen[n] = true
+	}
+}
+
+// Refund returns a taken page slot to the -max-pages budget when the caller
+// prunes a popped item (e.g. template-saturated) without visiting it over HTTP.
+func (q *Queue) Refund() {
+	if q.taken > 0 {
+		q.taken--
 	}
 }
 
@@ -256,6 +337,9 @@ func (h items) Less(i, j int) bool {
 	}
 	if rank[a.How] != rank[b.How] {
 		return rank[a.How] < rank[b.How]
+	}
+	if a.vtime != b.vtime {
+		return a.vtime < b.vtime
 	}
 	return a.seq < b.seq
 }

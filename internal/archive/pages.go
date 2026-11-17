@@ -40,6 +40,31 @@ func page(c Capture) bool {
 	return (strings.Contains(m, "html") || m == "unk" && !script(c)) && c.Status == "200" && c.Timestamp != ""
 }
 
+func pageDepth(rawURL string) int {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return 99
+	}
+	p := strings.Trim(u.Path, "/")
+	if p == "" || p == "index.html" {
+		if u.RawQuery == "" {
+			return -1
+		}
+		return 0
+	}
+	return strings.Count(p, "/") + 1
+}
+
+func betterPage(a, b Capture) bool {
+	if da, db := pageDepth(a.URL), pageDepth(b.URL); da != db {
+		return da < db
+	}
+	if !a.Time.Equal(b.Time) {
+		return a.Time.After(b.Time)
+	}
+	return a.URL < b.URL
+}
+
 // pagePick chooses the pages to read: the newest capture of each URL, the
 // site's root first (it names the entry bundles), then the shallowest
 // paths, then the newest.
@@ -50,37 +75,93 @@ func pagePick(caps []Capture, max int) []Capture {
 			newest[c.URL] = c
 		}
 	}
-	var out []Capture
+	out := make([]Capture, 0, len(newest))
 	for _, c := range newest {
 		out = append(out, c)
 	}
-	depth := func(c Capture) int {
-		u, err := url.Parse(c.URL)
-		if err != nil {
-			return 99
-		}
-		p := strings.Trim(u.Path, "/")
-		if p == "" || p == "index.html" {
-			if u.RawQuery == "" {
-				return -1
-			}
-			return 0
-		}
-		return strings.Count(p, "/") + 1
-	}
 	sort.SliceStable(out, func(i, j int) bool {
-		if di, dj := depth(out[i]), depth(out[j]); di != dj {
-			return di < dj
-		}
-		if !out[i].Time.Equal(out[j].Time) {
-			return out[i].Time.After(out[j].Time)
-		}
-		return out[i].URL < out[j].URL
+		return betterPage(out[i], out[j])
 	})
 	if max > 0 && len(out) > max {
 		out = out[:max]
 	}
 	return out
+}
+
+// takeHTMLLocked maintains a streaming O(K) bounded candidate pool of archived
+// HTML pages in RAM (replacing the multi-hundred-MB html.jsonl temp file and
+// 2 GB pagePick memory spike). r.mu is held.
+func (r *runner) takeHTMLLocked(c Capture) {
+	if r.htmlPool == nil {
+		r.htmlPool = map[string]Capture{}
+	}
+	if old, ok := r.htmlPool[c.URL]; ok {
+		if c.Time.After(old.Time) {
+			r.htmlPool[c.URL] = c
+			if r.hasWorst && old.URL == r.htmlWorst.URL {
+				r.hasWorst = false
+			}
+		}
+		return
+	}
+	keepCap := max(r.o.MaxHTML*12, 128)
+	if len(r.htmlPool) >= keepCap && r.hasWorst && !betterPage(c, r.htmlWorst) {
+		return
+	}
+	r.htmlPool[c.URL] = c
+	if len(r.htmlPool) >= keepCap*2 {
+		top := pagePick(r.poolSliceLocked(), keepCap)
+		clear(r.htmlPool)
+		for _, tc := range top {
+			r.htmlPool[tc.URL] = tc
+		}
+		if len(top) > 0 {
+			r.htmlWorst, r.hasWorst = top[len(top)-1], true
+		}
+	}
+}
+
+func (r *runner) poolSliceLocked() []Capture {
+	out := make([]Capture, 0, len(r.htmlPool))
+	for _, c := range r.htmlPool {
+		out = append(out, c)
+	}
+	return out
+}
+
+func (r *runner) snapshotHTMLTopLocked() []Capture {
+	if len(r.htmlPool) == 0 {
+		return r.st.HTMLTop
+	}
+	keepCap := max(r.o.MaxHTML*12, 128)
+	return pagePick(r.poolSliceLocked(), keepCap)
+}
+
+func (r *runner) htmlCandidates() ([]Capture, error) {
+	r.mu.Lock()
+	caps := r.snapshotHTMLTopLocked()
+	r.mu.Unlock()
+	if len(caps) > 0 {
+		return caps, nil
+	}
+	// Legacy fallback if a test or older checkpoint wrote html.jsonl directly.
+	f, err := os.Open(filepath.Join(r.o.Dir, "html.jsonl"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	dec := json.NewDecoder(f)
+	for {
+		var c Capture
+		if err := dec.Decode(&c); err != nil {
+			break
+		}
+		caps = append(caps, c)
+	}
+	return pagePick(caps, 0), nil
 }
 
 // challengePage reports an archived page that is a bot challenge's or
@@ -119,30 +200,17 @@ func (r *runner) pages(ctx context.Context) error {
 	if r.o.MaxHTML <= 0 {
 		return nil
 	}
-	f, err := os.Open(filepath.Join(r.o.Dir, "html.jsonl"))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
+	caps, err := r.htmlCandidates()
+	if err != nil || len(caps) == 0 {
 		return err
 	}
-	var caps []Capture
-	dec := json.NewDecoder(f)
-	for {
-		var c Capture
-		if err := dec.Decode(&c); err != nil {
-			break // io.EOF, or a line cut by a kill: what came before stands
-		}
-		caps = append(caps, c)
-	}
-	f.Close()
+	defer r.flushFiles()
 	s := &r.st.Summary
-	jsEnc := json.NewEncoder(r.js)
 	// -max-html counts the pages read, not those tried: a capture that is
 	// no 200 or a challenge's leaves its turn to the next (MAX-03). Those
 	// read by a run before count too.
 	read := 0
-	for _, c := range pagePick(caps, 0) {
+	for _, c := range caps {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -150,8 +218,8 @@ func (r *runner) pages(ctx context.Context) error {
 			break
 		}
 		key := "html:" + c.Timestamp + " " + c.URL
-		if r.done[key] {
-			if r.done["read:"+key] {
+		if r.isDone(key) {
+			if r.isDone("read:" + key) {
 				read++
 			}
 			continue
@@ -161,12 +229,12 @@ func (r *runner) pages(ctx context.Context) error {
 			if errors.Is(err, ErrBlocked) || ctx.Err() != nil {
 				return err
 			}
-			s.Failed++
+			r.sum(func(sm *Summary) { sm.Failed++ })
 			r.o.Log("page %s: %v", c.URL, err)
 			continue
 		}
 		if a.Status != 200 {
-			s.Skipped["page memento not 200"]++
+			r.sum(func(sm *Summary) { sm.Skipped["page memento not 200"]++ })
 			r.markDone(key)
 			continue
 		}
@@ -174,10 +242,10 @@ func (r *runner) pages(ctx context.Context) error {
 		if err != nil {
 			body = a.Body
 		}
-		s.Pages++
+		r.sum(func(sm *Summary) { sm.Pages++ })
 		p := htmlscan.Scan(body, c.URL)
 		if challengePage(p) {
-			s.Skipped["challenge page"]++
+			r.sum(func(sm *Summary) { sm.Skipped["challenge page"]++ })
 			r.markDone(key)
 			continue
 		}
@@ -189,13 +257,15 @@ func (r *runner) pages(ctx context.Context) error {
 			}
 			if _, err := r.store.Add(store.Record{Body: []byte(code), URL: c.URL, Kind: "inline", Via: fromHTML, Source: "wayback",
 				Tags: []string{"archive", fromHTML}, Archive: meta}); err == nil {
-				s.Inline++
+				r.sum(func(sm *Summary) { sm.Inline++ })
 			}
 		}
 		for _, src := range append(p.Files(), p.NextManifests()...) {
 			if r.named(src) {
-				jsEnc.Encode(Capture{URL: src, Time: c.Time, Timestamp: c.Timestamp, Source: fromHTML})
+				r.mu.Lock()
+				r.encodeJSLocked(Capture{URL: src, Time: c.Time, Timestamp: c.Timestamp, Source: fromHTML})
 				s.PageScripts++
+				r.mu.Unlock()
 			}
 		}
 		r.markDone("read:" + key)
@@ -261,7 +331,7 @@ func (r *runner) chunks(g *group, body []byte) []*group {
 		}
 		nc := Capture{URL: u, Time: c.Time, Timestamp: c.Timestamp, Source: fromResolve}
 		r.mu.Lock()
-		json.NewEncoder(r.js).Encode(nc)
+		r.encodeJSLocked(nc)
 		r.st.Summary.Resolved++
 		r.mu.Unlock()
 		out = append(out, &group{key: "url:" + u, latest: nc, urls: []string{u}, sources: []string{fromResolve},

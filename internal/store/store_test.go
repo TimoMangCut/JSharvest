@@ -46,6 +46,15 @@ func TestCanonicalKey(t *testing.T) {
 		{"http://h/assets/index-Bo3xJF6r.js", "h/assets/index-[h].js"},
 		{"http://h/assets/home-QmTKpwZr.js", "h/assets/home-[h].js"},
 		{"http://h/lib/util-a1B2c3D4.cjs", "h/lib/util-[h].cjs"},
+		// CMS & bundler cache-busted families (Round 34).
+		{"https://h/sites/default/files/js/js_-or32LOFfuoCLfXnNJEfHuUaXbuH5QX.js", "h/sites/default/files/js/js_[h].js"},
+		{"https://h/wp-content/cache/autoptimize/js/autoptimize_090440247985fc1b6a15d99098ac5d8c.js", "h/wp-content/cache/autoptimize/js/autoptimize_[h].js"},
+		{"https://h/wp-content/litespeed/js/132/063b9d1f55b0dc299afeaabde2930a00.js", "h/wp-content/litespeed/js/132/[h].js"},
+		{"https://h/wp-content/uploads/essential-addons-elementor/eael-94821.min.js", "h/wp-content/uploads/essential-addons-elementor/eael-[h].min.js"},
+		{"https://h/assets/app-4f351d505ee1cb62.min.js", "h/assets/app-[h].min.js"},
+		// Semantic underscore names stay intact.
+		{"https://h/modules/quicklink/js/quicklink_init.js?v=1", "h/modules/quicklink/js/quicklink_init.js"},
+		{"https://h/js/eu_cookie_compliance.min.js", "h/js/eu_cookie_compliance.min.js"},
 		// Not an absolute URL: no key.
 		{"", ""},
 		{"/relative.js", ""},

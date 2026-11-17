@@ -123,7 +123,7 @@ func (cc *CommonCrawl) query(coll, host string, page int) string {
 
 // get gets from the index; the client retries a 5xx it may outlast.
 func (cc *CommonCrawl) get(ctx context.Context, u string) (*Answer, error) {
-	a, err := cc.Client.Get(ctx, cc.Budget, u, 256<<20)
+	a, err := cc.Client.GetIndex(ctx, cc.Budget, u, 256<<20)
 	if err != nil {
 		return nil, err
 	}

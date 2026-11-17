@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"path"
 	"regexp"
 	"slices"
 	"strings"
@@ -69,6 +70,7 @@ func (r *runner) list(ctx context.Context) error {
 		}()
 	}
 	wg.Wait()
+	r.flushFiles()
 	return fatal
 }
 
@@ -80,7 +82,7 @@ func (r *runner) took(caps []Capture, move func()) {
 	if move != nil {
 		move()
 	}
-	r.saveLocked()
+	r.saveMaybeLocked()
 }
 
 func (r *runner) listWayback(ctx context.Context) error {
@@ -165,7 +167,26 @@ func (r *runner) listWaybackSharded(ctx context.Context, numPages int) error {
 		sctx, cancel := context.WithCancel(ctx)
 		defer cancel()
 
-		cdxWorkers := min(max(r.workers()/2, 2), 6)
+		var prefetchWG sync.WaitGroup
+		var prefetchCh chan *group
+		if r.o.MaxFiles == 0 && r.store != nil && r.cur != nil {
+			prefetchCh = make(chan *group, 512)
+			r.mu.Lock()
+			r.prefetchCh = prefetchCh
+			r.prefetchSeen = map[string]bool{}
+			r.prefetchFam = map[string]int{}
+			r.mu.Unlock()
+			prefetchWorkers := min(max(r.workers()/2, 4), 8)
+			for range prefetchWorkers {
+				prefetchWG.Add(1)
+				go func() {
+					defer prefetchWG.Done()
+					r.prefetchWorker(sctx, prefetchCh)
+				}()
+			}
+		}
+
+		cdxWorkers := min(max(r.workers(), 8), 16)
 		if cdxWorkers > len(pending) {
 			cdxWorkers = len(pending)
 		}
@@ -209,13 +230,21 @@ func (r *runner) listWaybackSharded(ctx context.Context, numPages int) error {
 					n := r.st.Summary.Listed["wayback"]
 					doneCnt := len(r.st.Wayback.PagesDone)
 					r.mu.Unlock()
-					if doneCnt%5 == 0 || doneCnt == numPages {
+					if doneCnt%10 == 0 || doneCnt == numPages {
 						r.o.Log("wayback: %d/%d shards (%d captures listed)", doneCnt, numPages, n)
 					}
 				}
 			}()
 		}
 		wg.Wait()
+
+		if prefetchCh != nil {
+			r.mu.Lock()
+			r.prefetchCh = nil
+			r.mu.Unlock()
+			close(prefetchCh)
+			prefetchWG.Wait()
+		}
 
 		if fatal != nil {
 			return fatal
@@ -360,38 +389,59 @@ func (r *runner) listCC(ctx context.Context) error {
 	if cc.Listed == nil {
 		cc.Listed = map[string]bool{}
 	}
+	cols := slices.Clone(cc.Collections)
 	r.mu.Unlock()
-	// Each collection on its own: one that fails (the newest is the most
-	// asked, and answers 504 the most) leaves the others to list (MAX-01).
+	// Query Common Crawl collections concurrently within CC.Budget so a 504 on
+	// the newest collection never stalls the older ones sequentially (MAX-01).
+	cctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var wg sync.WaitGroup
+	var errMu sync.Mutex
+	var fatal error
 	var failed []string
-	for _, coll := range cc.Collections {
+	for _, coll := range cols {
 		r.mu.Lock()
 		listed := cc.Listed[coll]
-		page := cc.Next[coll]
+		startPage := cc.Next[coll]
 		r.mu.Unlock()
 		if listed {
 			continue
 		}
-		next, err := r.o.CC.List(ctx, coll, r.o.Host, page, func(caps []Capture) {
-			page++
-			r.took(caps, func() { cc.Next[coll] = page })
-		})
-		r.mu.Lock()
-		cc.Next[coll] = next
-		if err == nil {
-			cc.Listed[coll] = true
-		}
-		r.saveLocked()
-		r.mu.Unlock()
-		if err != nil {
-			if errors.Is(err, ErrBlocked) || ctx.Err() != nil {
-				return err
+		wg.Add(1)
+		go func(coll string, page int) {
+			defer wg.Done()
+			next, err := r.o.CC.List(cctx, coll, r.o.Host, page, func(caps []Capture) {
+				page++
+				r.took(caps, func() { cc.Next[coll] = page })
+			})
+			r.mu.Lock()
+			cc.Next[coll] = next
+			if err == nil {
+				cc.Listed[coll] = true
 			}
-			failed = append(failed, coll+": "+err.Error())
-		}
+			r.saveMaybeLocked()
+			r.mu.Unlock()
+			if err != nil {
+				errMu.Lock()
+				if errors.Is(err, ErrBlocked) || ctx.Err() != nil {
+					if fatal == nil {
+						fatal = err
+					}
+					cancel()
+				} else {
+					failed = append(failed, coll+": "+err.Error())
+				}
+				errMu.Unlock()
+			}
+		}(coll, startPage)
+	}
+	wg.Wait()
+	if fatal != nil {
+		return fatal
 	}
 	if len(failed) > 0 {
-		return fmt.Errorf("%d of %d collections failed (%s)", len(failed), len(cc.Collections), strings.Join(failed, "; "))
+		slices.Sort(failed)
+		return fmt.Errorf("%d of %d collections failed (%s)", len(failed), len(cols), strings.Join(failed, "; "))
 	}
 	r.mu.Lock()
 	cc.Done = true
@@ -469,11 +519,10 @@ var redactor = traffic.NewRedactor()
 // one line, and the scripts' captures for the fetch.
 func (r *runner) take(caps []Capture) {
 	s := &r.st.Summary
-	urlEnc, jsEnc, htmlEnc := json.NewEncoder(r.urls), json.NewEncoder(r.js), json.NewEncoder(r.html)
 	var cur *URLLine
 	flush := func() {
 		if cur != nil {
-			urlEnc.Encode(cur)
+			r.encodeURLLocked(cur)
 			cur = nil
 		}
 	}
@@ -497,6 +546,10 @@ func (r *runner) take(caps []Capture) {
 				s.Credential = append(s.Credential, shown)
 			}
 		}
+		if r.seenURLs != nil && shown != "" {
+			h := sha256.Sum256([]byte(shown))
+			r.seenURLs[[16]byte(h[:16])] = struct{}{}
+		}
 		if cur == nil || cur.URL != shown || cur.Source != c.Source {
 			flush()
 			cur = &URLLine{URL: shown, Source: c.Source, MIME: c.MIME, Script: script(c), Credential: cred, First: c.Time}
@@ -513,9 +566,13 @@ func (r *runner) take(caps []Capture) {
 		}
 		if !cred && !revisit(c) && page(c) {
 			s.HTML++
-			htmlEnc.Encode(c)
+			r.takeHTMLLocked(c)
+			if r.html != nil {
+				_ = json.NewEncoder(r.html).Encode(c)
+			}
 		}
-		if assetKind(c) == "" || cred {
+		kind := assetKind(c)
+		if kind == "" || cred {
 			continue
 		}
 		if revisit(c) {
@@ -524,23 +581,72 @@ func (r *runner) take(caps []Capture) {
 			continue
 		}
 		s.JS++
-		jsEnc.Encode(c)
+		r.encodeJSLocked(c)
+		r.maybePrefetchLocked(c, u, kind)
 	}
 	flush()
 }
 
-// distinctURLs counts the URLs urls.jsonl names, each once: a URL two
-// sources list, or one listing's rows apart, is one (ARC-06).
-func distinctURLs(p string) int {
-	seen := map[[16]byte]bool{}
+// maybePrefetchLocked streams up to 2 representative digest-backed script
+// captures per Canonical Family to background Memento Prefetch Workers while
+// sharded Wayback CDX listing is still running. r.mu is held.
+func (r *runner) maybePrefetchLocked(c Capture, u *url.URL, kind string) {
+	if r.prefetchCh == nil || kind != "script" || c.Source != "wayback" || c.Digest == "" || revisit(c) || c.Status != "200" {
+		return
+	}
+	if !r.o.Vendor && vendorRe.MatchString(path.Base(u.Path)) {
+		return
+	}
+	if r.done[c.Digest] || r.done["pre:"+c.Digest] || r.prefetchSeen[c.Digest] {
+		return
+	}
+	if r.cur != nil && r.cur.sha1[c.Digest] {
+		return
+	}
+	if r.store != nil && r.store.BySHA1(c.Digest) != "" {
+		return
+	}
+	fam := u.Host + u.Path
+	if g := (&group{latest: c}); familyOfGroup(g) != "" {
+		fam = familyOfGroup(g)
+	}
+	if r.prefetchFam[fam] >= 2 {
+		return
+	}
+	g := &group{
+		key:      c.Digest,
+		digest:   c.Digest,
+		latest:   c,
+		urls:     []string{c.URL},
+		sources:  []string{c.Source},
+		first:    c.Time,
+		last:     c.Time,
+		captures: 1,
+	}
+	select {
+	case r.prefetchCh <- g:
+		r.prefetchSeen[c.Digest] = true
+		r.prefetchFam[fam]++
+	default:
+	}
+}
+
+func seedSeenURLs(p string, dst map[[16]byte]struct{}) {
 	eachLine(p, func(b []byte) {
 		var l struct {
 			URL string `json:"url"`
 		}
 		if json.Unmarshal(b, &l) == nil && l.URL != "" {
 			h := sha256.Sum256([]byte(l.URL))
-			seen[[16]byte(h[:16])] = true
+			dst[[16]byte(h[:16])] = struct{}{}
 		}
 	})
+}
+
+// distinctURLs counts the URLs urls.jsonl names, each once: a URL two
+// sources list, or one listing's rows apart, is one (ARC-06).
+func distinctURLs(p string) int {
+	seen := map[[16]byte]struct{}{}
+	seedSeenURLs(p, seen)
 	return len(seen)
 }

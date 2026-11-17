@@ -262,6 +262,7 @@ type crawler struct {
 	onSeedLand   func(string)
 	webpack      resolve.WebpackLinker
 	specCtx      frontier.SpecCollector
+	skel         *skeletonController
 	extractMu    sync.Mutex
 	extracted    map[[32]byte]jsapi.Result
 }
@@ -296,9 +297,11 @@ type job struct {
 // spa is the SPA check's word on each origin once the page was done, as
 // the routes are listed (cr.add) by it.
 type bucket struct {
-	found   []found
-	origins []found // f.URL: the API host; from: the script naming it
-	spa     map[string]bool
+	found      []found
+	origins    []found // f.URL: the API host; from: the script naming it
+	spa        map[string]bool
+	inlineSigs [][32]byte
+	pageStatus int
 }
 
 // sorted is the bucket's findings in an order of their own: by the script
@@ -430,7 +433,8 @@ func Crawl(ctx context.Context, o Options) (*Result, error) {
 		hosts:       map[string]*hostState{},
 		specBlocked: map[string]string{},
 		prints:      map[string]string{},
-		spa:         map[string]bool{}}
+		spa:         map[string]bool{},
+		skel:        newSkeletonController()}
 	cr.cancel = cancel
 	cr.q = frontier.NewQueue(frontier.Options{InScope: pageScope, MaxDepth: o.Depth, MaxPages: o.MaxPages, Destructive: o.Destructive})
 	cr.q.Add(frontier.Found{URL: o.Target.String(), How: frontier.Seed, Visit: true}, 0, "")
@@ -831,12 +835,18 @@ func (cr *crawler) page(ctx context.Context, it frontier.Item, first bool, b *bu
 	if !first {
 		cr.politeAt(a, it.URL, it.Depth)
 	}
+	if b != nil {
+		b.pageStatus = a.Status
+	}
 	if !isHTML && a.Status == 200 && jsapi.IsOpenAPI(a.Body) {
 		// Its operations are the API's endpoints: kept beside the scripts,
 		// for the catalog to read.
 		cr.o.Script(Script{Body: a.Body, Kind: "file", URL: a.URL, Page: it.From, Status: a.Status, MIME: a.Header.Get("Content-Type"),
 			Tags: []string{"openapi"}, Found: "openapi", From: it.From})
 		cr.count(func(st *Stats) { st.OpenAPI++ })
+		if b != nil {
+			b.inlineSigs = append(b.inlineSigs, sha256.Sum256(a.Body))
+		}
 	}
 	if !isHTML || a.Status >= 400 {
 		cr.o.Page(pg)
@@ -865,6 +875,11 @@ func (cr *crawler) page(ctx context.Context, it frontier.Item, first bool, b *bu
 		}
 		cr.count(func(st *Stats) { st.Inline++ })
 		cr.o.Script(Script{Body: code, Kind: "inline", URL: a.URL, Page: a.URL, Found: "inline", From: a.URL})
+		if b != nil {
+			if sig, ok := inlineSemanticSig(cr, cr.skel, code, a.URL); ok {
+				b.inlineSigs = append(b.inlineSigs, sig)
+			}
+		}
 		for _, cand := range resolve.Static(code, a.URL, a.URL) {
 			jobs = append(jobs, job{url: cand.URL, page: a.URL, how: cand.Method, from: a.URL, depth: it.Depth, tags: resolvedTags(cand.Method), b: b})
 		}
@@ -1655,6 +1670,14 @@ func (cr *crawler) pages(ctx context.Context) {
 		if !ok {
 			break
 		}
+		if !first && cr.skel != nil && cr.skel.shouldSkip(it.URL) {
+			cr.q.Refund()
+			cr.mu.Lock()
+			cr.res.Listed[frontier.TemplateSaturated]++
+			cr.mu.Unlock()
+			o.Page(Page{URL: it.URL, How: it.How, From: it.From, Depth: it.Depth, Reason: frontier.TemplateSaturated})
+			continue
+		}
 		b := &bucket{}
 		jobs, links, blocked := cr.page(ctx, it, first, b)
 		if cr.toCheck != "" && o.Depth > 0 && !blocked && cr.stop() == "" {
@@ -1696,6 +1719,10 @@ func (cr *crawler) pages(ctx context.Context) {
 			}
 		}
 		jobs = admitted
+		if !blocked && cr.skel != nil && b.pageStatus > 0 {
+			gained := cr.skel.observe(cr, fromURL, b.pageStatus, jobs, b.inlineSigs, links, b)
+			cr.q.Feedback(fromURL, gained)
+		}
 		f := &inflight{it: it, links: links, from: fromURL, blocked: blocked, b: b, done: make(chan struct{})}
 		level = append(level, f)
 		if first {

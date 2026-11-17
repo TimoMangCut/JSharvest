@@ -1,6 +1,7 @@
 package archive
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -91,8 +92,8 @@ type Summary struct {
 	Notes       []string       `json:"notes,omitempty"`
 }
 
-// stateVersion is what a listing keeps: 2 since the old pages (html.jsonl).
-const stateVersion = 2
+// stateVersion is what a listing keeps: 3 since HTMLTop replaced html.jsonl.
+const stateVersion = 3
 
 // state is archive.json: where the listing stands, so a run resumes.
 type state struct {
@@ -123,6 +124,7 @@ type state struct {
 	} `json:"urlscan"`
 	// Extra are the other hosts' listings done, as "<source> <host>".
 	Extra   map[string]bool `json:"extra,omitempty"`
+	HTMLTop []Capture       `json:"html_top,omitempty"`
 	Listed  bool            `json:"listed"`
 	Summary Summary         `json:"summary"`
 	Updated time.Time       `json:"updated"`
@@ -131,12 +133,28 @@ type state struct {
 type runner struct {
 	// mu: the sources list at once; the state, the summary and the files
 	// are shared.
-	mu   sync.Mutex
-	o    Options
-	st   state
-	urls *os.File // urls.jsonl
-	js   *os.File // js.jsonl: the script captures, for the fetch
-	html *os.File // html.jsonl: the page captures, for pages
+	mu       sync.Mutex
+	o        Options
+	st       state
+	urls     *os.File // urls.jsonl
+	urlsBuf  *bufio.Writer
+	js       *os.File // js.jsonl: the script captures, for the fetch
+	jsBuf    *bufio.Writer
+	html     *os.File // legacy field kept for unit-test compatibility
+	doneFile *os.File
+	doneBuf  *bufio.Writer
+	lastSave time.Time
+
+	seenURLs  map[[16]byte]struct{}
+	htmlPool  map[string]Capture
+	htmlWorst Capture
+	hasWorst  bool
+
+	// Streaming shard -> memento prefetch state during sharded Wayback listing.
+	prefetchCh   chan *group
+	prefetchSeen map[string]bool
+	prefetchFam  map[string]int
+
 	// namedURLs are the scripts old pages and fetched scripts named, filed
 	// once.
 	namedURLs map[string]bool
@@ -148,16 +166,18 @@ type runner struct {
 	partial bool
 	// lives are the live checks made, by kind and URL: a URL the archive
 	// holds in several versions is asked once.
-	livesMu  sync.Mutex
-	lives    map[string]liveAns
-	liveWait map[string]chan struct{}
+	livesMu       sync.Mutex
+	lives         map[string]liveAns
+	liveWait      map[string]chan struct{}
+	httpsUpgrades map[string]int
+	httpPlainOK   map[string]bool
 }
 
 func (r *runner) workers() int {
 	if r.o.Workers > 0 {
 		return r.o.Workers
 	}
-	return 8
+	return 16
 }
 
 func (r *runner) sum(fn func(*Summary)) {
@@ -172,6 +192,44 @@ type liveAns struct {
 	url   string
 }
 
+func (r *runner) encodeURLLocked(l *URLLine) {
+	if r.urlsBuf != nil {
+		_ = json.NewEncoder(r.urlsBuf).Encode(l)
+		return
+	}
+	if r.urls != nil {
+		_ = json.NewEncoder(r.urls).Encode(l)
+	}
+}
+
+func (r *runner) encodeJSLocked(c Capture) {
+	if r.jsBuf != nil {
+		_ = json.NewEncoder(r.jsBuf).Encode(c)
+		return
+	}
+	if r.js != nil {
+		_ = json.NewEncoder(r.js).Encode(c)
+	}
+}
+
+func (r *runner) flushFiles() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.flushFilesLocked()
+}
+
+func (r *runner) flushFilesLocked() {
+	if r.urlsBuf != nil {
+		_ = r.urlsBuf.Flush()
+	}
+	if r.jsBuf != nil {
+		_ = r.jsBuf.Flush()
+	}
+	if r.doneBuf != nil {
+		_ = r.doneBuf.Flush()
+	}
+}
+
 // Run lists the archives, fetches the old scripts, and writes what only
 // history calls. It resumes where a run stopped, when the query is the
 // same.
@@ -179,18 +237,33 @@ func Run(ctx context.Context, o Options) (*Summary, error) {
 	if err := os.MkdirAll(o.Dir, 0o700); err != nil {
 		return nil, err
 	}
-	r := &runner{o: o, done: map[string]bool{}, cred: map[string]bool{}, namedURLs: map[string]bool{}, lives: map[string]liveAns{}, liveWait: map[string]chan struct{}{}}
+	r := &runner{
+		o:             o,
+		done:          map[string]bool{},
+		cred:          map[string]bool{},
+		namedURLs:     map[string]bool{},
+		seenURLs:      map[[16]byte]struct{}{},
+		htmlPool:      map[string]Capture{},
+		lives:         map[string]liveAns{},
+		liveWait:      map[string]chan struct{}{},
+		httpsUpgrades: map[string]int{},
+		httpPlainOK:   map[string]bool{},
+	}
 	wbMode := ""
 	if o.Wayback != nil && (o.Wayback.Sharded || o.Wayback.Collapse != "") {
 		wbMode = fmt.Sprintf("|wb:%v:%s", o.Wayback.Sharded, o.Wayback.Collapse)
 	}
-	// stateVersion is in the key: a checkpoint of an older jsharvest, whose
-	// listing kept less (before 2: no html.jsonl, so no old page read), is
+	// stateVersion is in the key: a checkpoint of an older jsharvest is
 	// listed again rather than resumed.
 	q := sha256.Sum256([]byte(fmt.Sprint(stateVersion, "|", o.Host, "|", o.Sources, "|", o.Since.Format(time.DateOnly), wbMode)))
 	query := hex.EncodeToString(q[:8])
+	resuming := false
 	if b, err := os.ReadFile(filepath.Join(o.Dir, "archive.json")); err == nil && json.Unmarshal(b, &r.st) == nil && r.st.Query == query {
+		resuming = true
 		o.Log("resuming: the listing %s", map[bool]string{true: "is done", false: "goes on"}[r.st.Listed])
+		for _, tc := range r.st.HTMLTop {
+			r.htmlPool[tc.URL] = tc
+		}
 	} else {
 		r.st = state{Query: query}
 		for _, f := range []string{"urls.jsonl", "js.jsonl", "html.jsonl", "done.log"} {
@@ -219,26 +292,57 @@ func Run(ctx context.Context, o Options) (*Summary, error) {
 		r.st.Wayback.PagesDone = map[int]bool{}
 	}
 	var err error
+	if resuming && !r.st.Listed {
+		seedSeenURLs(filepath.Join(o.Dir, "urls.jsonl"), r.seenURLs)
+	}
 	if r.urls, err = appendFile(filepath.Join(o.Dir, "urls.jsonl")); err != nil {
 		return nil, err
 	}
-	defer r.urls.Close()
+	r.urlsBuf = bufio.NewWriterSize(r.urls, 4<<20)
+	defer func() {
+		r.flushFiles()
+		r.urls.Close()
+	}()
 	if r.js, err = appendFile(filepath.Join(o.Dir, "js.jsonl")); err != nil {
 		return nil, err
 	}
-	defer r.js.Close()
-	if r.html, err = appendFile(filepath.Join(o.Dir, "html.jsonl")); err != nil {
-		return nil, err
-	}
-	defer r.html.Close()
+	r.jsBuf = bufio.NewWriterSize(r.js, 1<<20)
+	defer func() {
+		r.flushFiles()
+		r.js.Close()
+	}()
+	defer func() {
+		r.mu.Lock()
+		if r.doneBuf != nil {
+			_ = r.doneBuf.Flush()
+		}
+		if r.doneFile != nil {
+			_ = r.doneFile.Close()
+			r.doneFile = nil
+		}
+		r.mu.Unlock()
+	}()
 	r.loadDone()
 	for _, c := range r.st.Summary.Credential {
 		r.cred[c] = true
 	}
 
+	if r.store, err = store.Open(o.Dir, store.Options{MaxBody: o.MaxBody}); err != nil {
+		return nil, err
+	}
+	r.cur = loadCurrent(o.Root, o.InScope)
+
 	if !r.st.Listed {
 		err := r.list(ctx)
-		r.st.Summary.URLs = distinctURLs(filepath.Join(o.Dir, "urls.jsonl"))
+		r.flushFiles()
+		r.mu.Lock()
+		if len(r.seenURLs) > 0 {
+			r.st.Summary.URLs = len(r.seenURLs)
+		} else {
+			r.st.Summary.URLs = distinctURLs(filepath.Join(o.Dir, "urls.jsonl"))
+		}
+		r.mu.Unlock()
+		_ = r.store.Flush()
 		if err != nil {
 			r.save()
 			return &r.st.Summary, err
@@ -246,13 +350,12 @@ func Run(ctx context.Context, o Options) (*Summary, error) {
 		r.st.Listed = !r.partial
 		r.save()
 	}
-	if r.store, err = store.Open(o.Dir, store.Options{MaxBody: o.MaxBody}); err != nil {
-		return nil, err
-	}
-	r.cur = loadCurrent(o.Root, o.InScope)
+	// Release the listing URL dedup map once listing is done to free RAM for fetch/AST.
+	r.seenURLs = nil
 	if len(r.cur.roles) == 0 {
 		r.note("no crawl of the target to compare with: every endpoint of the old scripts will read as historical; crawl the target first")
 	}
+
 	err = r.pages(ctx)
 	if err == nil {
 		err = r.fetch(ctx)
@@ -330,11 +433,25 @@ func appendFile(p string) (*os.File, error) {
 func (r *runner) save() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.flushFilesLocked()
+	r.saveLocked()
+}
+
+func (r *runner) saveMaybeLocked() {
+	if time.Since(r.lastSave) < 2*time.Second {
+		return
+	}
+	r.flushFilesLocked()
 	r.saveLocked()
 }
 
 func (r *runner) saveLocked() {
+	if r.o.Dir == "" {
+		return
+	}
+	r.st.HTMLTop = r.snapshotHTMLTopLocked()
 	r.st.Updated = time.Now().UTC()
+	r.lastSave = r.st.Updated
 	b, _ := json.MarshalIndent(r.st, "", " ")
 	tmp := filepath.Join(r.o.Dir, "archive.json.tmp")
 	if os.WriteFile(tmp, append(b, '\n'), 0o600) == nil {

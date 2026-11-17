@@ -142,7 +142,7 @@ type Report struct {
 func Run(ctx context.Context, o Options) (*Report, error) {
 	rep := &Report{Target: o.Target, Role: o.Role, DryRun: o.Sender.DryRun(), AllowWrite: o.AllowWrite, Started: time.Now().UTC(),
 		Verdicts: map[string]int{}, Tiers: map[string]int{}, Confidence: map[string]int{}}
-	v := &verifier{o: o, rep: rep, canaries: map[string]*Canary{}, perOrigin: map[string]int{}, gates: map[string]*gate{}, parents: map[string]int{}, hostPrefixes: map[string]int{}, hostMu: map[string]*sync.Mutex{}}
+	v := &verifier{o: o, rep: rep, canaries: map[string]*Canary{}, htmlShells: map[string][]Sig{}, perOrigin: map[string]int{}, gates: map[string]*gate{}, parents: map[string]int{}, hostPrefixes: map[string]int{}, hostMu: map[string]*sync.Mutex{}}
 	// The hosts: those of the drafts in scope, nothing else.
 	hosts := map[string]bool{}
 	for _, d := range o.Drafts {
@@ -266,12 +266,13 @@ func mapsKeys[V any](m map[string]V) func(func(string) bool) {
 }
 
 type verifier struct {
-	o         Options
-	rep       *Report
-	canaries  map[string]*Canary // origin+prefix
-	perOrigin map[string]int
-	gates     map[string]*gate // host
-	parents   map[string]int   // origin: 1-segment parent canaries past maxPrefixes
+	o          Options
+	rep        *Report
+	canaries   map[string]*Canary // origin+prefix
+	htmlShells map[string][]Sig   // host -> 2xx HTML shells observed on canaries
+	perOrigin  map[string]int
+	gates      map[string]*gate // host
+	parents    map[string]int   // origin: 1-segment parent canaries past maxPrefixes
 	// hostPrefixes: how many gateway prefixes a host's drafts that are
 	// sent have (probeOrder): a host with one or two needs no third to be
 	// found gated.
@@ -623,6 +624,24 @@ func (v *verifier) judge(ctx context.Context, r *Result, d Draft, sig Sig, body 
 	case same:
 		r.Verdict, r.Reason = DeadOrFP, "answers as any path does (the canary)"
 	case st >= 200 && st < 300:
+		if sig.Shell != "" && strings.Contains(sig.Type, "html") {
+			if v.matchesKnownHTMLShell(hostOf(target), sig) {
+				if d.Confidence == "string" && d.Method == "" {
+					r.Verdict, r.Reason = ClientRoute, "bare string answered with a catch-all HTML shell"
+				} else {
+					r.Verdict, r.Reason = DeadOrFP, "answers with a catch-all/WAF HTML shell seen on canaries"
+				}
+				break
+			}
+			if subOrigin, subPrefix := subCanaryPrefix(target, c.Prefix); subPrefix != "" {
+				sc := v.subCanary(ctx, d, subOrigin, subPrefix)
+				if sc != nil && sc.Answer != nil && Same(sig, *sc.Answer) {
+					r.Prefix = sc.Prefix
+					r.Verdict, r.Reason = DeadOrFP, "answers as any path under "+subPrefix+" does (the sub-canary)"
+					break
+				}
+			}
+		}
 		r.Verdict = Alive
 	case st == 405:
 		r.Verdict, r.Reason = Alive, "405: the route is there, for another method"
@@ -804,8 +823,104 @@ func (v *verifier) canaryAnswer(c *Canary, ans replay.Answer, err error) *Canary
 	default:
 		s := SigOf(ans.Status, ans.Header, ans.Body)
 		c.Answer = &s
+		if s.Status >= 200 && s.Status < 300 && s.Shell != "" && strings.Contains(s.Type, "html") {
+			v.recordHTMLShell(hostOf(c.URL), s)
+		}
 	}
 	return c
+}
+
+func (v *verifier) recordHTMLShell(host string, s Sig) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	add := func(key string) {
+		for _, ex := range v.htmlShells[key] {
+			if Same(ex, s) {
+				return
+			}
+		}
+		v.htmlShells[key] = append(v.htmlShells[key], s)
+	}
+	if host != "" {
+		add(host)
+	}
+	// Short (<40 words) gateway/WAF HTML reject pages (e.g. corporate reverse
+	// proxy templates) are shared across RDN hosts in the same run.
+	if s.Words > 0 && s.Words <= 40 {
+		add("*")
+	}
+}
+
+func (v *verifier) matchesKnownHTMLShell(host string, s Sig) bool {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	for _, ex := range v.htmlShells[host] {
+		if Same(ex, s) {
+			return true
+		}
+	}
+	for _, ex := range v.htmlShells["*"] {
+		if Same(ex, s) {
+			return true
+		}
+	}
+	return false
+}
+
+var sensitiveSubSegs = map[string]bool{
+	"admin": true, "internal": true, "manage": true, "management": true,
+	"console": true, "actuator": true, "debug": true, "private": true, "backoffice": true,
+}
+
+func subCanaryPrefix(target, baseKey string) (origin, prefix string) {
+	u, err := url.Parse(target)
+	if err != nil || u.Host == "" {
+		return "", ""
+	}
+	origin = u.Scheme + "://" + u.Host
+	segs := strings.Split(strings.Trim(u.EscapedPath(), "/"), "/")
+	if len(segs) <= 3 {
+		return "", ""
+	}
+	// Scan segments deeper than the 2-segment GatewayPrefix (excluding the leaf)
+	// for a sensitive sub-router/WAF boundary like /api/applications/admin/*.
+	for i := 2; i < len(segs)-1; i++ {
+		if sensitiveSubSegs[strings.ToLower(segs[i])] {
+			sub := "/" + strings.Join(segs[:i+1], "/")
+			if origin+sub != baseKey {
+				return origin, sub
+			}
+		}
+	}
+	return "", ""
+}
+
+func (v *verifier) subCanary(ctx context.Context, d Draft, origin, subPrefix string) *Canary {
+	key := origin + subPrefix
+	hk := canaryHeaderKey(d, v.o.Identity == nil)
+	ck := key
+	if hk != "" {
+		ck += "\x00" + hk
+	}
+	v.mu.Lock()
+	if c := v.canaries[ck]; c != nil {
+		c.Drafts++
+		v.mu.Unlock()
+		return c
+	}
+	cu := strings.TrimRight(key, "/") + "/" + marker.Slug()
+	c := &Canary{Prefix: key, URL: cu, Drafts: 1}
+	v.canaries[ck] = c
+	v.mu.Unlock()
+
+	cd := Draft{ID: "canary", Method: "GET", Headers: d.Headers, SampleHeaders: d.SampleHeaders}
+	raw, err := cd.raw(cu, v.o.Identity == nil)
+	if err != nil {
+		c.Err = err.Error()
+		return c
+	}
+	ans, err := v.send(ctx, raw, cu, "canary", key)
+	return v.canaryAnswer(c, ans, err)
 }
 
 // options is an OPTIONS of a request's URL, as it was (its headers).

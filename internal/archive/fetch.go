@@ -18,10 +18,34 @@ import (
 	"sync"
 	"time"
 
+	"github.com/TimoMangCut/JSharvest/internal/endpoints"
 	"github.com/TimoMangCut/JSharvest/internal/replay"
 	"github.com/TimoMangCut/JSharvest/internal/sourcemap"
 	"github.com/TimoMangCut/JSharvest/internal/store"
 )
+
+func (r *runner) prefetchWorker(ctx context.Context, ch <-chan *group) {
+	for g := range ch {
+		if ctx.Err() != nil {
+			return
+		}
+		if r.isDone(g.key) || r.isDone("pre:"+g.key) {
+			continue
+		}
+		if g.digest != "" && ((r.cur != nil && r.cur.sha1[g.digest]) || r.store.BySHA1(g.digest) != "") {
+			continue
+		}
+		meta := &store.ArchiveSeen{First: g.first, Last: g.last, Captures: g.captures}
+		bodies, ferr := r.fetchOne(ctx, g, meta)
+		if ferr != nil {
+			continue
+		}
+		for _, b := range bodies {
+			_ = r.chunks(g, b)
+		}
+		r.markDone("pre:" + g.key)
+	}
+}
 
 func (r *runner) prepareGroup(g *group) (needNetwork bool) {
 	if r.isDone(g.key) {
@@ -35,6 +59,21 @@ func (r *runner) prepareGroup(g *group) (needNetwork bool) {
 	meta := &store.ArchiveSeen{First: g.first, Last: g.last, Captures: g.captures}
 	if g.digest != "" && r.cur.sha1[g.digest] {
 		r.sum(func(s *Summary) { s.Known++ })
+		r.markDone(g.key)
+		return false
+	}
+	if r.isDone("pre:" + g.key) {
+		if g.digest != "" {
+			if sha := r.store.BySHA1(g.digest); sha != "" {
+				same := false
+				if e, ok := r.store.Entry(sha); ok && e.Alive != nil && *e.Alive && slices.Contains(e.Sources, "live") {
+					same = true
+				}
+				for _, src := range g.sources {
+					r.store.Add(store.Record{SHA256: sha, URL: g.latest.URL, Source: src, Archive: meta, LiveSame: same})
+				}
+			}
+		}
 		r.markDone(g.key)
 		return false
 	}
@@ -62,7 +101,9 @@ func (r *runner) fetch(ctx context.Context) error {
 	}
 	r.mu.Lock()
 	r.st.Summary.Digests = len(gs)
-	r.st.Summary.Skipped["vendor library"], r.st.Summary.Skipped["over -max-files"] = 0, 0
+	r.st.Summary.Skipped["vendor library"] = 0
+	r.st.Summary.Skipped["over -max-files"] = 0
+	r.st.Summary.Skipped["family unchanged"] = 0
 	for _, g := range gs {
 		for _, u := range g.urls {
 			r.namedURLs[u] = true // filed already: a chunk naming it is not filed again
@@ -80,16 +121,11 @@ func (r *runner) fetch(ctx context.Context) error {
 		r.mu.Unlock()
 	}()
 
-	var queue []*group
-	for _, g := range gs {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if r.prepareGroup(g) {
-			queue = append(queue, g)
-		}
+	if ctx.Err() != nil {
+		return ctx.Err()
 	}
-	if len(queue) == 0 {
+	initial, fc := newFamilyController(r, gs)
+	if len(initial) == 0 {
 		return nil
 	}
 
@@ -99,17 +135,52 @@ func (r *runner) fetch(ctx context.Context) error {
 	var qMu sync.Mutex
 	cond := sync.NewCond(&qMu)
 	claimed := map[string]bool{}
-	for _, g := range queue {
-		claimed[g.key] = true
+	var flatQueue []*group
+	drr := newDRRQueue()
+	useFlat := r.o.MaxFiles > 0
+	for _, g := range initial {
+		if !claimed[g.key] {
+			claimed[g.key] = true
+			if useFlat {
+				flatQueue = append(flatQueue, g)
+			} else {
+				drr.push(g)
+			}
+		}
 	}
+	qLen := func() int {
+		if useFlat {
+			return len(flatQueue)
+		}
+		return drr.len()
+	}
+	qPop := func() (*group, bool) {
+		if useFlat {
+			if len(flatQueue) == 0 {
+				return nil, false
+			}
+			g := flatQueue[0]
+			flatQueue = flatQueue[1:]
+			return g, true
+		}
+		return drr.pop()
+	}
+	qPush := func(g *group) {
+		if useFlat {
+			flatQueue = append(flatQueue, g)
+		} else {
+			drr.push(g)
+		}
+	}
+
 	active := 0
 	n := 0
 	done := false
 	var fatal error
 
 	workers := r.workers()
-	if workers > len(queue) && workers > 4 {
-		workers = max(len(queue), 4)
+	if workers > qLen() && workers > 4 {
+		workers = max(qLen(), 4)
 	}
 	var wg sync.WaitGroup
 	for range workers {
@@ -118,7 +189,7 @@ func (r *runner) fetch(ctx context.Context) error {
 			defer wg.Done()
 			for {
 				qMu.Lock()
-				for len(queue) == 0 && !done {
+				for qLen() == 0 && !done {
 					if active == 0 {
 						done = true
 						cond.Broadcast()
@@ -126,7 +197,7 @@ func (r *runner) fetch(ctx context.Context) error {
 					}
 					cond.Wait()
 				}
-				if done && len(queue) == 0 {
+				if done && qLen() == 0 {
 					qMu.Unlock()
 					return
 				}
@@ -136,8 +207,11 @@ func (r *runner) fetch(ctx context.Context) error {
 					qMu.Unlock()
 					return
 				}
-				g := queue[0]
-				queue = queue[1:]
+				g, ok := qPop()
+				if !ok {
+					qMu.Unlock()
+					continue
+				}
 				if r.o.MaxFiles > 0 && n >= r.o.MaxFiles {
 					qMu.Unlock()
 					r.sum(func(s *Summary) { s.Skipped["over -max-files"]++ })
@@ -151,7 +225,9 @@ func (r *runner) fetch(ctx context.Context) error {
 				meta := &store.ArchiveSeen{First: g.first, Last: g.last, Captures: g.captures}
 				var bodies [][]byte
 				var ferr error
+				isScript := true
 				if kind := assetKind(g.latest); kind == "map" || kind == "manifest" {
+					isScript = false
 					bodies, ferr = r.fetchAsset(fctx, g, meta, kind)
 				} else {
 					bodies, ferr = r.fetchOne(fctx, g, meta)
@@ -168,6 +244,14 @@ func (r *runner) fetch(ctx context.Context) error {
 							}
 						}
 					}
+				}
+
+				if isScript {
+					zoom, pruned := fc.recordFetched(r, g, bodies, ferr == nil || errors.Is(ferr, errNotArchived))
+					if pruned > 0 {
+						r.sum(func(s *Summary) { s.Skipped["family unchanged"] += pruned })
+					}
+					discovered = append(discovered, zoom...)
 				}
 
 				switch {
@@ -195,7 +279,7 @@ func (r *runner) fetch(ctx context.Context) error {
 					r.o.Log("fetch %s: %v", g.latest.URL, ferr)
 				default:
 					r.markDone(g.key)
-					if curN%20 == 0 {
+					if curN%50 == 0 {
 						r.store.Flush()
 						r.save()
 					}
@@ -205,11 +289,11 @@ func (r *runner) fetch(ctx context.Context) error {
 				for _, mg := range discovered {
 					if !claimed[mg.key] {
 						claimed[mg.key] = true
-						queue = append(queue, mg)
+						qPush(mg)
 					}
 				}
 				active--
-				if len(queue) == 0 && active == 0 {
+				if qLen() == 0 && active == 0 {
 					done = true
 				}
 				cond.Broadcast()
@@ -394,6 +478,7 @@ func (r *runner) fetchOne(ctx context.Context, g *group, meta *store.ArchiveSeen
 			tags = append(tags, "https-upgrade")
 		}
 		r.store.Add(store.Record{Body: live, URL: liveURL, Kind: "file", Via: "archive-live", Source: "live", Tags: tags, Alive: alive})
+		endpoints.ExtractCached(r.o.Dir, live, liveURL)
 		kept = append(kept, live)
 	}
 	if liveSame {
@@ -412,6 +497,7 @@ func (r *runner) fetchOne(ctx context.Context, g *group, meta *store.ArchiveSeen
 	if (err != nil || a.Status != 200) && g.warc.WARC != nil && r.o.CC != nil {
 		// The Wayback has no copy, Common Crawl's WARC file has (MAX-01).
 		if body, ok := r.fromWARC(ctx, g, meta, alive); ok {
+			endpoints.ExtractCached(r.o.Dir, body, g.warc.URL)
 			return append(kept, body), nil
 		}
 	}
@@ -453,6 +539,7 @@ func (r *runner) fetchOne(ctx context.Context, g *group, meta *store.ArchiveSeen
 		Tags: tags, Alive: alive, Archive: meta}); err != nil {
 		return kept, err
 	}
+	endpoints.ExtractCached(r.o.Dir, body, c.URL)
 	r.sum(func(s *Summary) { s.Fetched++ })
 	return append(kept, body), nil
 }
@@ -518,10 +605,44 @@ func (r *runner) liveAsk(ctx context.Context, raw, kind string) (*bool, []byte, 
 		return nil, nil, ""
 	}
 	no := false
-	ans, err := r.ask(ctx, u, raw)
-	if up := upgrade(u, ans, err); up != nil && r.o.LiveHosts[up.Host] {
-		u = up
+	host := strings.ToLower(u.Hostname())
+	directHTTPS := false
+	if u.Scheme == "http" && u.Port() == "" {
+		r.livesMu.Lock()
+		directHTTPS = r.httpsUpgrades[host] >= 3 && !r.httpPlainOK[host]
+		r.livesMu.Unlock()
+	}
+	var ans replay.Answer
+	if directHTTPS {
+		up := *u
+		up.Scheme = "https"
+		if r.o.LiveHosts[up.Host] {
+			u = &up
+		}
 		ans, err = r.ask(ctx, u, raw)
+	} else {
+		origScheme := u.Scheme
+		origPort := u.Port()
+		ans, err = r.ask(ctx, u, raw)
+		if up := upgrade(u, ans, err); up != nil && r.o.LiveHosts[up.Host] {
+			u = up
+			ans, err = r.ask(ctx, u, raw)
+			if err == nil && ans.Err == "" && origScheme == "http" && origPort == "" {
+				r.livesMu.Lock()
+				if r.httpsUpgrades == nil {
+					r.httpsUpgrades = map[string]int{}
+				}
+				r.httpsUpgrades[host]++
+				r.livesMu.Unlock()
+			}
+		} else if origScheme == "http" && origPort == "" && err == nil && ans.Err == "" && (ans.Status < 300 || ans.Status >= 400) {
+			r.livesMu.Lock()
+			if r.httpPlainOK == nil {
+				r.httpPlainOK = map[string]bool{}
+			}
+			r.httpPlainOK[host] = true
+			r.livesMu.Unlock()
+		}
 	}
 	if errors.Is(err, replay.ErrHostBlocked) || err == nil && ans.Block != nil {
 		// A CDN/WAF answered in the server's place: whether it still

@@ -471,8 +471,39 @@ func candidateBases(in Inputs) []string {
 	return out
 }
 
+func isVersionSeg(s string) bool {
+	if len(s) < 2 || (s[0] != 'v' && s[0] != 'V') || s[1] < '0' || s[1] > '9' {
+		return false
+	}
+	for i := 2; i < len(s); i++ {
+		if (s[i] < '0' || s[i] > '9') && s[i] != '.' {
+			return false
+		}
+	}
+	return true
+}
+
+func apiRootPrefix(p string) string {
+	segs := strings.Split(strings.Trim(p, "/"), "/")
+	if len(segs) == 0 || segs[0] == "" {
+		return ""
+	}
+	if len(segs) >= 2 && strings.EqualFold(segs[0], "api") && isVersionSeg(segs[1]) {
+		return "/" + strings.ToLower(segs[0]) + "/" + strings.ToLower(segs[1])
+	}
+	if isVersionSeg(segs[0]) {
+		return "/" + strings.ToLower(segs[0])
+	}
+	switch strings.ToLower(segs[0]) {
+	case "api", "rest", "graphql":
+		return "/" + strings.ToLower(segs[0])
+	}
+	return ""
+}
+
 // join puts a path under a base, the base's path not twice (/hub +
-// /hub/auth/x is /hub/auth/x).
+// /hub/auth/x is /hub/auth/x, and /api/v1/users + /api/v1/orders is
+// /api/v1/orders rather than /api/v1/users/api/v1/orders).
 func join(base, path string) string {
 	base = strings.TrimRight(base, "/")
 	p := strings.TrimPrefix(path, "{}")
@@ -482,6 +513,9 @@ func join(base, path string) string {
 	if u, err := url.Parse(base); err == nil {
 		bp := strings.TrimRight(u.EscapedPath(), "/")
 		if bp != "" && (p == bp || strings.HasPrefix(p, bp+"/")) {
+			return u.Scheme + "://" + u.Host + p
+		}
+		if ar := apiRootPrefix(bp); ar != "" && ar == apiRootPrefix(p) {
 			return u.Scheme + "://" + u.Host + p
 		}
 	}
@@ -842,9 +876,9 @@ var (
 )
 
 // inferOriginLanguages inspects concrete paths in the catalog (e.g.
-// "/tr/api/desteklenen-platformlar" on "https://1004.tubitak.gov.tr") so
-// parameterized sibling routes ("/{}/api/duyurular") pick the exact language
-// prefix active on that origin.
+// "/tr/api/items" on "https://portal.example.tr") so parameterized sibling
+// routes ("/{}/api/announcements") pick the exact language prefix active on
+// that origin.
 func inferOriginLanguages(cat []endpoints.Endpoint) map[string]string {
 	counts := map[string]map[string]int{}
 	for _, e := range cat {

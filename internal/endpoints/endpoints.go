@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/TimoMangCut/JSharvest/internal/detect"
@@ -165,8 +166,13 @@ func Analyze(dir string, workers int) ([]Script, error) {
 	if err := os.MkdirAll(filepath.Join(dir, CacheDir), 0o700); err != nil {
 		return nil, err
 	}
+	hasMem := atomic.LoadInt64(&globalMem.budgetBytes) > 0
 	if workers <= 0 {
-		workers = max(1, runtime.GOMAXPROCS(0)/2)
+		if hasMem {
+			workers = max(1, runtime.GOMAXPROCS(0))
+		} else {
+			workers = max(1, runtime.GOMAXPROCS(0)/2)
+		}
 	}
 	shas := make([]string, 0, len(index))
 	for sha := range index {
@@ -174,7 +180,11 @@ func Analyze(dir string, workers int) ([]Script, error) {
 	}
 	sort.Strings(shas)
 	out := make([]Script, len(shas))
-	heavySem := make(chan struct{}, 2)
+	heavyCap := 2
+	if hasMem {
+		heavyCap = max(2, min(4, runtime.GOMAXPROCS(0)/2))
+	}
+	heavySem := make(chan struct{}, heavyCap)
 	var wg sync.WaitGroup
 	next := make(chan int)
 	for range workers {
@@ -197,6 +207,9 @@ func Analyze(dir string, workers int) ([]Script, error) {
 const heavyScriptBytes = 512 << 10
 
 func extractJS(src []byte, hint string, heavySem chan struct{}) jsapi.Result {
+	// Clip slice capacity so tdewolff/parse/v2.NewInputBytes (which appends a
+	// NUL sentinel byte) never mutates a shared backing array across workers.
+	src = src[:len(src):len(src)]
 	if len(src) > maxScript {
 		return jsapi.Result{Version: jsapi.Version, Error: fmt.Sprintf("not analysed: %d bytes", len(src))}
 	}
@@ -235,18 +248,40 @@ func writeStaticCache(cache string, res jsapi.Result) {
 // so HTTP crawls that inspect scripts for frontier routes or Phase-2 spec probing
 // warm the exact cache Analyze reads at the end of the run instead of parsing AST twice.
 func ExtractCached(dir string, src []byte, hint string) jsapi.Result {
-	if dir == "" {
-		return extractJS(src, hint, nil)
-	}
 	rawSum := sha256.Sum256(src)
 	sum := hex.EncodeToString(rawSum[:])
+	if res, ok := memGetResult(sum); ok {
+		if dir != "" {
+			cache := filepath.Join(dir, CacheDir, sum+".json")
+			if _, err := os.Stat(cache); err != nil && os.MkdirAll(filepath.Join(dir, CacheDir), 0o700) == nil {
+				writeStaticCache(cache, res)
+			}
+		}
+		return res
+	}
+	if dir == "" {
+		res := extractJS(src, hint, nil)
+		memPutResult(sum, res)
+		if len(res.Builders) > 0 || len(res.Exports) > 0 {
+			CacheScriptBody(sum, src)
+		}
+		return res
+	}
 	cacheDir := filepath.Join(dir, CacheDir)
 	cache := filepath.Join(cacheDir, sum+".json")
 	var res jsapi.Result
 	if b, err := os.ReadFile(cache); err == nil && json.Unmarshal(b, &res) == nil && res.Version == jsapi.Version {
+		memPutResult(sum, res)
+		if len(res.Builders) > 0 || len(res.Exports) > 0 {
+			CacheScriptBody(sum, src)
+		}
 		return res
 	}
 	res = extractJS(src, hint, nil)
+	memPutResult(sum, res)
+	if len(res.Exports) > 0 {
+		CacheScriptBody(sum, src)
+	}
 	if os.MkdirAll(cacheDir, 0o700) == nil {
 		writeStaticCache(cache, res)
 	}
@@ -256,10 +291,26 @@ func ExtractCached(dir string, src []byte, hint string) jsapi.Result {
 func analyzeOne(dir, sha string, info scriptInfo, heavySem chan struct{}) Script {
 	s := Script{SHA256: sha, URLs: info.urls, ThirdParty: info.thirdParty, Source: info.source, Load: sourceOf(dir, sha)}
 	cache := filepath.Join(dir, CacheDir, sha+".json")
+	if !info.openapi {
+		if res, ok := memGetResult(sha); ok {
+			s.Result = res
+			if _, err := os.Stat(cache); err != nil {
+				writeStaticCache(cache, s.Result)
+			}
+			return s
+		}
+	}
 	if b, err := os.ReadFile(cache); err == nil && json.Unmarshal(b, &s.Result) == nil && s.Version == jsapi.Version {
+		if !info.openapi {
+			memPutResult(sha, s.Result)
+		}
 		return s
 	}
-	src, err := os.ReadFile(filepath.Join(dir, "js", sha+".js"))
+	src, ok := memGetBody(sha)
+	var err error
+	if !ok {
+		src, err = os.ReadFile(filepath.Join(dir, "js", sha+".js"))
+	}
 	switch {
 	case err != nil:
 		s.Result = jsapi.Result{Version: jsapi.Version, Error: "read: " + err.Error()}
@@ -272,6 +323,10 @@ func analyzeOne(dir, sha string, info scriptInfo, heavySem chan struct{}) Script
 		s.Result = jsapi.ExtractOpenAPI(src)
 	default:
 		s.Result = extractJS(src, sourceHint(info.urls), heavySem)
+		memPutResult(sha, s.Result)
+		if len(s.Result.Builders) > 0 || len(s.Result.Exports) > 0 {
+			CacheScriptBody(sha, src)
+		}
 	}
 	writeStaticCache(cache, s.Result)
 	return s
@@ -289,9 +344,13 @@ func sourceHint(urls []string) string {
 	return ""
 }
 
-// sourceOf reads a stored script's source when asked.
+// sourceOf reads a stored script's source when asked, hitting the in-memory
+// body cache first when available.
 func sourceOf(dir, sha string) func() []byte {
 	return func() []byte {
+		if b, ok := memGetBody(sha); ok {
+			return b
+		}
 		b, _ := os.ReadFile(filepath.Join(dir, "js", sha+".js"))
 		return b
 	}

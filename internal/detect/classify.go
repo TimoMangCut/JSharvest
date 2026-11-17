@@ -89,7 +89,10 @@ var wafBlockRe = regexp.MustCompile(`(?i)sorry, you have been blocked|you are un
 var challengeRe = regexp.MustCompile(`(?i)just a moment|captcha-delivery\.com|px-captcha|please verify you are a human|_cf_chl_opt|/cdn-cgi/challenge-platform/h/[a-z]/(?:orchestrate|turnstile)`)
 
 // wafRe is a WAF's page on a 403 that no vendor rule names.
-var wafRe = regexp.MustCompile(`(?i)attention required|cloudflare ray id|access denied.{0,80}(incapsula|akamai|imperva)|request (was )?blocked|sucuri website firewall|web application firewall|_incapsula_resource|errors\.edgesuite\.net`)
+var (
+	wafRe      = regexp.MustCompile(`(?i)attention required|cloudflare ray id|access denied.{0,80}(incapsula|akamai|imperva)|request (was )?blocked|sucuri website firewall|web application firewall|_incapsula_resource|errors\.edgesuite\.net`)
+	f5RejectRe = regexp.MustCompile(`(?is)the requested url was rejected\.?\s+please consult with your administrator`)
+)
 
 // Classify says whether a response is a vendor's block, and what kind; nil
 // when it is the application's own (its 403 included). d.Headers are
@@ -132,6 +135,9 @@ func Classify(d Doc) *Block {
 	}
 	if d.Status == http.StatusForbidden && (wafRe.Match(body[:min(len(body), 4096)]) || wafRe.MatchString(d.Title)) {
 		return &Block{Kind: BlockRequest, Evidence: []string{"403 with a WAF's page"}}
+	}
+	if len(body) > 0 && f5RejectRe.Match(body[:min(len(body), 4096)]) {
+		return &Block{Kind: BlockRequest, Vendor: "f5-bigip", Evidence: []string{"Request Rejected WAF page"}}
 	}
 	return nil
 }

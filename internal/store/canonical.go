@@ -7,13 +7,23 @@ import (
 )
 
 var (
-	// A short content hash before the extension, as Rollup/Vite (base64url,
-	// which may itself contain "-" or "_") and esbuild/Angular (uppercase
-	// base32) emit it: index-tkF5t2Ua.js, index-D-eBaYxL.js, chunk-LADWWXNY.js.
-	shortHashRe = regexp.MustCompile(`^(.+)-([A-Za-z0-9_-]{8})(\.[mc]?js)$`)
+	// A short or medium content hash before the extension, as Rollup/Vite
+	// (base64url, which may itself contain "-" or "_"), Next.js, and
+	// esbuild/Angular (uppercase base32) emit it: index-tkF5t2Ua.js,
+	// index-D-eBaYxL.js, chunk-LADWWXNY.js, app-4f351d505ee1cb62.min.js.
+	shortHashRe = regexp.MustCompile(`^(.+)-([A-Za-z0-9_-]{8,64})(\.(?:min\.)?[mc]?js)$`)
+	// Underscore-separated CMS/bundler content hashes, such as Drupal's
+	// aggregated js_xAPl0qIk9eowy_iS9tNkCWXLUVoat94SQT48UBCFkyQ.js or
+	// WordPress Autoptimize autoptimize_090440247985fc1b6a15d99098ac5d8c.js.
+	underHashRe = regexp.MustCompile(`^(.+)_([A-Za-z0-9_-]{16,64})(\.(?:min\.)?[mc]?js)$`)
+	// Pure-hash bundle filenames emitted by LiteSpeed / WP-Rocket / Webpack:
+	// 063b9d1f55b0dc299afeaabde2930a00.js.
+	pureHashFileRe = regexp.MustCompile(`^([0-9a-fA-F]{16,64})(\.(?:min\.)?[mc]?js)$`)
+	// Elementor per-post generated JS: eael-12345.min.js or eael-12345.js.
+	eaelPostRe = regexp.MustCompile(`^(eael)-\d+(\.(?:min\.)?[mc]?js)$`)
 	// A hex hash between separators, as webpack and Next.js emit it:
 	// main.7b54536e.js, 16.a8b9b39f.chunk.js, page-e3e3e3122d5a64cf.js.
-	hexHashRe = regexp.MustCompile(`([.-])([0-9a-f]{6,64})([.-])`)
+	hexHashRe = regexp.MustCompile(`([._-])([0-9a-f]{6,64})([._-])`)
 	// A whole path segment that is an id, such as the Next.js build id.
 	idSegmentRe = regexp.MustCompile(`^[A-Za-z0-9_-]{16,64}$`)
 	base32Re    = regexp.MustCompile(`^[A-Z2-7]{8}$`)
@@ -41,7 +51,16 @@ func CanonicalKey(raw string) string {
 }
 
 func canonicalName(name string) string {
-	if m := shortHashRe.FindStringSubmatch(name); m != nil && isShortHash(m[2]) {
+	if m := pureHashFileRe.FindStringSubmatch(name); m != nil && hasDigit(m[1]) && hasLetter(m[1]) {
+		return "[h]" + m[2]
+	}
+	if m := eaelPostRe.FindStringSubmatch(name); m != nil {
+		return m[1] + "-[h]" + m[2]
+	}
+	if m := underHashRe.FindStringSubmatch(name); m != nil && hasDigit(m[2]) && hasLetter(m[2]) && !camelRe.MatchString(m[2]) {
+		return m[1] + "_[h]" + m[3]
+	}
+	if m := shortHashRe.FindStringSubmatch(name); m != nil && isTokenHash(m[2]) {
 		return m[1] + "-[h]" + m[3]
 	}
 	// Replace in a loop: adjacent hashes share a separator, which a single
@@ -59,6 +78,16 @@ func canonicalName(name string) string {
 		}
 		name = out
 	}
+}
+
+func isTokenHash(tok string) bool {
+	if len(tok) == 8 {
+		return isShortHash(tok)
+	}
+	if camelRe.MatchString(tok) {
+		return false
+	}
+	return hasDigit(tok) && hasLetter(tok)
 }
 
 // isShortHash tells an 8-character hash from an 8-letter word: a hash has a

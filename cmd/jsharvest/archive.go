@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/TimoMangCut/JSharvest/internal/archive"
+	"github.com/TimoMangCut/JSharvest/internal/endpoints"
 	"github.com/TimoMangCut/JSharvest/internal/netsafe"
 	"github.com/TimoMangCut/JSharvest/internal/replay"
 	"github.com/TimoMangCut/JSharvest/internal/scope"
@@ -48,14 +49,15 @@ func archiveRun(ctx context.Context, args []string) (*archive.Summary, error) {
 	since := fs.String("since", "", "only captures from this date on (YYYY-MM-DD)")
 	live := fs.Bool("live", true, "ask the target whether an old script's URL still serves it (GET, no credentials, only hosts the crawls reached)")
 	liveHosts := fs.String("live-hosts", "", "the hosts (host:port) the live check may ask, comma separated; default: those the crawls reached")
-	liveRate := fs.Float64("live-rate", 2, "live checks per second, at most")
+	liveRate := fs.Float64("live-rate", 10, "live checks per second, at most")
 	maxFiles := fs.Int("max-files", 0, "old scripts to fetch, at most, newest first (0: all)")
 	maxHTML := fs.Int("max-html", 10, "old pages (text/html captures) to read for the scripts they load, the root first (0: none)")
 	vendor := fs.Bool("vendor", false, "fetch vendor libraries too (jquery, react…)")
 	pageSize := fs.Int("page-size", 25000, "rows of a CDX page (when not using ZipNum sharding)")
 	maxPages := fs.Int("max-pages", 0, "CDX pages to list, at most (0: all)")
 	collapse := fs.String("collapse", "digest", "Wayback CDX field collapse (e.g. digest, urlkey, or none)")
-	concurrency := fs.Int("concurrency", 8, "concurrent archive listing, live-check and fetch workers")
+	concurrency := fs.Int("concurrency", 16, "concurrent archive listing, live-check and fetch workers")
+	memCacheMB := fs.Int("mem-cache-mb", 512, "RAM budget in MiB for in-memory JS AST & script cache (0: off)")
 	ccCollections := fs.Int("cc-collections", 3, "Common Crawl's newest collections to list")
 	proxy := fs.String("proxy", "", "send everything through this proxy: the archives and the live checks (default JSHARVEST_PROXY, HTTPS_PROXY, HTTP_PROXY; none: no proxy)")
 	hostRules := fs.String("host-resolver-rules", env("JSHARVEST_HOST_RESOLVER_RULES", ""), `Chrome host resolver rules for the live check, e.g. "MAP *.example.test 127.0.0.1" (env JSHARVEST_HOST_RESOLVER_RULES)`)
@@ -64,6 +66,9 @@ func archiveRun(ctx context.Context, args []string) (*archive.Summary, error) {
 	fs.Parse(args)
 	given := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
+	if os.Getenv("JSHARVEST_MEM_CACHE_MB") == "" || given["mem-cache-mb"] {
+		endpoints.SetMemCacheMB(*memCacheMB)
+	}
 	if *target == "" {
 		return nil, errors.New("archive: -target is required")
 	}
@@ -136,24 +141,24 @@ func archiveRun(ctx context.Context, args []string) (*archive.Summary, error) {
 	if collapseVal == "none" || (!shardedWB && !given["collapse"]) {
 		collapseVal = ""
 	}
-	wbIndexGap := gap(4 * time.Second)
+	wbIndexGap := gap(2 * time.Second)
 	if shardedWB {
-		wbIndexGap = gap(1500 * time.Millisecond)
+		wbIndexGap = gap(350 * time.Millisecond)
 	}
 	wbFilesGap := gap(time.Second)
 	if *concurrency > 1 {
-		wbFilesGap = gap(250 * time.Millisecond)
+		wbFilesGap = gap(100 * time.Millisecond)
 	}
 	o.Wayback = &archive.Wayback{Base: wbBase, Client: client, Index: &archive.Budget{Gap: wbIndexGap},
 		Files: &archive.Budget{Gap: wbFilesGap}, PageSize: *pageSize, Collapse: collapseVal, Sharded: shardedWB}
-	o.OTX = &archive.OTX{Base: env("JSHARVEST_OTX_URL", "https://otx.alienvault.com"), Client: client, Budget: &archive.Budget{Gap: gap(2 * time.Second)}}
-	// Common Crawl's index answers 504 when busy: three tries, 15 s apart,
-	// then the next collection (MAX-01).
+	o.OTX = &archive.OTX{Base: env("JSHARVEST_OTX_URL", "https://otx.alienvault.com"), Client: client, Budget: &archive.Budget{Gap: gap(time.Second)}}
+	// Common Crawl's index answers 504 when busy: two fast tries across
+	// parallel collections so dead collections fail fast (MAX-01).
 	ccClient := archive.NewClientSafe(proxyURL, hostRuleSet, services)
-	ccClient.Tries, ccClient.Wait = 3, gap(15*time.Second)
+	ccClient.Tries, ccClient.Wait = 2, gap(6*time.Second)
 	o.CC = &archive.CommonCrawl{Index: env("JSHARVEST_CC_INDEX_URL", "https://index.commoncrawl.org"),
 		Data: env("JSHARVEST_CC_DATA_URL", "https://data.commoncrawl.org"), Client: ccClient,
-		Budget: &archive.Budget{Gap: gap(10 * time.Second)}, Files: &archive.Budget{Gap: gap(time.Second)}, Collections: *ccCollections}
+		Budget: &archive.Budget{Gap: gap(3 * time.Second)}, Files: &archive.Budget{Gap: gap(500 * time.Millisecond)}, Collections: *ccCollections}
 
 	o.URLScan = &archive.URLScan{Base: env("JSHARVEST_URLSCAN_URL", "https://urlscan.io"), Key: os.Getenv("URLSCAN_API_KEY"), Client: client,
 		Budget: &archive.Budget{Gap: gap(2 * time.Second)}, Pages: 10, Results: 10}

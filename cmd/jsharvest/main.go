@@ -206,10 +206,14 @@ func runCrawl(args []string) error {
 	escalate := fs.Bool("escalate", true, "with -engine auto (the http engine before a login): the pages a bot challenge stops plain HTTP on go to Chrome, one run a challenged host, filed with this crawl (the run.json escalated field); -engine http never starts a browser")
 	archiveFallback := fs.Bool("archive-fallback", true, "with the http engine, when the first page is a bot challenge and no script was reached: run jsharvest archive for the host (old pages and scripts, live first)")
 	spaBoot := fs.Bool("spa-boot", false, "with -engine auto: when the http engine finds an SPA and sees no API call, open one guarded headless tab a SPA origin (3 at most, 8 s each) to capture the requests it sends when it boots")
+	memCacheMB := fs.Int("mem-cache-mb", 512, "RAM budget in MiB for in-memory JS AST & script cache (0: off)")
 	insecure := fs.Bool("insecure", false, "accept any TLS certificate (a self-signed lab or staging target): the http engine, Chrome, and the archive's live check")
 	verbose := fs.Bool("v", false, "debug logging")
 	waitLock := waitLockFlag(fs)
 	fs.Parse(args)
+	if os.Getenv("JSHARVEST_MEM_CACHE_MB") == "" || setFlagProvided(fs, "mem-cache-mb") {
+		endpoints.SetMemCacheMB(*memCacheMB)
+	}
 
 	if *verbose {
 		slog.SetLogLoggerLevel(slog.LevelDebug)
@@ -515,7 +519,8 @@ func runCrawl(args []string) error {
 			ho.Fallback, ho.Archive = nil, nil
 			if *archiveFallback || *archiveAfter {
 				run := func(ctx context.Context) any {
-					args := []string{"-o", *out, "-target", t.Hostname(), "-scope", *scopeMode, "-sources", archiveSources, "-concurrency", fmt.Sprint(max(*tabs*2, 8))}
+					args := []string{"-o", *out, "-target", t.Hostname(), "-scope", *scopeMode, "-sources", archiveSources,
+						"-concurrency", fmt.Sprint(max(*tabs*4, 16)), "-live-rate", fmt.Sprint(max(*httpRate, 10)), "-mem-cache-mb", fmt.Sprint(*memCacheMB)}
 					if *proxy != "" {
 						args = append(args, "-proxy", *proxy)
 					} else {
@@ -885,4 +890,14 @@ func runEndpoints(args []string) error {
 			counts[endpoints.Static], counts[endpoints.Both], counts[endpoints.ObservedOnly], filepath.Join(dir, endpoints.File))
 	}
 	return nil
+}
+
+func setFlagProvided(fs *flag.FlagSet, name string) bool {
+	found := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			found = true
+		}
+	})
+	return found
 }

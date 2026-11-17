@@ -42,7 +42,7 @@ var cdxFields = []string{"timestamp", "original", "mimetype", "statuscode", "dig
 
 func (w *Wayback) getCDX(ctx context.Context, u string) ([]byte, error) {
 	for try := 1; ; try++ {
-		a, err := w.Client.Get(ctx, w.Index, u, 512<<20)
+		a, err := w.Client.GetIndex(ctx, w.Index, u, 512<<20)
 		if err != nil {
 			return nil, err
 		}

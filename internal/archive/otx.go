@@ -23,7 +23,7 @@ type OTX struct {
 // Page lists one page (from 1); more says another follows.
 func (o *OTX) Page(ctx context.Context, host string, page int) (caps []Capture, more bool, err error) {
 	u := fmt.Sprintf("%s/api/v1/indicators/%s/%s/url_list?limit=500&page=%d", o.Base, otxSection(host), url.PathEscape(host), page)
-	a, err := o.Client.Get(ctx, o.Budget, u, 64<<20)
+	a, err := o.Client.GetIndex(ctx, o.Budget, u, 64<<20)
 	if err != nil {
 		return nil, false, err
 	}
