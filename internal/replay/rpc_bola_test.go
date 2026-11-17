@@ -411,3 +411,145 @@ func TestTRPCBatchExportAndBola(t *testing.T) {
 		t.Fatalf("did not find alice->bob trial on %q in %+v", wantInv, rep.Items)
 	}
 }
+
+func TestConnectJSONBolaAndBinaryProtoFramingSafety(t *testing.T) {
+	// 1. Binary 5-byte framed gRPC-Web / Connect+Proto payloads must NEVER have their body parsed or patched.
+	for _, ct := range []string{"application/grpc-web+proto", "application/connect+proto", "application/proto"} {
+		frame := "\x00\x00\x00\x00\x10{\"id\":\"123456\"}"
+		raw := []byte(fmt.Sprintf("POST /acme.v1.UserService/GetUser HTTP/1.1\r\nHost: api.test\r\nContent-Type: %s\r\nConnect-Protocol-Version: 1\r\nContent-Length: %d\r\n\r\n%s", ct, len(frame), frame))
+		for _, p := range export.Params(raw) {
+			if p.In != "path" {
+				t.Fatalf("Content-Type %s yielded unexpected non-path Param %+v", ct, p)
+			}
+		}
+		if _, err := Patch(raw, "body:$.id", "999999"); err == nil {
+			t.Fatalf("expected Patch on binary %s body to fail safely", ct)
+		}
+	}
+
+	// 2. Connect protocol with application/connect+json runs full BOLA verification cleanly.
+	const (
+		docAlice = "6a11ce00-1111-4111-8111-000000000001"
+		docBob   = "6b0b0000-2222-4222-8222-000000000002"
+	)
+	docs := map[string][2]string{
+		docAlice: {"alice@acme.test", "CONNECT-ALICE-NOTE-90123"},
+		docBob:   {"bob@acme.test", "CONNECT-BOB-NOTE-34567"},
+	}
+	sessions := map[string]string{
+		"tok-connect-alice-01": "alice",
+		"tok-connect-bob-0002": "bob",
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := r.Cookie("sess")
+		user := ""
+		if err == nil {
+			user = sessions[c.Value]
+		}
+		if user == "" {
+			w.WriteHeader(401)
+			return
+		}
+		if r.Method != "GET" || r.URL.Path != "/acme.v1.DocService/GetDoc" {
+			w.WriteHeader(404)
+			return
+		}
+		var msg struct {
+			ID string `json:"id"`
+		}
+		_ = json.Unmarshal([]byte(r.URL.Query().Get("message")), &msg)
+		w.Header().Set("Content-Type", "application/connect+json")
+		w.Header().Set("Cache-Control", "no-store")
+		d, ok := docs[msg.ID]
+		if !ok {
+			w.WriteHeader(404)
+			json.NewEncoder(w).Encode(map[string]string{"code": "not_found", "message": "no such doc"})
+			return
+		}
+		// Deliberate BOLA flaw: returns peer's document without checking ownership!
+		json.NewEncoder(w).Encode(map[string]any{
+			"id":          msg.ID,
+			"ownerEmail":  d[0],
+			"privateNote": d[1],
+		})
+	}))
+	defer srv.Close()
+
+	root := t.TempDir()
+	host := strings.TrimPrefix(srv.URL, "http://")
+	recordConnect := func(role, tok, docID string) {
+		dir := filepath.Join(root, role)
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		t0 := time.Now().UTC().Add(-5 * time.Minute)
+		path := fmt.Sprintf("/acme.v1.DocService/GetDoc?connect=v1&encoding=json&message=%%7B%%22id%%22%%3A%%22%s%%22%%7D", docID)
+		req, _ := http.NewRequest("GET", srv.URL+path, nil)
+		req.AddCookie(&http.Cookie{Name: "sess", Value: tok})
+		req.Header.Set("Connect-Protocol-Version", "1")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rb, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		e := traffic.Entry{
+			Run: "R1", ID: 1, Time: t0, Target: "page", ResourceType: "Fetch", Method: "GET",
+			URL: srv.URL + path,
+			Headers: map[string]string{
+				"host":                     host,
+				"accept":                   "application/connect+json",
+				"connect-protocol-version": "1",
+				"cookie":                   "sess=" + tok,
+			},
+			Outcome: "ok",
+			Response: &traffic.Response{
+				Status: int64(resp.StatusCode), MIME: "application/connect+json", Source: "network",
+				Headers: map[string]string{"content-type": "application/connect+json"},
+				Body:    traffic.Body{Body: string(rb)},
+			},
+		}
+		b, _ := json.Marshal(e)
+		os.WriteFile(filepath.Join(dir, "requests.jsonl"), append(b, '\n'), 0o600)
+		fl := flow.Flow{Run: "R1", Action: "a1", Kind: "load", Label: "doc", Started: t0, Ended: t0.Add(time.Second), Requests: []flow.Ref{{ID: 1}}}
+		fb, _ := json.Marshal(fl)
+		os.WriteFile(filepath.Join(dir, "flows.jsonl"), append(fb, '\n'), 0o600)
+	}
+	recordConnect("alice", "tok-connect-alice-01", docAlice)
+	recordConnect("bob", "tok-connect-bob-0002", docBob)
+
+	snd, err := NewSender(SenderOptions{AllowPrivate: true, Max: 500, Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer snd.Close()
+	rep, err := Bola(context.Background(), BolaOptions{
+		Root:     root,
+		Peers:    [2]string{"alice", "bob"},
+		Relation: RelCrossOrg,
+		Sender:   snd,
+		InScope:  func(string) bool { return true },
+		Out:      filepath.Join(root, "authz"),
+		Reveal:   true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantKey := "GET " + host + "/acme.v1.DocService/GetDoc"
+	found := false
+	for _, it := range rep.Items {
+		if it.Key == wantKey && it.Direction == "alice->bob" {
+			if len(it.KeptHeaders) != 0 {
+				t.Fatalf("KeptHeaders = %v, want empty", it.KeptHeaders)
+			}
+			if it.Verdict != Bypass {
+				t.Fatalf("ConnectRPC Bola verdict = %s (%s), want bypass", it.Verdict, it.Reason)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("missing ConnectRPC alice->bob trial in %+v", rep.Items)
+	}
+}

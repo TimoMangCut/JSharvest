@@ -148,3 +148,50 @@ func TestExtractTRPCStaticAndRejectTanStackQuery(t *testing.T) {
 		}
 	}
 }
+
+func TestExtractConnectRPCAndGRPCWeb(t *testing.T) {
+	src := []byte(`
+		export const UserService = {
+			typeName: "acme.v1.UserService",
+			methods: {
+				getUser: {
+					name: "GetUser",
+					I: GetUserRequest,
+					O: GetUserResponse,
+					kind: MethodKind.Unary,
+					idempotency: MethodIdempotency.NoSideEffects,
+				},
+				updateUser: {
+					name: "UpdateUser",
+					I: UpdateUserRequest,
+					O: UpdateUserResponse,
+					kind: 0,
+				},
+			},
+		};
+		const methodDescGetInvoice = new proto.grpc.web.MethodDescriptor(
+			"/acme.v1.BillingService/GetInvoice",
+			proto.grpc.web.MethodType.UNARY,
+			GetInvoiceReq,
+			GetInvoiceResp
+		);
+	`)
+	res := jsapi.Extract(src)
+	if res.Error != "" {
+		t.Fatalf("Extract error: %s", res.Error)
+	}
+	got := map[string]bool{}
+	for _, ep := range res.Endpoints {
+		got[ep.Method+" "+ep.URL] = true
+	}
+	for _, want := range []string{
+		"POST /acme.v1.UserService/GetUser",
+		"GET /acme.v1.UserService/GetUser",
+		"POST /acme.v1.UserService/UpdateUser",
+		"POST /acme.v1.BillingService/GetInvoice",
+	} {
+		if !got[want] {
+			t.Fatalf("missing ConnectRPC/gRPC-Web endpoint %q in %v", want, got)
+		}
+	}
+}

@@ -10,8 +10,11 @@ import (
 )
 
 var (
-	nextActionIDRe = regexp.MustCompile(`^[0-9a-fA-F]{32,64}$`)
-	trpcIdentRe    = regexp.MustCompile(`^[A-Za-z_$][A-Za-z0-9_$]*$`)
+	nextActionIDRe   = regexp.MustCompile(`^[0-9a-fA-F]{32,64}$`)
+	trpcIdentRe      = regexp.MustCompile(`^[A-Za-z_$][A-Za-z0-9_$]*$`)
+	connectServiceRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\.[A-Z][A-Za-z0-9_]*$`)
+	connectMethodRe  = regexp.MustCompile(`^[A-Z][A-Za-z0-9_]*$`)
+	grpcWebPathRe    = regexp.MustCompile(`^/[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\.[A-Z][A-Za-z0-9_]*/[A-Z][A-Za-z0-9_]*$`)
 )
 
 func hasNextActionHint(src []byte) bool {
@@ -29,10 +32,16 @@ func hasTRPCHint(src []byte) bool {
 		bytes.Contains(src, []byte("httpBatch"))
 }
 
+func hasConnectGRPCHint(src []byte) bool {
+	return bytes.Contains(src, []byte("typeName")) ||
+		bytes.Contains(src, []byte("MethodDescriptor")) ||
+		bytes.Contains(src, []byte("MethodInfo"))
+}
+
 // hasModernRPCHint guards the AST walk so bundles without Next.js Server
 // Actions, tRPC, ConnectRPC, or gRPC-Web incur zero AST traversal.
 func hasModernRPCHint(src []byte) bool {
-	return hasNextActionHint(src) || hasTRPCHint(src)
+	return hasNextActionHint(src) || hasTRPCHint(src) || hasConnectGRPCHint(src)
 }
 
 func extractModernRPC(ast *js.AST, x *extractor) {
@@ -41,6 +50,7 @@ func extractModernRPC(ast *js.AST, x *extractor) {
 	}
 	wantNext := hasNextActionHint(x.src)
 	wantTRPC := hasTRPCHint(x.src)
+	wantConnect := hasConnectGRPCHint(x.src)
 
 	var trpcVars map[*js.Var]bool
 	trpcBase := "/api/trpc"
@@ -50,15 +60,25 @@ func extractModernRPC(ast *js.AST, x *extractor) {
 	}
 
 	js.Walk(walker(func(n js.INode) {
-		ce, ok := n.(*js.CallExpr)
-		if !ok {
-			return
-		}
-		if wantNext {
-			extractNextServerActionCall(ce, x)
-		}
-		if wantTRPC {
-			extractTRPCCall(ce, x, trpcVars, trpcBase, hasExplicitTRPC)
+		switch t := n.(type) {
+		case *js.CallExpr:
+			if wantNext {
+				extractNextServerActionCall(t, x)
+			}
+			if wantTRPC {
+				extractTRPCCall(t, x, trpcVars, trpcBase, hasExplicitTRPC)
+			}
+			if wantConnect {
+				extractGRPCWebMethodCall(t.X, t.Args.List, t, x)
+			}
+		case *js.NewExpr:
+			if wantConnect && t.Args != nil {
+				extractGRPCWebMethodCall(t.X, t.Args.List, t, x)
+			}
+		case *js.ObjectExpr:
+			if wantConnect {
+				extractConnectServiceObject(t, x)
+			}
 		}
 	}), ast)
 }
@@ -308,4 +328,143 @@ func (x *extractor) addDirect(ep Endpoint, at js.INode) string {
 	x.eps[key] = &ep
 	x.order = append(x.order, key)
 	return key
+}
+
+// extractConnectServiceObject extracts @connectrpc/connect & @bufbuild/protobuf
+// service descriptors: `{ typeName: "acme.v1.UserService", methods: { ... } }`.
+func extractConnectServiceObject(obj *js.ObjectExpr, x *extractor) {
+	var svcName string
+	var svcLit *js.LiteralExpr
+	var methodsVal js.IExpr
+	for _, p := range obj.List {
+		if p.Name == nil || p.Value == nil {
+			continue
+		}
+		switch propName(p.Name) {
+		case "typeName":
+			if lit, ok := unwrapEnumGroup(p.Value).(*js.LiteralExpr); ok && lit.TokenType == js.StringToken {
+				s := strings.TrimSpace(unquote(lit.Data))
+				if connectServiceRe.MatchString(s) {
+					svcName, svcLit = s, lit
+				}
+			}
+		case "methods":
+			methodsVal = unwrapEnumGroup(p.Value)
+		}
+	}
+	if svcName == "" || methodsVal == nil {
+		return
+	}
+
+	var methodObjs []*js.ObjectExpr
+	switch m := methodsVal.(type) {
+	case *js.ObjectExpr:
+		for _, mp := range m.List {
+			if mp.Value != nil {
+				if mo, ok := unwrapEnumGroup(mp.Value).(*js.ObjectExpr); ok {
+					methodObjs = append(methodObjs, mo)
+				}
+			}
+		}
+	case *js.ArrayExpr:
+		for _, el := range m.List {
+			if el.Value != nil {
+				if mo, ok := unwrapEnumGroup(el.Value).(*js.ObjectExpr); ok {
+					methodObjs = append(methodObjs, mo)
+				}
+			}
+		}
+	}
+	if len(methodObjs) == 0 {
+		return
+	}
+	if svcLit != nil {
+		x.used[svcLit] = true
+	}
+	for _, mo := range methodObjs {
+		var mName string
+		var mLit *js.LiteralExpr
+		noSideEffects := false
+		for _, p := range mo.List {
+			if p.Name == nil || p.Value == nil {
+				continue
+			}
+			switch propName(p.Name) {
+			case "name":
+				if lit, ok := unwrapEnumGroup(p.Value).(*js.LiteralExpr); ok && lit.TokenType == js.StringToken {
+					s := strings.TrimSpace(unquote(lit.Data))
+					if connectMethodRe.MatchString(s) {
+						mName, mLit = s, lit
+					}
+				}
+			case "idempotency":
+				noSideEffects = isConnectNoSideEffects(p.Value)
+			}
+		}
+		if mName == "" {
+			continue
+		}
+		if mLit != nil {
+			x.used[mLit] = true
+		}
+		rpcPath := "/" + svcName + "/" + mName
+		x.addDirect(Endpoint{
+			Method: "POST",
+			URL:    rpcPath,
+			Kind:   "rpc",
+		}, mo)
+		if noSideEffects {
+			x.addDirect(Endpoint{
+				Method: "GET",
+				URL:    rpcPath,
+				Kind:   "rpc",
+				Query:  []string{"connect", "encoding", "message"},
+			}, mo)
+		}
+	}
+}
+
+func isConnectNoSideEffects(e js.IExpr) bool {
+	switch v := unwrapEnumGroup(e).(type) {
+	case *js.LiteralExpr:
+		switch v.TokenType {
+		case js.DecimalToken, js.IntegerToken:
+			return string(v.Data) == "1"
+		case js.StringToken:
+			s := strings.ToLower(unquote(v.Data))
+			return s == "nosideeffects" || s == "no_side_effects"
+		}
+	case *js.DotExpr:
+		p := strings.ToLower(propName(v.Y))
+		return p == "nosideeffects" || p == "no_side_effects"
+	}
+	return false
+}
+
+// extractGRPCWebMethodCall extracts `new MethodDescriptor("/pkg.v1.Svc/Method", ...)`.
+func extractGRPCWebMethodCall(callee js.IExpr, args []js.Arg, at js.INode, x *extractor) {
+	_, name := splitCallee(unwrapCalleeExpr(callee))
+	if name != "MethodDescriptor" && name != "MethodInfo" {
+		return
+	}
+	for i := 0; i < min(len(args), 2); i++ {
+		if args[i].Rest || args[i].Value == nil {
+			continue
+		}
+		lit, ok := unwrapEnumGroup(args[i].Value).(*js.LiteralExpr)
+		if !ok || lit.TokenType != js.StringToken {
+			continue
+		}
+		p := strings.TrimSpace(unquote(lit.Data))
+		if !grpcWebPathRe.MatchString(p) {
+			continue
+		}
+		x.used[lit] = true
+		x.addDirect(Endpoint{
+			Method: "POST",
+			URL:    p,
+			Kind:   "rpc",
+		}, at)
+		return
+	}
 }

@@ -126,6 +126,9 @@ func Params(raw []byte) []Param {
 	mt, mp, _ := mime.ParseMediaType(contentType)
 	trim := bytes.TrimSpace(body)
 	switch {
+	case IsBinaryProtoMediaType(mt):
+		// 5-byte length-prefixed binary protobuf frame (gRPC-Web / Connect+Proto):
+		// never scan binary frames as JSON or form parameters.
 	case strings.Contains(mt, "json") || bytes.HasPrefix(trim, []byte("{")) || bytes.HasPrefix(trim, []byte("[")):
 		s := &jscan{b: body, base: bStart, add: add}
 		s.ws()
@@ -139,6 +142,22 @@ func Params(raw []byte) []Param {
 }
 
 var formRe = regexp.MustCompile(`^[\w.\[\]%-]+=[^\s]*$`)
+
+// IsBinaryProtoMediaType reports whether a Content-Type carries binary
+// protobuf framing (Connect+Proto, gRPC-Web+Proto, or raw Protobuf).
+func IsBinaryProtoMediaType(contentType string) bool {
+	mt := strings.ToLower(strings.TrimSpace(contentType))
+	if semi := strings.IndexByte(mt, ';'); semi >= 0 {
+		mt = strings.TrimSpace(mt[:semi])
+	}
+	switch mt {
+	case "application/grpc", "application/grpc+proto", "application/grpc-web",
+		"application/grpc-web+proto", "application/connect+proto",
+		"application/proto", "application/x-protobuf", "application/protobuf":
+		return true
+	}
+	return false
+}
 
 // pairs reads a=1&b=2 that starts at off.
 func pairs(s string, off int, in string, add func(Param)) {

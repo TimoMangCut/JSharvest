@@ -114,3 +114,26 @@ func TestTRPCTemplatesPreserveProcedureNames(t *testing.T) {
 		t.Fatalf("Templates =\n  %v\nwant:\n  %v", got, want)
 	}
 }
+
+func TestConnectRPCTemplatesPreserveServiceAndMethod(t *testing.T) {
+	calls := []Call{
+		{Method: "POST", URL: "https://api.test/acme.v1.UserService/GetUser", Frame: "connect.js:8"},
+		{Method: "POST", URL: "https://api.test/acme.v1.UserService/ListUsers", Frame: "connect.js:8"},
+		{Method: "POST", URL: "https://api.test/acme.v1.UserService/GetSettings", Frame: "connect.js:8"},
+		{Method: "POST", URL: "https://api.test/acme.v1.OrderService/GetRecord", Frame: "connect.js:9"},
+		{Method: "POST", URL: "https://api.test/acme.v1.BillingService/GetRecord", Frame: "connect.js:9"},
+		{Method: "POST", URL: "https://api.test/acme.v1.AuditService/GetRecord", Frame: "connect.js:9"},
+	}
+	got := Templates(calls)
+	want := []string{
+		"/acme.v1.UserService/GetUser",
+		"/acme.v1.UserService/ListUsers",
+		"/acme.v1.UserService/GetSettings",
+		"/acme.v1.OrderService/GetRecord",
+		"/acme.v1.BillingService/GetRecord",
+		"/acme.v1.AuditService/GetRecord",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("ConnectRPC Templates =\n  %v\nwant:\n  %v", got, want)
+	}
+}

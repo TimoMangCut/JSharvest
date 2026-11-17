@@ -13,6 +13,8 @@ var (
 	nextActionFormRe = regexp.MustCompile(`(?:^|[&\r\n;"'])\$ACTION_ID_([0-9a-fA-F]{32,64})\b`)
 	nextActionEncRe  = regexp.MustCompile(`(?i)(?:^|&)%24ACTION_ID_([0-9a-fA-F]{32,64})(?:=|&|$)`)
 	trpcProcRe       = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$`)
+	grpcServiceRe    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\.[A-Z][A-Za-z0-9_]*$`)
+	grpcMethodRe     = regexp.MustCompile(`^[A-Z][A-Za-z0-9_]*$`)
 )
 
 // NextActionID returns the lowercase hex discriminator of a Next.js App Router
@@ -186,9 +188,37 @@ func trpcInputSplitter(raw string) func(int) string {
 }
 
 // isProtectedRPCSegment reports whether varying segment pos represents RPC
-// procedure names under a /trpc/ router rather than an entity parameter.
+// procedure/service/method names (tRPC /trpc/<proc> or ConnectRPC/gRPC-Web
+// /<pkg.Service>/<Method>) rather than an entity parameter.
 func isProtectedRPCSegment(shapes [][]string, idx []int, pos int) bool {
 	first := shapes[idx[0]]
+	// ConnectRPC / gRPC-Web method segment: /acme.v1.UserService/GetUser
+	if pos > 0 && grpcServiceRe.MatchString(first[pos-1]) {
+		allMethods := true
+		for _, i := range idx {
+			if !grpcMethodRe.MatchString(shapes[i][pos]) {
+				allMethods = false
+				break
+			}
+		}
+		if allMethods {
+			return true
+		}
+	}
+	// ConnectRPC / gRPC-Web service segment: /acme.v1.OrderService/GetRecord
+	if pos+1 < len(first) && grpcMethodRe.MatchString(first[pos+1]) {
+		allServices := true
+		for _, i := range idx {
+			if !grpcServiceRe.MatchString(shapes[i][pos]) {
+				allServices = false
+				break
+			}
+		}
+		if allServices {
+			return true
+		}
+	}
+
 	hasTRPC := false
 	for k := 0; k < pos; k++ {
 		if strings.EqualFold(first[k], "trpc") {

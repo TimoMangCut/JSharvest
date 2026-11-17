@@ -23,6 +23,9 @@ import (
 // and writes Content-Length again. It fails when the request has no such
 // place, or the value cannot go there.
 func Patch(raw []byte, at, value string) ([]byte, error) {
+	if strings.HasPrefix(at, "body:") && export.IsBinaryProtoMediaType(rawContentType(raw)) {
+		return nil, fmt.Errorf("cannot patch binary protobuf body at %s", at)
+	}
 	for _, p := range export.Params(raw) {
 		if p.At() != at {
 			continue
@@ -113,4 +116,17 @@ func SetLength(raw []byte) []byte {
 	out := bytes.Join(lines, []byte("\r\n"))
 	out = append(out, "\r\n\r\n"...)
 	return append(out, body...)
+}
+
+func rawContentType(raw []byte) string {
+	head := bytes.Index(raw, []byte("\r\n\r\n"))
+	if head < 0 {
+		return ""
+	}
+	for _, l := range bytes.Split(raw[:head], []byte("\r\n"))[1:] {
+		if k, v, ok := bytes.Cut(l, []byte(":")); ok && strings.EqualFold(strings.TrimSpace(string(k)), "content-type") {
+			return strings.TrimSpace(string(v))
+		}
+	}
+	return ""
 }

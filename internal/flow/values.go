@@ -27,6 +27,8 @@ var plainHeaders = map[string]bool{
 	"strict-transport-security": true, "content-security-policy": true, "x-frame-options": true, "referrer-policy": true,
 	"permissions-policy": true, "report-to": true, "nel": true, "alt-svc": true, "via": true, "age": true,
 	"next-action": true, "next-router-state-tree": true, "next-router-prefetch": true, "next-url": true, "rsc": true,
+	"connect-protocol-version": true, "connect-timeout-ms": true, "connect-content-encoding": true, "connect-accept-encoding": true,
+	"x-grpc-web": true, "grpc-timeout": true, "x-user-agent": true,
 	strings.ToLower(traffic.GuardHeader): true,
 }
 
