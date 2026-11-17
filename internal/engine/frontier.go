@@ -536,7 +536,7 @@ func (c *crawl) noteAPIOrigins(ss []endpoints.Script, mine map[string]bool) {
 			c.specCtx.AddScript(s.Result, c.seedOrigin, scriptURL)
 		}
 		for _, o := range frontier.APIOrigins(s.Result, c.inScope) {
-			if !c.apiSeen[o] && len(c.apiSeen) <= frontier.MaxAPIOrigins {
+			if !c.apiSeen[o] && (frontier.MaxAPIOrigins <= 0 || len(c.apiSeen) <= frontier.MaxAPIOrigins) {
 				c.apiSeen[o] = true
 				c.apiPending = append(c.apiPending, o)
 			}

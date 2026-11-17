@@ -1761,11 +1761,17 @@ func (x *extractor) calleeFn(c *js.CallExpr) (key any, v *js.Var, params js.Para
 	}
 	callee := c.X
 	for {
-		g, isGroup := callee.(*js.GroupExpr)
-		if !isGroup {
-			break
+		switch g := callee.(type) {
+		case *js.GroupExpr:
+			callee = g.X
+			continue
+		case *js.CommaExpr:
+			if len(g.List) > 0 {
+				callee = g.List[len(g.List)-1]
+				continue
+			}
 		}
-		callee = g.X
+		break
 	}
 	d, isDot := callee.(*js.DotExpr)
 	if !isDot {
@@ -1774,6 +1780,9 @@ func (x *extractor) calleeFn(c *js.CallExpr) (key any, v *js.Var, params js.Para
 	fn := x.methodOf(d, nargsOf(c))
 	if fn == nil {
 		fn = x.givenFn(d)
+	}
+	if fn == nil {
+		fn, _ = x.wpMember(d, 0)
 	}
 	if fn == nil {
 		return nil, nil, js.Params{}, nil, false

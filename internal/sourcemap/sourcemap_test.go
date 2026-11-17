@@ -70,3 +70,45 @@ func TestClean(t *testing.T) {
 		t.Errorf("with a root: %q", got)
 	}
 }
+
+func TestFilesForStandaloneVendorLibraries(t *testing.T) {
+	ck, err := Parse([]byte(`{"version":3,"sources":["../../packages/ckeditor5-core/src/plugin.js","../../packages/ckeditor5-utils/src/mix.js"],"sourcesContent":["export class Plugin {}","export function mix() {}"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range ck.FilesFor("https://portal.example.com/themes/custom/js/ckeditor5.js") {
+		if !f.Vendor {
+			t.Errorf("ckeditor5 source should be marked vendor: %+v", f)
+		}
+	}
+
+	bs, err := Parse([]byte(`{"version":3,"sources":["js/src/carousel.js","js/src/modal.js"],"sourcesContent":["class Carousel {}","class Modal {}"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range bs.FilesFor("https://portal.example.com/dist/js/bootstrap.bundle.min.js") {
+		if !f.Vendor {
+			t.Errorf("bootstrap bundle source should be marked vendor: %+v", f)
+		}
+	}
+
+	lw, err := Parse([]byte(`{"version":3,"sources":["js/features/supportRedirects.js"],"sourcesContent":["export function redirect() {}"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range lw.FilesFor("https://portal.example.com/livewire/livewire.min.js") {
+		if !f.Vendor {
+			t.Errorf("livewire source should be marked vendor: %+v", f)
+		}
+	}
+
+	// Hybrid app bundle (app.js.map) must keep app sources non-vendor while marking node_modules vendor.
+	app, err := Parse([]byte(`{"version":3,"sources":["resources/js/app.js","node_modules/axios/index.js"],"sourcesContent":["fetch('/api/orders')","module.exports={}"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	appFiles := app.FilesFor("https://portal.example.com/build/assets/app.js")
+	if len(appFiles) != 2 || appFiles[0].Vendor || !appFiles[1].Vendor {
+		t.Errorf("hybrid app.js.map vendor classification wrong: %+v", appFiles)
+	}
+}

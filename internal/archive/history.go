@@ -114,6 +114,7 @@ type HistLine struct {
 	Class  string `json:"class"`
 	Method string `json:"method,omitempty"`
 	Host   string `json:"host,omitempty"`
+	Origin string `json:"origin,omitempty"`
 	Path   string `json:"path"`
 	Base   string `json:"base,omitempty"`
 	// Bases are the clients' bases the old code names (axios's baseURL):
@@ -182,12 +183,15 @@ func classifyCtx(ctx context.Context, archived []endpoints.Endpoint, cur *curren
 				class = "in_current_code"
 			}
 		}
-		l := HistLine{Class: class, Method: a.Method, Host: a.Host, Path: a.Path, Base: a.Base, Bases: a.Bases, Kind: a.Kind, Query: a.Query, Body: a.Body,
+		l := HistLine{Class: class, Method: a.Method, Host: a.Host, Origin: a.Origin, Path: a.Path, Base: a.Base, Bases: a.Bases, Kind: a.Kind, Query: a.Query, Body: a.Body,
 			Headers: a.Headers, Params: a.Params, Confidence: a.Confidence}
+		seenScripts := map[string]bool{}
 		for _, s := range a.Static {
-			if len(l.Scripts) >= 5 {
-				break
+			sk := s.SHA256 + "\x00" + s.Script
+			if seenScripts[sk] {
+				continue
 			}
+			seenScripts[sk] = true
 			hs := HistScript{SHA256: s.SHA256, URL: s.Script}
 			if e, ok := script(s.SHA256); ok {
 				hs.Alive = e.Alive

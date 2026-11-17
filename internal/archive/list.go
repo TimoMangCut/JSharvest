@@ -131,17 +131,17 @@ func (r *runner) listOTX(ctx context.Context) error {
 	})
 }
 
-// MaxExtraHosts is how many of the target's other hosts OTX and urlscan
-// are asked of; extraPages, how many pages of each.
+// MaxExtraHosts bounds how many of the target's other hosts OTX and urlscan
+// are asked of (0: unlimited); extraPages, how many pages of each.
 const (
-	MaxExtraHosts = 10
+	MaxExtraHosts = 0
 	extraPages    = 5
 )
 
 // extra lists a source's captures of each other host not listed yet.
 func (r *runner) extra(src string, list func(host string) error) error {
 	for i, h := range r.o.ExtraHosts {
-		if i >= MaxExtraHosts {
+		if MaxExtraHosts > 0 && i >= MaxExtraHosts {
 			break
 		}
 		key := src + " " + h

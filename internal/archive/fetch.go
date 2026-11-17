@@ -203,7 +203,7 @@ func (r *runner) fetchAsset(ctx context.Context, g *group, meta *store.ArchiveSe
 		sum := sha256.Sum256(body)
 		os.WriteFile(filepath.Join(r.o.Dir, "maps", hex.EncodeToString(sum[:])+".map"), body, 0o600)
 	}
-	for _, f := range sm.Files() {
+	for _, f := range sm.FilesFor(c.URL) {
 		if f.Vendor {
 			continue // a dependency's: noise for the target's endpoints
 		}
@@ -336,7 +336,7 @@ func (r *runner) fetchOne(ctx context.Context, g *group, meta *store.ArchiveSeen
 		s.HeldAfter++ // today's script, archived under a URL listed without a digest
 		return kept, nil
 	}
-	if htmlLike(body) {
+	if notScriptBody(a.Header.Get("Content-Type"), body) {
 		s.NotJS++ // an archived error page
 		return kept, nil
 	}
@@ -462,9 +462,29 @@ func upgrade(u *url.URL, ans replay.Answer, err error) *url.URL {
 }
 
 // htmlLike reports whether a body is a page, not a script: an SPA's
-// fallback, a soft 404, an archived error.
+// fallback, a soft 404 (including XHTML with <?xml preamble), an archived error.
 func htmlLike(b []byte) bool {
-	t := strings.ToLower(strings.TrimSpace(string(b[:min(len(b), 512)])))
-	return strings.HasPrefix(t, "<!doctype html") || strings.HasPrefix(t, "<html") || strings.HasPrefix(t, "<head") ||
-		(strings.HasPrefix(t, "<") && strings.Contains(t, "<body"))
+	b = bytes.TrimPrefix(b, []byte("\xef\xbb\xbf"))
+	t := strings.ToLower(strings.TrimSpace(string(b[:min(len(b), 4096)])))
+	if strings.HasPrefix(t, "<!doctype ") || strings.HasPrefix(t, "<html") || strings.HasPrefix(t, "<head") ||
+		strings.HasPrefix(t, "<body") || strings.HasPrefix(t, "<?xml") || strings.HasPrefix(t, "<svg") ||
+		strings.HasPrefix(t, "<rss") || strings.HasPrefix(t, "<feed") {
+		return true
+	}
+	return strings.HasPrefix(t, "<") && (strings.Contains(t, "<html") || strings.Contains(t, "<head") || strings.Contains(t, "<body") || strings.Contains(t, "<!doctype html"))
+}
+
+func notScriptBody(contentType string, b []byte) bool {
+	if htmlLike(b) {
+		return true
+	}
+	ct := strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0]))
+	switch {
+	case ct == "text/html" || ct == "application/xhtml+xml" || ct == "application/xml" || ct == "text/xml" || ct == "application/pdf":
+		trimmed := bytes.TrimSpace(bytes.TrimPrefix(b, []byte("\xef\xbb\xbf")))
+		return len(trimmed) > 0 && (trimmed[0] == '<' || bytes.HasPrefix(trimmed, []byte("%PDF-")))
+	case strings.HasPrefix(ct, "image/") || strings.HasPrefix(ct, "audio/") || strings.HasPrefix(ct, "video/") || strings.HasPrefix(ct, "font/"):
+		return true
+	}
+	return false
 }

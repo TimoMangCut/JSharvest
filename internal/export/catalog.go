@@ -36,13 +36,43 @@ func newCatalog(eps []endpoints.Endpoint, inScope func(string) bool) *catalog {
 		case e.Base != "":
 			paths = []string{joinBasePath(e.Base, e.Path)}
 		case len(e.Bases) > 0:
+			rawSub := strings.TrimPrefix(e.Path, "{}")
+			if !strings.HasPrefix(rawSub, "/") {
+				rawSub = "/" + rawSub
+			}
+			// Check whether e.Path already begins with one of the relative microservice
+			// bases in e.Bases (e.g. "/tybs-notification-api/...") so we do not cross-glue
+			// sibling microservice bases ("/tybs-integration-ai-api/tybs-notification-api/...").
+			hasMatchingRelBase := false
+			for _, b := range e.Bases {
+				if strings.HasPrefix(b, "/") && !strings.HasPrefix(b, "//") {
+					bp := strings.TrimRight(b, "/")
+					if bp != "" && (rawSub == bp || strings.HasPrefix(rawSub, bp+"/")) {
+						hasMatchingRelBase = true
+						break
+					}
+				}
+			}
 			for _, b := range e.Bases {
 				if u, err := url.Parse(b); err == nil && u.Host != "" && e.Host != "" && !strings.EqualFold(hostname(e.Host), u.Hostname()) {
 					continue
 				}
-				paths = append(paths, joinBasePath(b, e.Path))
+				if hasMatchingRelBase && strings.HasPrefix(b, "/") && !strings.HasPrefix(b, "//") {
+					bp := strings.TrimRight(b, "/")
+					if bp != "" && rawSub != bp && !strings.HasPrefix(rawSub, bp+"/") {
+						continue
+					}
+				}
+				jp := joinBasePath(b, e.Path)
+				if !slices.Contains(paths, jp) {
+					paths = append(paths, jp)
+				}
 			}
-			paths = append(paths, strings.TrimPrefix(e.Path, "{}"))
+			if !strings.HasPrefix(e.Path, "{}") || len(paths) == 0 {
+				if !slices.Contains(paths, rawSub) {
+					paths = append(paths, rawSub)
+				}
+			}
 		default:
 			paths = []string{strings.TrimPrefix(e.Path, "{}")}
 		}

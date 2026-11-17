@@ -1130,3 +1130,389 @@ func (x *extractor) factoryOf(callee js.IExpr) *Factory {
 	x.factoryList = append(x.factoryList, f)
 	return f
 }
+
+// --- intra-bundle Webpack / Rspack / CJS module exports ---
+
+type wpFactoryEntry struct {
+	modID                  string
+	modVar, expVar, reqVar *js.Var
+	body                   *js.BlockStmt
+}
+
+func wpFactoryParts(e js.IExpr) (modVar, expVar, reqVar *js.Var, body *js.BlockStmt, ok bool) {
+	e = ungroup(e)
+	var params js.Params
+	switch fn := e.(type) {
+	case *js.ArrowFunc:
+		params, body = fn.Params, &fn.Body
+	case *js.FuncDecl:
+		params, body = fn.Params, &fn.Body
+	case *js.MethodDecl:
+		if fn.Get || fn.Set || fn.Static {
+			return nil, nil, nil, nil, false
+		}
+		params, body = fn.Params, &fn.Body
+	default:
+		return nil, nil, nil, nil, false
+	}
+	if body == nil || params.Rest != nil || len(params.List) == 0 || len(params.List) > 3 {
+		return nil, nil, nil, nil, false
+	}
+	paramAt := func(idx int) *js.Var {
+		if idx >= len(params.List) {
+			return nil
+		}
+		if v, isVar := params.List[idx].Binding.(*js.Var); isVar {
+			return root(v)
+		}
+		return nil
+	}
+	modVar, expVar, reqVar = paramAt(0), paramAt(1), paramAt(2)
+	if modVar == nil && expVar == nil && reqVar == nil {
+		return nil, nil, nil, nil, false
+	}
+	return modVar, expVar, reqVar, body, true
+}
+
+func isRootVar(e js.IExpr, target *js.Var) bool {
+	if target == nil || e == nil {
+		return false
+	}
+	v, ok := ungroup(e).(*js.Var)
+	return ok && root(v) == target
+}
+
+func wpGetterExpr(e js.IExpr) js.IExpr {
+	if e == nil {
+		return nil
+	}
+	if ret := singleReturnExpr(e); ret != nil {
+		return ret
+	}
+	if m, ok := e.(*js.MethodDecl); ok && m.Get && len(m.Params.List) == 0 {
+		if rets := returnsOf(&m.Body); len(rets) == 1 {
+			return unwrapEnumGroup(rets[0])
+		}
+	}
+	switch ungroup(e).(type) {
+	case *js.ArrowFunc, *js.FuncDecl, *js.MethodDecl:
+		return nil
+	}
+	return unwrapEnumGroup(e)
+}
+
+type wpBodyVisitor struct {
+	fn func(js.INode)
+}
+
+func (w wpBodyVisitor) Enter(n js.INode) js.IVisitor {
+	switch n.(type) {
+	case *js.FuncDecl, *js.ArrowFunc, *js.MethodDecl, *js.ClassDecl:
+		return nil
+	}
+	w.fn(n)
+	return w
+}
+
+func (wpBodyVisitor) Exit(js.INode) {}
+
+func hasWPFactoryMarker(modVar, expVar, reqVar *js.Var, body *js.BlockStmt) bool {
+	found := false
+	js.Walk(wpBodyVisitor{fn: func(n js.INode) {
+		if found {
+			return
+		}
+		switch s := n.(type) {
+		case *js.CallExpr:
+			d, isDot := s.X.(*js.DotExpr)
+			if !isDot {
+				return
+			}
+			as := args(&s.Args)
+			switch propName(d.Y) {
+			case "d":
+				if reqVar != nil && expVar != nil && isRootVar(d.X, reqVar) && len(as) >= 2 && isRootVar(as[0], expVar) {
+					found = true
+				}
+			case "r":
+				if reqVar != nil && expVar != nil && isRootVar(d.X, reqVar) && len(as) == 1 && isRootVar(as[0], expVar) {
+					found = true
+				}
+			case "defineProperty":
+				if expVar != nil && isGlobal(d.X, "Object") && len(as) >= 2 && isRootVar(as[0], expVar) {
+					if k, ok := literalString(as[1]); ok && k == "__esModule" {
+						found = true
+					}
+				}
+			}
+		case *js.BinaryExpr:
+			if s.Op != js.EqToken {
+				return
+			}
+			if d, isDot := ungroup(s.X).(*js.DotExpr); isDot {
+				if modVar != nil && isRootVar(d.X, modVar) && propName(d.Y) == "exports" {
+					found = true
+					return
+				}
+				if dd, isDD := d.X.(*js.DotExpr); isDD && modVar != nil && isRootVar(dd.X, modVar) && propName(dd.Y) == "exports" {
+					found = true
+					return
+				}
+			}
+		}
+	}}, body)
+	return found
+}
+
+func (x *extractor) setWPExport(modID, expName string, val js.IExpr) {
+	if modID == "" || expName == "" || val == nil {
+		return
+	}
+	m := x.wpModExports[modID]
+	if m == nil {
+		m = map[string]js.IExpr{}
+		x.wpModExports[modID] = m
+	}
+	m[expName] = val
+}
+
+func (x *extractor) scanWPFactory(e wpFactoryEntry) {
+	if e.reqVar != nil {
+		x.wpReqVars[e.reqVar] = true
+	}
+	js.Walk(wpBodyVisitor{fn: func(n js.INode) {
+		switch s := n.(type) {
+		case *js.CallExpr:
+			d, isDot := s.X.(*js.DotExpr)
+			if !isDot {
+				return
+			}
+			as := args(&s.Args)
+			switch propName(d.Y) {
+			case "d":
+				if e.reqVar == nil || e.expVar == nil || !isRootVar(d.X, e.reqVar) || len(as) < 2 || !isRootVar(as[0], e.expVar) {
+					return
+				}
+				if len(as) == 2 {
+					if obj, ok := ungroup(as[1]).(*js.ObjectExpr); ok {
+						for i := range obj.List {
+							p := &obj.List[i]
+							if p.Spread || p.Name == nil {
+								continue
+							}
+							if k := propKey(p); k != "" {
+								x.setWPExport(e.modID, k, wpGetterExpr(p.Value))
+							}
+						}
+					}
+				} else if len(as) >= 3 {
+					if k, ok := literalString(as[1]); ok && k != "" {
+						x.setWPExport(e.modID, k, wpGetterExpr(as[2]))
+					}
+				}
+			case "defineProperty":
+				if e.expVar == nil || !isGlobal(d.X, "Object") || len(as) < 3 || !isRootVar(as[0], e.expVar) {
+					return
+				}
+				k, ok := literalString(as[1])
+				if !ok || k == "" || k == "__esModule" {
+					return
+				}
+				if desc, ok := ungroup(as[2]).(*js.ObjectExpr); ok {
+					if g := objectValue(desc, "get"); g != nil {
+						x.setWPExport(e.modID, k, wpGetterExpr(g))
+					} else if val := objectValue(desc, "value"); val != nil {
+						x.setWPExport(e.modID, k, unwrapEnumGroup(val))
+					}
+				}
+			}
+		case *js.BinaryExpr:
+			if s.Op != js.EqToken {
+				return
+			}
+			switch lhs := ungroup(s.X).(type) {
+			case *js.DotExpr:
+				pname := propName(lhs.Y)
+				if pname == "" {
+					return
+				}
+				if e.modVar != nil && isRootVar(lhs.X, e.modVar) && pname == "exports" {
+					rhs := unwrapEnumGroup(s.Y)
+					x.wpModDefault[e.modID] = rhs
+					if obj, ok := rhs.(*js.ObjectExpr); ok {
+						for i := range obj.List {
+							p := &obj.List[i]
+							if !p.Spread && p.Name != nil {
+								if k := propKey(p); k != "" {
+									x.setWPExport(e.modID, k, p.Value)
+								}
+							}
+						}
+					}
+					return
+				}
+				if dd, isDD := lhs.X.(*js.DotExpr); isDD && e.modVar != nil && isRootVar(dd.X, e.modVar) && propName(dd.Y) == "exports" {
+					x.setWPExport(e.modID, pname, unwrapEnumGroup(s.Y))
+					return
+				}
+				if e.expVar != nil && isRootVar(lhs.X, e.expVar) && pname != "__esModule" {
+					x.setWPExport(e.modID, pname, unwrapEnumGroup(s.Y))
+				}
+			case *js.IndexExpr:
+				if e.expVar != nil && isRootVar(lhs.X, e.expVar) {
+					if k, ok := literalString(lhs.Y); ok && k != "" && k != "__esModule" {
+						x.setWPExport(e.modID, k, unwrapEnumGroup(s.Y))
+					}
+				}
+			}
+		}
+	}}, e.body)
+}
+
+func (x *extractor) indexWebpackModuleObject(obj *js.ObjectExpr) {
+	if obj == nil || len(obj.List) == 0 {
+		return
+	}
+	var entries []wpFactoryEntry
+	confirmed := false
+	for i := range obj.List {
+		p := &obj.List[i]
+		if p.Spread || p.Name == nil || p.Value == nil {
+			continue
+		}
+		modID := propKey(p)
+		if modID == "" {
+			continue
+		}
+		modVar, expVar, reqVar, body, ok := wpFactoryParts(p.Value)
+		if !ok {
+			continue
+		}
+		entries = append(entries, wpFactoryEntry{modID: modID, modVar: modVar, expVar: expVar, reqVar: reqVar, body: body})
+		if !confirmed && hasWPFactoryMarker(modVar, expVar, reqVar, body) {
+			confirmed = true
+		}
+	}
+	if !confirmed {
+		return
+	}
+	for _, e := range entries {
+		x.scanWPFactory(e)
+	}
+}
+
+func (x *extractor) indexWebpackModuleArray(arr *js.ArrayExpr) {
+	if arr == nil || len(arr.List) == 0 {
+		return
+	}
+	var entries []wpFactoryEntry
+	confirmed := false
+	for idx := range arr.List {
+		el := &arr.List[idx]
+		if el.Spread || el.Value == nil {
+			continue
+		}
+		modVar, expVar, reqVar, body, ok := wpFactoryParts(el.Value)
+		if !ok {
+			continue
+		}
+		modID := strconv.Itoa(idx)
+		entries = append(entries, wpFactoryEntry{modID: modID, modVar: modVar, expVar: expVar, reqVar: reqVar, body: body})
+		if !confirmed && hasWPFactoryMarker(modVar, expVar, reqVar, body) {
+			confirmed = true
+		}
+	}
+	if !confirmed {
+		return
+	}
+	for _, e := range entries {
+		x.scanWPFactory(e)
+	}
+}
+
+func wpModKey(e js.IExpr) (string, bool) {
+	e = ungroup(e)
+	if id, ok := moduleID(e); ok {
+		return id, true
+	}
+	if s, ok := literalString(e); ok && s != "" && len(s) <= 128 {
+		return s, true
+	}
+	return "", false
+}
+
+func (x *extractor) wpRequireModID(e js.IExpr, depth int) (string, bool) {
+	if depth >= 8 || e == nil || len(x.wpReqVars) == 0 {
+		return "", false
+	}
+	switch n := ungroup(e).(type) {
+	case *js.CallExpr:
+		as := args(&n.Args)
+		if len(as) == 1 {
+			if rv, ok := ungroup(n.X).(*js.Var); ok && x.wpReqVars[root(rv)] {
+				return wpModKey(as[0])
+			}
+			if d, ok := ungroup(n.X).(*js.DotExpr); ok && propName(d.Y) == "n" {
+				if rv, ok := ungroup(d.X).(*js.Var); ok && x.wpReqVars[root(rv)] {
+					return x.wpRequireModID(as[0], depth+1)
+				}
+			}
+		} else if len(as) == 0 {
+			if cv, ok := ungroup(n.X).(*js.Var); ok {
+				return x.wpRequireModID(cv, depth+1)
+			}
+		}
+	case *js.Var:
+		if c := x.constant(n); c != nil {
+			return x.wpRequireModID(c, depth+1)
+		}
+		if cs := x.chains[root(n)]; len(cs) == 1 && len(cs[0]) == 1 && cs[0][0].op == 's' && cs[0][0].expr != nil {
+			return x.wpRequireModID(cs[0][0].expr, depth+1)
+		}
+	}
+	return "", false
+}
+
+func (x *extractor) wpMember(d *js.DotExpr, depth int) (js.IExpr, bool) {
+	if d == nil || depth >= 16 || len(x.wpReqVars) == 0 {
+		return nil, false
+	}
+	modID, ok := x.wpRequireModID(d.X, 0)
+	if !ok {
+		return nil, false
+	}
+	prop := propName(d.Y)
+	if prop == "" {
+		return nil, false
+	}
+	if exp := x.wpModExports[modID][prop]; exp != nil {
+		return exp, true
+	}
+	if def := x.wpModDefault[modID]; def != nil {
+		if obj, isObj := x.objectN(def, depth+1); isObj {
+			if v := x.objectValueSpread(obj, prop, depth+1); v != nil {
+				return v, true
+			}
+			if prop == "a" || prop == "default" {
+				return def, true
+			}
+		} else if prop == "a" || prop == "default" {
+			return def, true
+		}
+	}
+	return nil, false
+}
+
+func (x *extractor) wpDefaultObject(e js.IExpr, depth int) (*js.ObjectExpr, bool) {
+	if depth >= 16 || len(x.wpReqVars) == 0 {
+		return nil, false
+	}
+	modID, ok := x.wpRequireModID(e, 0)
+	if !ok {
+		return nil, false
+	}
+	if def := x.wpModDefault[modID]; def != nil {
+		return x.objectN(def, depth+1)
+	}
+	return nil, false
+}

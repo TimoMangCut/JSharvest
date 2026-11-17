@@ -59,6 +59,7 @@ type Model struct {
 	// For the OpenAPI document: the code's endpoints, the role, and
 	// whether the values are masked (-redact).
 	cat      *catalog
+	dir      string
 	role     string
 	redacted bool
 }
@@ -80,7 +81,7 @@ func Load(o Options) (*Model, error) {
 	}
 	x.endpoints()
 	m := &Model{Runs: x.runs, Flows: x.flows, byRef: map[string]*Request{},
-		cat: x.cat, role: o.Role, redacted: o.Redact != nil}
+		cat: x.cat, dir: o.Dir, role: o.Role, redacted: o.Redact != nil}
 	for _, it := range x.items {
 		mk := func(it *item) *Request {
 			r := &Request{Entry: it.e, Run: it.run, Key: it.key, Template: it.tmpl, Flow: it.flow, How: it.how, Derived: it.derived,

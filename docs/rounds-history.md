@@ -1,4 +1,4 @@
-# Lịch sử các Giai đoạn và Đợt phát triển (`GĐ1` → `Đợt 32`)
+# Lịch sử các Giai đoạn và Đợt phát triển (`GĐ1` → `Đợt 33`)
 
 Đây là chỉ mục tóm tắt gọn các mốc phát triển. Bản ghi nguyên văn đầy đủ GĐ1 → Đợt 30 lưu tại [rounds-history-full.md](archive/rounds-history-full.md). Khi có xung đột, [CLAUDE.md](../CLAUDE.md) và [CURRENT.md](CURRENT.md) có hiệu lực cao hơn.
 
@@ -26,7 +26,7 @@
 | **Đợt 26A–26H** | `35–42` | v24–v30 | OOP `classes.go`, kiểm mù #1 Keycloak (thành dev), #2 `@appwrite/console` (`1.070/1.098`), #3 `@medusajs/dashboard` (`300/420`), #4 `@directus/app` (`89/136` → `93/136`). |
 | **Đợt 27A–27F** | `43–48` | v31–v35 | Liên kết xuyên script `deferred.go` (`PrepareModule`), `urlreturn.go` (Appwrite `1.087/1.098`), kiểm mù #5 Jellyfin Web 12.4 (`3/364` → `302/364`, thành dev), `descriptor.go`. |
 
-## 3. Các Đợt Gần Nhất (`Đợt 28–32`)
+## 3. Các Đợt Gần Nhất (`Đợt 28–33`)
 
 - **Đợt 28–30 (`2026-11-15 → 16`, [plan-28.md](plan-28.md), [gd7-bola-design.md](gd7-bola-design.md), `jsapi v36`):**
   - Hợp nhất bộ kết luận SFC + mã lỗi số trong body 200 + GraphQL theo từng operation.
@@ -39,3 +39,6 @@
 - **Đợt 32 (`2026-11-17`, [plan-32.md](plan-32.md), `jsapi v38` → `v39`):**
   - **(P1 — Hiệu năng, Đồng bộ An toàn & Đa nền tảng):** Xoá double-AST parsing giữa `httpcrawl` và `endpoints.Analyze` qua `ExtractCached` + lọc sớm `Vendor`/`Tracker`/`Infra` ở `Depth == 0`; tách cross-origin Spec Probe trong `-engine cdp` qua `netsafe`, kích cầu chì `D3` trên `neterr`, gom `resolve.Policy` và mở rộng `nonAPIInfraDomains`; thay đệ quy `QueryUnescape` bằng vòng lặp phẳng tối đa 2 lớp trong `reflector.hit`; đồng bộ `resolve.Policy` với `netsafe`; lọc sớm `direction`/`role` cho MCP `get_authz` + khoá `user`/`user_created` trong `privateMarker`; đồng bộ macOS native (`uahints`, `Setpgid`, `perfgate` RSS).
   - **(P3–P4 — Giao thức Web Hiện đại):** Bổ sung hỗ trợ tĩnh & động cho **Next.js Server Actions** (`Next-Action` / `$ACTION_ID_<hex>` + giải mã RSC Flight), **tRPC `v10`/`v11`** (proxy chains + tách lô `?batch=1` + span JSON trong query URL-encoded), **GraphQL Tagged Templates** (`gql` / `graphql()` / `Document` -> tổng hợp thân JSON cho `verify`, tự bỏ qua `mutation`/`subscription` khi thiếu `-allow-write`), và **ConnectRPC / gRPC-Web** (service/method descriptors + bảo vệ đường dẫn `/<pkg.Service>/<Method>` + khoá không `Patch` khung nhị phân 5-byte proto).
+- **Đợt 33 (`2026-11-17`, [plan-33.md](plan-33.md), `jsapi v39` → `v40`):**
+  - **(B1–B2 — Mở toàn bộ giới hạn cứng & Cô lập lỗi theo host):** Đặt mặc định `0` (không giới hạn) cho `crawl`, `frontier`/`specprobe`, `archive` và `verify`/`authz`; cô lập lỗi WAF/challenge theo từng host (`specBlocked`) trong Spec Probe để bảo vệ `specProbePhase2`; lọc sourcemap thư viện vendor tự host độc lập (`FilesFor`) và chặn trang lỗi mềm XHTML (`<?xml`, cửa sổ 4 KB) lọt vào kho `.js`.
+  - **(B3–B4 — Verify Canary Parity, Archive Origin & `jsapi` v40):** Đồng bộ header giữa probe và `canaryOptions` để triệt tiêu dương tính giả `verified_alive` trên tường xác thực AJAX `401/403`; bảo toàn & khôi phục `Origin` trong `historical.jsonl`, cô lập `client_headers` theo script/origin, suy luận mã ngôn ngữ i18n cho slot đường dẫn, khử nhân bản đường dẫn OpenAPI export; bổ sung giải mã module nội bộ Webpack 4/5 (`req.d`, `module.exports`), `JSON.parse('{...}')`, trích xuất `Keys` trên gán thuộc tính/class field và sửa lệch slot `pathNames` trước `?`/`#`.

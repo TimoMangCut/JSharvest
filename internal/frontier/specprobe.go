@@ -18,13 +18,13 @@ import (
 )
 
 const (
-	// MaxSpecBases bounds the API gateway / sub-path bases probed in Phase 2.
-	MaxSpecBases = 4
+	// MaxSpecBases bounds the API gateway / sub-path bases probed in Phase 2 (0: unlimited).
+	MaxSpecBases = 0
 	// MaxServiceDocPrefixes bounds the microservice prefixes probed for
-	// /v3/api-docs and /v2/api-docs in Phase 2.
-	MaxServiceDocPrefixes = 5
-	// MaxPhase2SpecProbes caps total Phase-2 GET requests across a crawl.
-	MaxPhase2SpecProbes = 46
+	// /v3/api-docs and /v2/api-docs in Phase 2 (0: unlimited).
+	MaxServiceDocPrefixes = 0
+	// MaxPhase2SpecProbes caps total Phase-2 GET requests across a crawl (0: unlimited).
+	MaxPhase2SpecProbes = 0
 )
 
 // ServiceDocPaths are the canonical microservice OpenAPI paths probed on
@@ -444,7 +444,7 @@ func (sc *SpecCollector) Plan(seedOrigin string, inScope func(string) bool) Spec
 	var plan SpecProbePlan
 	var keptBases []*baseStat
 	for _, st := range allBases {
-		if len(plan.Bases) >= MaxSpecBases {
+		if MaxSpecBases > 0 && len(plan.Bases) >= MaxSpecBases {
 			break
 		}
 		plan.Bases = append(plan.Bases, st.url)
@@ -535,7 +535,7 @@ func (sc *SpecCollector) Plan(seedOrigin string, inScope func(string) bool) Spec
 		return strings.Compare(a.prefix, b.prefix)
 	})
 	for _, st := range allSvcs {
-		if len(plan.Services) >= MaxServiceDocPrefixes {
+		if MaxServiceDocPrefixes > 0 && len(plan.Services) >= MaxServiceDocPrefixes {
 			break
 		}
 		plan.Services = append(plan.Services, ServiceDocTarget{

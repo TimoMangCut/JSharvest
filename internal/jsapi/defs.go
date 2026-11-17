@@ -3,7 +3,6 @@ package jsapi
 // This file: definitions: the visitor that records what names hold, assignment chains, the bases properties hold.
 
 import (
-	"bytes"
 	"regexp"
 	"strings"
 
@@ -283,6 +282,15 @@ func (v *defsVisitor) Enter(n js.INode) js.IVisitor {
 				x.headers = append(x.headers, propDef{name: propName(t.Y), value: n.Y})
 			} else {
 				pname := propName(t.Y)
+				if rv, ok := t.X.(*js.Var); ok && (pname == "d" || pname == "r" || pname == "n") {
+					switch ungroup(n.Y).(type) {
+					case *js.ArrowFunc, *js.FuncDecl:
+						x.wpReqVars[root(rv)] = true
+					}
+				}
+				if keyName(pname) {
+					x.keyExpr(pname, n.Y)
+				}
 				if pname != "" && !skipAssignBaseProp(pname) && mayEvalToBase(n.Y) {
 					x.propBaseDefs = append(x.propBaseDefs, propDef{name: pname, value: n.Y})
 				}
@@ -326,22 +334,27 @@ func (v *defsVisitor) Enter(n js.INode) js.IVisitor {
 			// request is given; not {"X-AXIS": 48}, a chart's constant.
 			x.headers = append(x.headers, propDef{name: name, value: n.Value})
 		case keyName(name):
-			if v, ok := literalString(n.Value); ok {
-				line := 0
-				if l, ok := n.Value.(*js.LiteralExpr); ok && len(l.Data) > 2 {
-					if i := bytes.Index(x.src, l.Data); i >= 0 {
-						line, _ = x.mappedLineCol(i)
-					}
-				}
-				x.key(name, v, line)
-			}
+			x.keyExpr(name, n.Value)
 		case name == "data":
 			// A Vue component's data(): what this.<name> starts as.
 			if o := returnedObject(n.Value); o != nil {
 				x.dataObjs = append(x.dataObjs, o)
 			}
 		}
+	case *js.ClassDecl:
+		for i := range n.List {
+			el := &n.List[i]
+			if el.Method == nil && el.StaticBlock == nil && el.Field.Init != nil {
+				fname := strings.TrimPrefix(memberName(&el.Field.Name), "#")
+				if keyName(fname) {
+					x.keyExpr(fname, el.Field.Init)
+				}
+			}
+		}
+	case *js.ArrayExpr:
+		x.indexWebpackModuleArray(n)
 	case *js.ObjectExpr:
+		x.indexWebpackModuleObject(n)
 		hasReqOpt, hasRoute := false, false
 		for _, p := range n.List {
 			if p.Spread || p.Name == nil {

@@ -38,7 +38,7 @@ func CatalogModel(o Options) *Model {
 	if o.InScope == nil {
 		o.InScope = func(string) bool { return true }
 	}
-	return &Model{cat: newCatalog(o.Catalog, o.InScope), role: o.Role, redacted: o.Redact != nil, byRef: map[string]*Request{}}
+	return &Model{cat: newCatalog(o.Catalog, o.InScope), dir: o.Dir, role: o.Role, redacted: o.Redact != nil, byRef: map[string]*Request{}}
 }
 
 // WriteOpenAPI writes the model's OpenAPI document to dir/openapi.json
@@ -237,6 +237,7 @@ func (b *oaBuilder) gather() {
 	if b.m.cat == nil {
 		return
 	}
+	verifiedPaths := loadVerifiedPaths(b.m.dir)
 	for i := range b.m.cat.eps {
 		ce := &b.m.cat.eps[i]
 		if used[&ce.ep] {
@@ -246,7 +247,11 @@ func (b *oaBuilder) gather() {
 			b.methodless++
 			continue
 		}
-		for _, p := range ce.paths {
+		emitPaths := ce.paths
+		if vp := verifiedPaths[strings.ToUpper(ce.ep.Method)+" "+ce.ep.Path]; vp != "" {
+			emitPaths = []string{vp}
+		}
+		for _, p := range emitPaths {
 			o := b.op(strings.ToUpper(ce.ep.Method), b.path(p))
 			if !containsEP(o.code, &ce.ep) {
 				o.code = append(o.code, &ce.ep)
@@ -256,6 +261,39 @@ func (b *oaBuilder) gather() {
 			}
 		}
 	}
+}
+
+func loadVerifiedPaths(roleDir string) map[string]string {
+	out := map[string]string{}
+	if roleDir == "" {
+		return out
+	}
+	raw, err := os.ReadFile(filepath.Join(roleDir, "verify", "verify.json"))
+	if err != nil {
+		return out
+	}
+	var rep struct {
+		Results []struct {
+			Method       string `json:"method"`
+			Path         string `json:"path"`
+			Verdict      string `json:"verdict"`
+			VerifiedBase string `json:"verified_base"`
+		} `json:"results"`
+	}
+	if json.Unmarshal(raw, &rep) != nil {
+		return out
+	}
+	for _, r := range rep.Results {
+		if (r.Verdict == "verified_alive" || r.Verdict == "resource_404") && r.VerifiedBase != "" && r.Method != "" {
+			p := joinBasePath(r.VerifiedBase, r.Path)
+			p, _, _ = strings.Cut(p, "?")
+			p = strings.TrimRight(p, "/")
+			if fixedSegments(p) >= 2 {
+				out[strings.ToUpper(r.Method)+" "+r.Path] = p
+			}
+		}
+	}
+	return out
 }
 
 func containsEP(l []*endpoints.Endpoint, e *endpoints.Endpoint) bool {

@@ -51,7 +51,7 @@ func (e *engine) sourceMaps(ctx context.Context, refs []ref, policy *resolve.Pol
 				stats.MapGuessesHeld++
 				continue // the origin ships no maps: no more guesses there
 			}
-			if *fetched >= e.cfg.ResolveMax {
+			if e.cfg.ResolveMax > 0 && *fetched >= e.cfg.ResolveMax {
 				stats.Stopped = fmt.Sprintf("reached -resolve-max %d", e.cfg.ResolveMax)
 				return true
 			}
@@ -82,7 +82,7 @@ func (e *engine) sourceMaps(ctx context.Context, refs []ref, policy *resolve.Pol
 		}
 		stats.Maps++
 		own := 0
-		for _, f := range sm.Files() {
+		for _, f := range sm.FilesFor(r.url) {
 			if f.Vendor {
 				continue // a dependency's: noise for the target's endpoints
 			}

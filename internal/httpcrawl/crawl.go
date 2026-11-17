@@ -254,6 +254,7 @@ type crawler struct {
 	toCheck string // the first page of an origin, for spaCheck
 	// apiOrigins are the target's API hosts the scripts name, asked for
 	// their API's description once the pages are done (PIP-03).
+	specBlocked  map[string]string
 	apiOrigins   []string
 	seedOrigin   string
 	seedFinalURL string
@@ -321,8 +322,8 @@ func (o *Options) defaults() {
 	if o.Rate <= 0 {
 		o.Rate = 5
 	}
-	if o.MaxFiles <= 0 {
-		o.MaxFiles = 500
+	if o.MaxFiles < 0 {
+		o.MaxFiles = 0
 	}
 	if o.MaxBody <= 0 {
 		o.MaxBody = 50 << 20
@@ -336,8 +337,8 @@ func (o *Options) defaults() {
 	if o.Workers <= 0 {
 		o.Workers = 4
 	}
-	if o.MaxPages <= 0 {
-		o.MaxPages = 200
+	if o.MaxPages < 0 {
+		o.MaxPages = 0
 	}
 	if o.Log == nil {
 		o.Log = func(string, ...any) {}
@@ -424,8 +425,12 @@ func Crawl(ctx context.Context, o Options) (*Result, error) {
 				seedMu.Unlock()
 			}
 		},
-		res:  &Result{Stats: Stats{Found: map[string]int{}, Probes: map[string]int{}, Policy: map[string]int{}}, Listed: map[string]int{}},
-		seen: map[string]bool{}, hosts: map[string]*hostState{}, prints: map[string]string{}, spa: map[string]bool{}}
+		res:         &Result{Stats: Stats{Found: map[string]int{}, Probes: map[string]int{}, Policy: map[string]int{}}, Listed: map[string]int{}},
+		seen:        map[string]bool{},
+		hosts:       map[string]*hostState{},
+		specBlocked: map[string]string{},
+		prints:      map[string]string{},
+		spa:         map[string]bool{}}
 	cr.cancel = cancel
 	cr.q = frontier.NewQueue(frontier.Options{InScope: pageScope, MaxDepth: o.Depth, MaxPages: o.MaxPages, Destructive: o.Destructive})
 	cr.q.Add(frontier.Found{URL: o.Target.String(), How: frontier.Seed, Visit: true}, 0, "")
@@ -446,7 +451,7 @@ func Crawl(ctx context.Context, o Options) (*Result, error) {
 			if cr.stop() != "" || ctx.Err() != nil {
 				break
 			}
-			cr.specProbe(ctx, origin, probeRef, cr.specCtx.HeadersFor(origin, o.InScope), nil)
+			cr.specProbeWithScope(ctx, origin, probeRef, cr.specCtx.HeadersFor(origin, o.InScope), nil, true)
 		}
 		if cr.stop() == "" && ctx.Err() == nil {
 			cr.specProbePhase2(ctx, probeRef)
@@ -936,7 +941,7 @@ func (cr *crawler) routes(body []byte, scriptURL, page string, depth int, b *buc
 // frontier.MaxAPIOrigins, the first named first. cr.mu is held.
 func (cr *crawler) noteOriginsLocked(origins []string) {
 	for _, o := range origins {
-		if o != cr.seedOrigin && len(cr.apiOrigins) < frontier.MaxAPIOrigins && !slices.Contains(cr.apiOrigins, o) {
+		if o != cr.seedOrigin && (frontier.MaxAPIOrigins <= 0 || len(cr.apiOrigins) < frontier.MaxAPIOrigins) && !slices.Contains(cr.apiOrigins, o) {
 			cr.apiOrigins = append(cr.apiOrigins, o)
 		}
 	}
@@ -1016,7 +1021,7 @@ func (cr *crawler) claim(raw string) (ok bool, why string) {
 	if cr.stopped != "" || cr.capped != "" {
 		return false, ""
 	}
-	if cr.files >= cr.o.MaxFiles {
+	if cr.o.MaxFiles > 0 && cr.files >= cr.o.MaxFiles {
 		cr.capped = fmt.Sprintf("-resolve-max (%d) reached", cr.o.MaxFiles)
 		cr.o.Log("%s: no more scripts fetched; the pages go on", cr.capped)
 		return false, ""
@@ -1042,7 +1047,7 @@ func (cr *crawler) script(ctx context.Context, j job) []job {
 	case a.Status != 200:
 		cr.count(func(st *Stats) { st.Failed++ })
 		return nil
-	case htmlLike(a.Body):
+	case notScriptBody(a.Header.Get("Content-Type"), a.Body):
 		cr.count(func(st *Stats) { st.NotScript++ })
 		return nil
 	case len(a.Body) == 0:
@@ -1201,13 +1206,86 @@ func (cr *crawler) probe(ctx context.Context, seed string) ([]job, []frontier.Fo
 // Provider's configuration is kept beside the scripts (tag openapi), for the
 // catalog. If /swagger-resources lists Springfox document paths, up to
 // jsapi.MaxSwaggerResources are fetched under the same base.
+func (cr *crawler) specHostBlocked(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Hostname() == "" {
+		return false
+	}
+	h := strings.ToLower(u.Hostname())
+	cr.mu.Lock()
+	defer cr.mu.Unlock()
+	return cr.specBlocked[h] != ""
+}
+
+// politeSpecAt isolates WAF/challenge/429 responses per host during post-page
+// OpenAPI/OIDC spec probing so that a block on a third-party or secondary host
+// stops only that host without halting specProbePhase2 on in-scope targets.
+func (cr *crawler) politeSpecAt(a answer, base, referer string, postPages bool) {
+	if !postPages && originOf(base) == cr.seedOrigin {
+		cr.politeAt(a, referer, 0)
+		return
+	}
+	u, err := url.Parse(a.URL)
+	if err != nil {
+		u, _ = url.Parse(base)
+	}
+	host := ""
+	if u != nil {
+		host = strings.ToLower(u.Hostname())
+	}
+	if host == "" {
+		return
+	}
+	why := ""
+	if a.Err == nil && a.Status != 0 {
+		h := lower(a.Header)
+		var title string
+		if strings.Contains(h["content-type"], "html") {
+			title = htmlscan.Scan(a.Body[:min(len(a.Body), 64<<10)], a.URL).Title
+		}
+		if b := detect.Classify(detect.Doc{URL: a.URL, Status: int64(a.Status), Headers: h, Title: title, Body: head(a.Body, 64<<10)}); b != nil {
+			if b.Kind == detect.BlockRequest {
+				return
+			}
+			if b.Kind != detect.BlockRate {
+				if b.Kind.BrowserMayPass() && cr.o.InScope != nil && cr.o.InScope(host) {
+					cr.noteChallenged(a.URL, referer, 0, b.Kind)
+				}
+				why = fmt.Sprintf("%s answered with a %s", host, b)
+			}
+		}
+	}
+	if why == "" {
+		switch {
+		case a.Status == http.StatusTooManyRequests:
+			why = host + " answered 429"
+		case strings.EqualFold(a.Header.Get("Cf-Mitigated"), "challenge"):
+			why = host + " answered with a challenge (cf-mitigated)"
+		case a.Status == http.StatusServiceUnavailable && a.Header.Get("Retry-After") != "":
+			why = host + " answered 503 with Retry-After"
+		}
+	}
+	if why != "" {
+		cr.mu.Lock()
+		if cr.specBlocked[host] == "" {
+			cr.specBlocked[host] = why
+		}
+		cr.mu.Unlock()
+		cr.o.Log("spec-probe host stopped (%s)", why)
+	}
+}
+
 func (cr *crawler) specProbe(ctx context.Context, base, referer string, hdrs []jsapi.Header, budget *int) {
+	cr.specProbeWithScope(ctx, base, referer, hdrs, budget, false)
+}
+
+func (cr *crawler) specProbeWithScope(ctx context.Context, base, referer string, hdrs []jsapi.Header, budget *int, postPages bool) {
 	base = strings.TrimRight(base, "/")
-	if _, err := url.Parse(base); err != nil || cr.specPolicy.Check(base+"/") != resolve.Allow {
+	if _, err := url.Parse(base); err != nil || cr.specPolicy.Check(base+"/") != resolve.Allow || cr.specHostBlocked(base) {
 		return
 	}
 	fetchSpec := func(targetURL, pathHint string) (answer, bool) {
-		if cr.stop() != "" || ctx.Err() != nil {
+		if cr.stop() != "" || cr.specHostBlocked(targetURL) || ctx.Err() != nil {
 			return answer{}, false
 		}
 		if budget != nil && *budget <= 0 {
@@ -1220,7 +1298,7 @@ func (cr *crawler) specProbe(ctx context.Context, base, referer string, hdrs []j
 			*budget--
 		}
 		a := cr.fetchWithHeaders(ctx, targetURL, referer, dataReq, "Other", hdrs)
-		cr.politeAt(a, referer, 0)
+		cr.politeSpecAt(a, base, referer, postPages)
 		key := strings.TrimPrefix(targetURL, cr.seedOrigin)
 		if key == targetURL || key == "" {
 			key = targetURL
@@ -1245,14 +1323,14 @@ func (cr *crawler) specProbe(ctx context.Context, base, referer string, hdrs []j
 	}
 
 	for _, p := range frontier.SpecPaths {
-		if cr.stop() != "" || ctx.Err() != nil || (budget != nil && *budget <= 0) {
+		if cr.stop() != "" || cr.specHostBlocked(base) || ctx.Err() != nil || (budget != nil && *budget <= 0) {
 			return
 		}
 		targetURL := frontier.JoinSpecBase(base, p)
 		a, stored := fetchSpec(targetURL, p)
 		if !stored && p == "/swagger-resources" && a.Err == nil && a.Status == 200 && !htmlLike(a.Body) {
 			for _, rel := range jsapi.SwaggerResources(a.Body) {
-				if cr.stop() != "" || ctx.Err() != nil || (budget != nil && *budget <= 0) {
+				if cr.stop() != "" || cr.specHostBlocked(base) || ctx.Err() != nil || (budget != nil && *budget <= 0) {
 					break
 				}
 				docURL := frontier.JoinSpecBase(base, rel)
@@ -1272,15 +1350,22 @@ func (cr *crawler) specProbePhase2(ctx context.Context, referer string) {
 	cr.mu.Unlock()
 
 	plan := cr.specCtx.Plan(seedOrig, cr.o.InScope)
-	budget := frontier.MaxPhase2SpecProbes
+	var budgetPtr *int
+	if frontier.MaxPhase2SpecProbes > 0 {
+		b := frontier.MaxPhase2SpecProbes
+		budgetPtr = &b
+	}
 
 	// (a) Gateway / Base Spec Probe.
 	for _, base := range plan.Bases {
-		if cr.stop() != "" || ctx.Err() != nil || budget <= 0 {
+		if cr.stop() != "" || ctx.Err() != nil || (budgetPtr != nil && *budgetPtr <= 0) {
 			return
 		}
+		if cr.specHostBlocked(base) {
+			continue
+		}
 		hdrs := cr.specCtx.HeadersFor(base, cr.o.InScope)
-		cr.specProbe(ctx, base, referer, hdrs, &budget)
+		cr.specProbeWithScope(ctx, base, referer, hdrs, budgetPtr, true)
 	}
 
 	// (b) Service Sub-Prefix Doc Probe + D3 Auto-Brake.
@@ -1293,10 +1378,10 @@ func (cr *crawler) specProbePhase2(ctx context.Context, referer string) {
 	gates := map[string]*gateState{}
 
 	for _, svc := range plan.Services {
-		if cr.stop() != "" || ctx.Err() != nil || budget <= 0 {
+		if cr.stop() != "" || ctx.Err() != nil || (budgetPtr != nil && *budgetPtr <= 0) {
 			return
 		}
-		if cr.specPolicy.Check(svc.PrefixURL+"/") != resolve.Allow {
+		if cr.specPolicy.Check(svc.PrefixURL+"/") != resolve.Allow || cr.specHostBlocked(svc.PrefixURL) {
 			continue
 		}
 		gs := gates[svc.GatewayBase]
@@ -1309,16 +1394,18 @@ func (cr *crawler) specProbePhase2(ctx context.Context, referer string) {
 		}
 		hdrs := cr.specCtx.HeadersFor(svc.PrefixURL, cr.o.InScope)
 		for _, p := range frontier.ServiceDocPaths {
-			if cr.stop() != "" || ctx.Err() != nil || budget <= 0 || gs.braked {
+			if cr.stop() != "" || cr.specHostBlocked(svc.PrefixURL) || ctx.Err() != nil || (budgetPtr != nil && *budgetPtr <= 0) || gs.braked {
 				break
 			}
 			targetURL := frontier.JoinSpecBase(svc.PrefixURL, p)
 			if ok, _ := cr.claim(targetURL); !ok {
 				continue
 			}
-			budget--
+			if budgetPtr != nil {
+				*budgetPtr--
+			}
 			a := cr.fetchWithHeaders(ctx, targetURL, referer, dataReq, "Other", hdrs)
-			cr.politeAt(a, referer, 0)
+			cr.politeSpecAt(a, svc.PrefixURL, referer, true)
 			key := strings.TrimPrefix(targetURL, seedOrig)
 			if key == targetURL || key == "" {
 				key = targetURL
@@ -1416,11 +1503,31 @@ func head(b []byte, n int) string {
 }
 
 // htmlLike reports whether a body is a page, not a script: an SPA's
-// fallback, a soft 404.
+// fallback, a soft 404 (including XHTML with <?xml preamble).
 func htmlLike(b []byte) bool {
-	t := strings.ToLower(strings.TrimSpace(string(b[:min(len(b), 512)])))
-	return strings.HasPrefix(t, "<!doctype html") || strings.HasPrefix(t, "<html") || strings.HasPrefix(t, "<head") ||
-		(strings.HasPrefix(t, "<") && strings.Contains(t, "<body"))
+	b = bytes.TrimPrefix(b, []byte("\xef\xbb\xbf"))
+	t := strings.ToLower(strings.TrimSpace(string(b[:min(len(b), 4096)])))
+	if strings.HasPrefix(t, "<!doctype ") || strings.HasPrefix(t, "<html") || strings.HasPrefix(t, "<head") ||
+		strings.HasPrefix(t, "<body") || strings.HasPrefix(t, "<?xml") || strings.HasPrefix(t, "<svg") ||
+		strings.HasPrefix(t, "<rss") || strings.HasPrefix(t, "<feed") {
+		return true
+	}
+	return strings.HasPrefix(t, "<") && (strings.Contains(t, "<html") || strings.Contains(t, "<head") || strings.Contains(t, "<body") || strings.Contains(t, "<!doctype html"))
+}
+
+func notScriptBody(contentType string, b []byte) bool {
+	if htmlLike(b) {
+		return true
+	}
+	ct := strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0]))
+	switch {
+	case ct == "text/html" || ct == "application/xhtml+xml" || ct == "application/xml" || ct == "text/xml" || ct == "application/pdf":
+		trimmed := bytes.TrimSpace(bytes.TrimPrefix(b, []byte("\xef\xbb\xbf")))
+		return len(trimmed) > 0 && (trimmed[0] == '<' || bytes.HasPrefix(trimmed, []byte("%PDF-")))
+	case strings.HasPrefix(ct, "image/") || strings.HasPrefix(ct, "audio/") || strings.HasPrefix(ct, "video/") || strings.HasPrefix(ct, "font/"):
+		return true
+	}
+	return false
 }
 
 // specURL reports whether a URL is an API's description (openapi.yaml).

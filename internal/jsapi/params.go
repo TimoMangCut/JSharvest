@@ -267,6 +267,19 @@ func exprName(e js.IExpr, depth int) string {
 // `${base}/tenants/${tenantId}/apps/${e.appSlug}`, tenantId and appSlug.
 // Nothing when the template is not found or names none.
 func (x *extractor) pathNames(u js.IExpr) []string {
+	names, _ := x.pathNamesDepth(u, 0)
+	for _, n := range names {
+		if n != "" {
+			return names
+		}
+	}
+	return nil
+}
+
+func (x *extractor) pathNamesDepth(u js.IExpr, depth int) ([]string, bool) {
+	if depth >= 4 || u == nil {
+		return nil, false
+	}
 	var tpl *js.TemplateExpr
 	for i := 0; i < 4 && tpl == nil; i++ {
 		switch n := u.(type) {
@@ -275,12 +288,12 @@ func (x *extractor) pathNames(u js.IExpr) []string {
 		case *js.Var:
 			c := x.constant(n)
 			if c == nil {
-				return nil
+				return nil, false
 			}
 			u = c
 		case *js.CallExpr:
 			if len(n.Args.List) == 0 {
-				return nil
+				return nil, false
 			}
 			u = n.Args.List[0].Value
 		case *js.BinaryExpr:
@@ -288,26 +301,30 @@ func (x *extractor) pathNames(u js.IExpr) []string {
 		case *js.GroupExpr:
 			u = n.X
 		default:
-			return nil
+			return nil, false
 		}
 	}
 	if tpl == nil || tpl.Tag != nil {
-		return nil
+		return nil, false
 	}
 	var names []string
-	any := false
 	for i, p := range tpl.List {
-		if i == 0 && len(templateText(p.Value, true, false)) == 0 {
-			continue // `${base}/x`: the base, no parameter
+		txt := templateText(p.Value, i == 0, false)
+		if strings.ContainsAny(txt, "?#") {
+			return names, true
 		}
-		n := exprName(p.Expr, 0)
-		any = any || n != ""
-		names = append(names, n)
+		if i == 0 && len(txt) == 0 {
+			sub, hitQuery := x.pathNamesDepth(p.Expr, depth+1)
+			names = append(names, sub...)
+			if hitQuery {
+				return names, true
+			}
+			continue // `${base}/x`: the base, no parameter unless base itself has path slots
+		}
+		names = append(names, exprName(p.Expr, 0))
 	}
-	if !any {
-		return nil
-	}
-	return names
+	tail := templateText(tpl.Tail, len(tpl.List) == 0, true)
+	return names, strings.ContainsAny(tail, "?#")
 }
 
 // pathSlots is how many parameters a path has: its {}, a base before it

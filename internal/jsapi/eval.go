@@ -4,10 +4,12 @@ package jsapi
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"slices"
 	"sort"
 	"strings"
 
+	"github.com/tdewolff/parse/v2"
 	"github.com/tdewolff/parse/v2/js"
 )
 
@@ -1135,12 +1137,56 @@ func (x *extractor) object(e js.IExpr) (*js.ObjectExpr, bool) {
 	return x.objectN(e, 0)
 }
 
+func isJSONParse(e js.IExpr) bool {
+	d, ok := ungroup(e).(*js.DotExpr)
+	return ok && isGlobal(d.X, "JSON") && propName(d.Y) == "parse"
+}
+
+func (x *extractor) jsonParsedObject(ce *js.CallExpr) (*js.ObjectExpr, bool) {
+	if ce == nil || len(ce.Args.List) != 1 || ce.Args.List[0].Rest || !isJSONParse(ce.X) {
+		return nil, false
+	}
+	if obj, seen := x.jsonObjs[ce]; seen {
+		return obj, obj != nil
+	}
+	x.jsonObjs[ce] = nil
+	raw, ok := literalString(ce.Args.List[0].Value)
+	if !ok || len(raw) < 2 || len(raw) > 65536 {
+		return nil, false
+	}
+	trimmed := strings.TrimSpace(raw)
+	if len(trimmed) < 2 || trimmed[0] != '{' || trimmed[len(trimmed)-1] != '}' || !json.Valid([]byte(trimmed)) {
+		return nil, false
+	}
+	ast, err := js.Parse(parse.NewInputBytes([]byte("("+trimmed+")")), js.Options{})
+	if err != nil || len(ast.BlockStmt.List) != 1 {
+		return nil, false
+	}
+	es, ok := ast.BlockStmt.List[0].(*js.ExprStmt)
+	if !ok {
+		return nil, false
+	}
+	obj, ok := ungroup(es.Value).(*js.ObjectExpr)
+	if !ok {
+		return nil, false
+	}
+	x.jsonObjs[ce] = obj
+	return obj, true
+}
+
 // objectN is object, through at most 16 parameters bound to one another
 // (helpers passing {body: n} on, or calling each other back).
 func (x *extractor) objectN(e js.IExpr, depth int) (*js.ObjectExpr, bool) {
-	switch n := e.(type) {
+	switch n := ungroup(e).(type) {
 	case *js.ObjectExpr:
 		return n, true
+	case *js.CallExpr:
+		if obj, ok := x.jsonParsedObject(n); ok {
+			return obj, true
+		}
+		if obj, ok := x.wpDefaultObject(n, depth); ok {
+			return obj, true
+		}
 	case *js.Var:
 		if a, ok := x.args[root(n)]; ok {
 			if a == nil || a == js.IExpr(n) || depth >= 16 {
@@ -1149,8 +1195,25 @@ func (x *extractor) objectN(e js.IExpr, depth int) (*js.ObjectExpr, bool) {
 			return x.objectN(a, depth+1)
 		}
 		if c := x.constant(n); c != nil {
-			o, ok := c.(*js.ObjectExpr)
-			return o, ok
+			switch cv := ungroup(c).(type) {
+			case *js.ObjectExpr:
+				return cv, true
+			case *js.CallExpr:
+				if obj, ok := x.jsonParsedObject(cv); ok {
+					return obj, true
+				}
+				if obj, ok := x.wpDefaultObject(cv, depth); ok {
+					return obj, true
+				}
+			case *js.DotExpr:
+				if depth < 16 {
+					return x.objectN(cv, depth+1)
+				}
+			}
+			return nil, false
+		}
+		if obj, ok := x.wpDefaultObject(n, depth); ok {
+			return obj, true
 		}
 		if depth < 16 {
 			if src := x.destructFrom[root(n)]; src != nil && x.propOf[root(n)] != "" {
@@ -1306,6 +1369,9 @@ func (x *extractor) member(d *js.DotExpr) (js.IExpr, bool) {
 func (x *extractor) memberN(d *js.DotExpr, depth int) (js.IExpr, bool) {
 	if depth >= 16 || d == nil {
 		return nil, false
+	}
+	if v, ok := x.wpMember(d, depth); ok {
+		return v, true
 	}
 	if ev := x.enumVar(d.X, depth); ev != nil {
 		if v := x.enumProps[ev][propName(d.Y)]; v != nil {

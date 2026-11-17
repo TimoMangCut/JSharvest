@@ -299,8 +299,8 @@ func templatePath(p string) bool {
 var SpecPaths = []string{"/openapi.json", "/openapi.yaml", "/api-json", "/docs-json", "/v3/api-docs", "/v2/api-docs",
 	"/swagger-resources", "/swagger/doc.json", "/.well-known/openid-configuration"}
 
-// MaxAPIOrigins bounds the API hosts a crawl asks SpecPaths of.
-const MaxAPIOrigins = 5
+// MaxAPIOrigins bounds the API hosts a crawl asks SpecPaths of (0: unlimited).
+const MaxAPIOrigins = 0
 
 var trackerDomains = []string{
 	"google-analytics.com",

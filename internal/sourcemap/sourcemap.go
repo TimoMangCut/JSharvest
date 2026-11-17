@@ -155,13 +155,34 @@ type File struct {
 // Files returns the sources whose content the map carries, the app's own
 // first.
 func (m *Map) Files() []File {
-	var own, vendor []File
+	return m.FilesFor("")
+}
+
+// FilesFor is Files, also using scriptURL (when given) to identify
+// standalone self-hosted third-party library maps (e.g. ckeditor5.js.map,
+// bootstrap.bundle.min.js.map, livewire.js.map, /vendor/.../*.map) whose
+// internal module paths do not carry a node_modules/ prefix.
+func (m *Map) FilesFor(scriptURL string) []File {
+	libScript, libStem := standaloneLibraryInfo(scriptURL)
+	var raw []File
+	monorepoHits := 0
 	for i, s := range m.Sources {
 		if i >= len(m.SourcesContent) || m.SourcesContent[i] == nil || *m.SourcesContent[i] == "" {
 			continue
 		}
 		f := File{Path: Clean(m.SourceRoot, s), Content: *m.SourcesContent[i]}
 		f.Vendor = vendorPath(f.Path)
+		if !f.Vendor && libStem != "" && hasMonorepoStem(f.Path, libStem) {
+			monorepoHits++
+		}
+		raw = append(raw, f)
+	}
+	allLibMonorepo := libStem != "" && len(raw) > 0 && monorepoHits*10 >= len(raw)*9
+	var own, vendor []File
+	for _, f := range raw {
+		if !f.Vendor && (libScript || allLibMonorepo || (libStem != "" && hasMonorepoStem(f.Path, libStem))) && !explicitAppSourcePath(f.Path) {
+			f.Vendor = true
+		}
 		if f.Vendor {
 			vendor = append(vendor, f)
 		} else {
@@ -171,7 +192,67 @@ func (m *Map) Files() []File {
 	return append(own, vendor...)
 }
 
-var schemeRe = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9+.-]*:/*`)
+var (
+	schemeRe               = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9+.-]*:/*`)
+	standaloneVendorDirRe  = regexp.MustCompile(`(?i)/(?:vendors?|bower_components|node_modules|wp-includes/js|javax\.faces\.resource)/`)
+	standaloneVendorFileRe = regexp.MustCompile(`(?i)^(?:jquery|bootstrap|ckeditor\d*|tinymce|datatables|jszip|select2|flatpickr|moment(?:-with-locales)?|owl\.carousel|swiper|lodash|underscore|backbone|handlebars|mustache|tabbable|popper|livewire|alpine(?:\.min)?|filepond|chart(?:\.umd)?|d3|three|pdf(?:\.worker)?|prism|highlight)(?:[._-][\w.~-]*)?\.m?js$`)
+	genericAppStem         = map[string]bool{
+		"main": true, "index": true, "app": true, "bundle": true, "chunk": true,
+		"client": true, "page": true, "pages": true, "entry": true, "script": true,
+		"scripts": true, "common": true, "shared": true, "core": true, "custom": true,
+	}
+)
+
+func standaloneLibraryInfo(scriptURL string) (isLib bool, stem string) {
+	if scriptURL == "" {
+		return false, ""
+	}
+	p := scriptURL
+	if u, err := url.Parse(scriptURL); err == nil && u.Path != "" {
+		p = u.Path
+	} else if q := strings.IndexAny(p, "?#"); q >= 0 {
+		p = p[:q]
+	}
+	base := path.Base(p)
+	if standaloneVendorDirRe.MatchString(p) || standaloneVendorFileRe.MatchString(base) {
+		isLib = true
+	}
+	s := strings.ToLower(base)
+	s = strings.TrimSuffix(strings.TrimSuffix(s, ".mjs"), ".js")
+	for _, suf := range []string{".min", ".umd", ".esm", ".cjs", ".bundle", ".prod", ".production"} {
+		s = strings.TrimSuffix(s, suf)
+	}
+	if idx := strings.IndexAny(s, "._-"); idx >= 4 {
+		s = s[:idx]
+	}
+	if len(s) >= 4 && !genericAppStem[s] {
+		stem = s
+	}
+	return isLib, stem
+}
+
+func hasMonorepoStem(cleanPath, stem string) bool {
+	l := strings.ToLower(cleanPath)
+	if strings.HasPrefix(l, "packages/"+stem) {
+		rest := l[len("packages/"+stem):]
+		return rest == "" || rest[0] == '/' || rest[0] == '-' || rest[0] == '_'
+	}
+	if strings.HasPrefix(l, "packages/@") {
+		if _, after, ok := strings.Cut(l[len("packages/@"):], "/"); ok && strings.HasPrefix(after, stem) {
+			rest := after[len(stem):]
+			return rest == "" || rest[0] == '/' || rest[0] == '-' || rest[0] == '_'
+		}
+	}
+	return false
+}
+
+// explicitAppSourcePath keeps an app's own files if a hybrid bundle happens
+// to be served from a shared directory.
+func explicitAppSourcePath(cleanPath string) bool {
+	l := strings.ToLower(cleanPath)
+	return strings.HasPrefix(l, "resources/js/") || strings.HasPrefix(l, "resources/ts/") ||
+		strings.HasPrefix(l, "client/src/") || strings.HasPrefix(l, "frontend/src/")
+}
 
 // Clean makes a source's name a plain relative path: no webpack:// or
 // file:// scheme, no ./ or ../ in front, no query (webpack's ?xxxx).
@@ -194,6 +275,8 @@ func Clean(root, s string) string {
 
 func vendorPath(p string) bool {
 	l := strings.ToLower(p)
-	return strings.Contains(l, "node_modules/") || strings.HasPrefix(l, "webpack/") || strings.HasPrefix(l, "(webpack)") ||
+	return strings.Contains(l, "node_modules/") || strings.Contains(l, "bower_components/") ||
+		strings.HasPrefix(l, "webpack/") || strings.HasPrefix(l, "(webpack)") ||
+		strings.HasPrefix(l, "vendor/") || strings.HasPrefix(l, "vendors/") ||
 		strings.Contains(l, "/~/") || strings.HasPrefix(l, "~/") || strings.HasPrefix(l, "vite/") || strings.Contains(l, "\x00")
 }

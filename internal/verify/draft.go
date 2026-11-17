@@ -212,8 +212,8 @@ func Load(roleDir, archiveDir string, historical bool) (Inputs, error) {
 	return in, nil
 }
 
-// maxCandidates bounds the bases a line with none is tried under.
-const maxCandidates = 4
+// maxCandidates bounds the bases a line with none is tried under (0: unlimited).
+const maxCandidates = 0
 
 // Drafts writes every line of the catalog (and the historical ones) out.
 func Drafts(in Inputs) []Draft {
@@ -232,6 +232,7 @@ func Drafts(in Inputs) []Draft {
 		out = append(out, d)
 	}
 	bases := candidateBases(in)
+	originLangs := inferOriginLanguages(in.Catalog)
 	intelDocs := map[string]jsapi.GraphQLDoc{}
 	for _, gd := range in.Intel.GraphQLDocs {
 		if _, exists := intelDocs[gd.Name]; !exists {
@@ -239,7 +240,7 @@ func Drafts(in Inputs) []Draft {
 		}
 	}
 	for _, e := range in.Catalog {
-		d := draftOf(lineOf(e, in.InScope, in.Intel), "catalog", bases, in)
+		d := draftOfWithLangs(lineOf(e, in.InScope, in.Intel), "catalog", bases, in, originLangs)
 		epDocs := map[string]jsapi.GraphQLDoc{}
 		for _, gd := range e.GraphQLDocs {
 			epDocs[gd.Name] = gd
@@ -299,12 +300,23 @@ func Drafts(in Inputs) []Draft {
 		if h.Class == "low" {
 			continue // a template too generic, or a bare string
 		}
-		l := line{Method: h.Method, Host: h.Host, Path: h.Path, Base: h.Base, Bases: h.Bases, Kind: h.Kind, Query: h.Query,
-			Body: h.Body, Headers: h.Headers, Params: h.Params, Confidence: h.Confidence}
-		if l.Confidence == "" {
-			l.Confidence = "code"
+		static := make([]endpoints.Source, 0, len(h.Scripts))
+		for _, s := range h.Scripts {
+			if s.SHA256 != "" || s.URL != "" {
+				static = append(static, endpoints.Source{SHA256: s.SHA256, Script: s.URL})
+			}
 		}
-		add(draftOf(l, "historical", bases, in))
+		he := endpoints.Endpoint{
+			Method: h.Method, Host: h.Host, Origin: h.Origin, Path: h.Path,
+			Base: h.Base, Bases: h.Bases, Kind: h.Kind, Query: h.Query,
+			Body: h.Body, Headers: h.Headers, Params: h.Params,
+			Confidence: h.Confidence, Static: static,
+		}
+		if he.Confidence == "" {
+			he.Confidence = "code"
+		}
+		l := lineOf(he, in.InScope, in.Intel)
+		add(draftOfWithLangs(l, "historical", bases, in, originLangs))
 	}
 	return out
 }
@@ -357,6 +369,9 @@ func lineOf(e endpoints.Endpoint, inScope func(string) bool, intel endpoints.Int
 			if strings.HasPrefix(l.Base, "/") && so != "" {
 				l.Base = so + l.Base
 			}
+		}
+		if l.Origin == "" && l.Base == "" && len(l.Bases) == 0 && !strings.HasPrefix(l.Path, "{}") && so != "" {
+			l.Origin = so
 		}
 	}
 	return l
@@ -450,7 +465,7 @@ func candidateBases(in Inputs) []string {
 		}
 	}
 	sort.SliceStable(out, func(i, j int) bool { return len(out[i]) < len(out[j]) })
-	if len(out) > maxCandidates {
+	if maxCandidates > 0 && len(out) > maxCandidates {
 		out = out[:maxCandidates]
 	}
 	return out
@@ -474,6 +489,10 @@ func join(base, path string) string {
 }
 
 func draftOf(l line, source string, bases []string, in Inputs) Draft {
+	return draftOfWithLangs(l, source, bases, in, nil)
+}
+
+func draftOfWithLangs(l line, source string, bases []string, in Inputs, originLangs map[string]string) Draft {
 	d := Draft{Source: source, Method: l.Method, Path: l.Path, Confidence: l.Confidence, Kind: l.Kind, ThirdParty: l.ThirdParty, SourceOnly: l.SourceOnly}
 	// The URL: the line's base, its one client base, its host, its page's
 	// origin; else the target's bases, each a candidate.
@@ -496,9 +515,35 @@ func draftOf(l line, source string, bases []string, in Inputs) Draft {
 		target = strings.TrimRight(l.Origin, "/") + l.Path
 	default:
 		if !l.ThirdParty {
-			for _, b := range bases {
-				d.Candidates = append(d.Candidates, join(b, l.Path))
-				d.CandidateBases = append(d.CandidateBases, b)
+			sOrigins := allScriptOrigins(l.Static, in.InScope)
+			addCand := func(base string) {
+				u := join(base, l.Path)
+				if !slices.Contains(d.Candidates, u) {
+					d.Candidates = append(d.Candidates, u)
+					d.CandidateBases = append(d.CandidateBases, base)
+				}
+			}
+			if !strings.HasPrefix(l.Path, "{}") && len(sOrigins) > 0 {
+				// Root-relative path shared across multiple script origins: probe each
+				// script's own origin rather than gluing onto an unrelated subdomain's base.
+				for _, so := range sOrigins {
+					addCand(so)
+				}
+			} else {
+				// Unresolved "{}/..." prefix: prioritize bases sharing the script's origin,
+				// then the script's own origin(s) (e.g. window.livewire_app_url == ""), then
+				// remaining in-scope bases.
+				for _, b := range bases {
+					if slices.ContainsFunc(sOrigins, func(so string) bool { return strings.HasPrefix(strings.ToLower(b), so) }) {
+						addCand(b)
+					}
+				}
+				for _, so := range sOrigins {
+					addCand(so)
+				}
+				for _, b := range bases {
+					addCand(b)
+				}
 			}
 		}
 	}
@@ -526,11 +571,11 @@ func draftOf(l line, source string, bases []string, in Inputs) Draft {
 		if sample != "" {
 			target = strings.SplitN(sample, "?", 2)[0]
 		} else {
-			target, filledPath = fillPath(target, l.Path, l.Params)
+			target, filledPath = fillPathWithLangs(target, l.Path, l.Params, originLangs)
 		}
 	}
 	for i, c := range d.Candidates {
-		d.Candidates[i], filledPath = fillPath(c, l.Path, l.Params)
+		d.Candidates[i], filledPath = fillPathWithLangs(c, l.Path, l.Params, originLangs)
 	}
 	if filledPath {
 		d.Filled = append(d.Filled, "path")
@@ -567,12 +612,16 @@ func draftOf(l line, source string, bases []string, in Inputs) Draft {
 		d.Body = body
 		d.Filled = append(d.Filled, filled...)
 	}
-	// The headers: the client's (intel), then the line's own.
+	// The headers: the client's (intel, scoped to matching script/origin when
+	// provenance is present), then the line's own.
 	have := map[string]bool{}
 	for _, h := range in.Intel.Headers {
 		n := strings.ToLower(h.Name)
 		if have[n] || n == "cookie" || n == "host" || n == "content-length" || n == "content-type" || noRequestHeader(n) {
 			continue // the identity's cookies, the request's own, a response's
+		}
+		if !headerAppliesToDraft(h, l, target, d.Candidates, in.Intel.Headers) {
+			continue
 		}
 		have[n] = true
 		v := h.Value
@@ -696,6 +745,10 @@ func hasNumWord(s string) bool {
 // fillPath puts a sample in each {} of a URL (the base's own {} aside): by
 // the path parameter's name, else by the segment before it.
 func fillPath(target, path string, params []jsapi.ParamSpec) (string, bool) {
+	return fillPathWithLangs(target, path, params, nil)
+}
+
+func fillPathWithLangs(target, path string, params []jsapi.ParamSpec, originLangs map[string]string) (string, bool) {
 	if !strings.Contains(target, "{}") {
 		return target, false
 	}
@@ -707,6 +760,14 @@ func fillPath(target, path string, params []jsapi.ParamSpec) (string, bool) {
 	}
 	scheme, rest, _ := strings.Cut(target, "://")
 	host, p, _ := strings.Cut(rest, "/")
+	orig := strings.ToLower(scheme + "://" + host)
+	langHint := ""
+	if originLangs != nil {
+		langHint = originLangs[orig]
+	}
+	if langHint == "" {
+		langHint = langFromHost(host)
+	}
 	segs := strings.Split(p, "/")
 	slot := 0
 	for i, sg := range segs {
@@ -715,7 +776,7 @@ func fillPath(target, path string, params []jsapi.ParamSpec) (string, bool) {
 			if i > 0 {
 				prev = segs[i-1]
 			}
-			sg = strings.Replace(sg, "{}", sampleFor(names[slot], prev), 1)
+			sg = strings.Replace(sg, "{}", sampleForWithLang(names[slot], prev, langHint), 1)
 			slot++
 		}
 		segs[i] = sg
@@ -726,6 +787,16 @@ func fillPath(target, path string, params []jsapi.ParamSpec) (string, bool) {
 // sampleFor is a value for a path's part: a UUID for an id (and for a
 // resource's item, /tenants/{}), a word for a slug, a number for a page.
 func sampleFor(name, prev string) string {
+	return sampleForWithLang(name, prev, "")
+}
+
+func sampleForWithLang(name, prev, langHint string) string {
+	if isLangParamName(name) {
+		if langHint != "" {
+			return langHint
+		}
+		return "en"
+	}
 	switch {
 	case name != "" && idNameRe.MatchString(name):
 		return sampleUUID
@@ -737,6 +808,89 @@ func sampleFor(name, prev string) string {
 		return sampleUUID // /tenants/{}: an item of a collection
 	}
 	return "1"
+}
+
+func isLangParamName(name string) bool {
+	if name == "" {
+		return false
+	}
+	l := strings.ToLower(name)
+	switch l {
+	case "lang", "locale", "language", "currentlanguage", "current_language",
+		"sitelang", "site_lang", "langcode", "lang_code", "dil":
+		return true
+	}
+	ws := splitWords(name)
+	return len(ws) > 0 && (ws[len(ws)-1] == "language" || ws[len(ws)-1] == "locale" || ws[len(ws)-1] == "lang")
+}
+
+var (
+	knownLangSegs = map[string]bool{
+		"tr": true, "en": true, "vi": true, "de": true, "fr": true, "es": true,
+		"it": true, "pt": true, "ru": true, "nl": true, "pl": true, "ja": true,
+		"ko": true, "zh": true, "ar": true, "id": true, "th": true, "uk": true,
+		"cs": true, "sv": true, "da": true, "fi": true, "no": true, "el": true,
+		"ro": true, "hu": true, "az": true,
+	}
+	ccTLDLangs = map[string]string{
+		"tr": "tr", "vn": "vi", "de": "de", "fr": "fr", "es": "es", "it": "it",
+		"pt": "pt", "br": "pt", "ru": "ru", "nl": "nl", "pl": "pl", "jp": "ja",
+		"kr": "ko", "cn": "zh", "tw": "zh", "ua": "uk", "cz": "cs", "se": "sv",
+		"dk": "da", "fi": "fi", "no": "no", "gr": "el", "ro": "ro", "hu": "hu",
+		"az": "az", "id": "id", "th": "th",
+	}
+)
+
+// inferOriginLanguages inspects concrete paths in the catalog (e.g.
+// "/tr/api/desteklenen-platformlar" on "https://1004.tubitak.gov.tr") so
+// parameterized sibling routes ("/{}/api/duyurular") pick the exact language
+// prefix active on that origin.
+func inferOriginLanguages(cat []endpoints.Endpoint) map[string]string {
+	counts := map[string]map[string]int{}
+	for _, e := range cat {
+		orig := strings.ToLower(strings.TrimRight(e.Origin, "/"))
+		if orig == "" && e.Host != "" && !strings.Contains(e.Host, "{") {
+			orig = strings.ToLower(hostOriginOf(e.Host))
+		}
+		if orig == "" {
+			continue
+		}
+		segs := strings.Split(strings.Trim(e.Path, "/"), "/")
+		if len(segs) >= 2 && knownLangSegs[strings.ToLower(segs[0])] {
+			seg := strings.ToLower(segs[0])
+			if counts[orig] == nil {
+				counts[orig] = map[string]int{}
+			}
+			counts[orig][seg]++
+		}
+	}
+	out := make(map[string]string, len(counts))
+	for orig, m := range counts {
+		best, bestN := "", 0
+		for seg, n := range m {
+			if n > bestN || (n == bestN && (best == "" || seg < best)) {
+				best, bestN = seg, n
+			}
+		}
+		if best != "" {
+			out[orig] = best
+		}
+	}
+	return out
+}
+
+func langFromHost(host string) string {
+	h, _, err := strings.Cut(host, ":")
+	if err {
+		host = h
+	}
+	host = strings.ToLower(strings.Trim(host, "."))
+	if idx := strings.LastIndexByte(host, '.'); idx >= 0 {
+		if lang := ccTLDLangs[host[idx+1:]]; lang != "" {
+			return lang
+		}
+	}
+	return ""
 }
 
 // valueOf is a parameter's value: the code's own when there is one (fixed),
@@ -862,6 +1016,95 @@ func withQuery(target string, q map[string]string) string {
 		sep = "&"
 	}
 	return target + sep + v.Encode()
+}
+
+func allScriptOrigins(srcs []endpoints.Source, inScope func(string) bool) []string {
+	var out []string
+	for _, s := range srcs {
+		u, err := url.Parse(s.Script)
+		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+			continue
+		}
+		h := strings.ToLower(u.Hostname())
+		if inScope != nil && !inScope(h) || strings.HasPrefix(h, "cdn.") || strings.HasPrefix(h, "static.") || strings.HasPrefix(h, "assets.") {
+			continue
+		}
+		o := strings.ToLower(u.Scheme + "://" + u.Host)
+		if !slices.Contains(out, o) {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
+func draftOriginOf(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return ""
+	}
+	return strings.ToLower(u.Scheme + "://" + u.Host)
+}
+
+// headerAppliesToDraft scopes intel.Headers to drafts sharing either a
+// producing script SHA256 (covering cross-origin SPA -> API gateway calls) or
+// an origin with the header's sources, preventing cross-subdomain header bleed
+// in multi-subdomain (-scope rdn) scans.
+func headerAppliesToDraft(h endpoints.IntelHeader, l line, target string, cands []string, all []endpoints.IntelHeader) bool {
+	if len(h.Sources) == 0 {
+		return true
+	}
+	if slices.ContainsFunc(l.Headers, func(lh string) bool { return strings.EqualFold(lh, h.Name) }) {
+		return true
+	}
+	shas := map[string]bool{}
+	origins := map[string]bool{}
+	for _, s := range l.Static {
+		if s.SHA256 != "" {
+			shas[s.SHA256] = true
+		}
+		if o := draftOriginOf(s.Script); o != "" {
+			origins[o] = true
+		}
+	}
+	if o := draftOriginOf(l.Origin); o != "" {
+		origins[o] = true
+	}
+	if o := draftOriginOf(target); o != "" {
+		origins[o] = true
+	}
+	for _, c := range cands {
+		if o := draftOriginOf(c); o != "" {
+			origins[o] = true
+		}
+	}
+	if len(shas) == 0 && len(origins) == 0 {
+		return true
+	}
+	for _, src := range h.Sources {
+		if src.SHA256 != "" && shas[src.SHA256] {
+			return true
+		}
+		if o := draftOriginOf(src.Script); o != "" && origins[o] {
+			return true
+		}
+	}
+	// If the draft has no script provenance of its own (e.g. observed/OpenAPI
+	// on api.example.com while the SPA ran on a single origin app.example.com),
+	// keep headers when all Intel headers come from one single origin.
+	if len(l.Static) == 0 {
+		headerOrigins := map[string]bool{}
+		for _, ih := range all {
+			for _, src := range ih.Sources {
+				if o := draftOriginOf(src.Script); o != "" {
+					headerOrigins[o] = true
+				}
+			}
+		}
+		if len(headerOrigins) <= 1 {
+			return true
+		}
+	}
+	return false
 }
 
 // scriptOrigin is the one in-scope origin the sources' scripts come from

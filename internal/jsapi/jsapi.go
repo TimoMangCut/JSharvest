@@ -22,7 +22,7 @@ import (
 
 // Version changes when what Extract finds changes, so that cached results
 // are made again.
-const Version = 39
+const Version = 40
 
 // Endpoint is one call to a URL that a script makes.
 type Endpoint struct {
@@ -305,10 +305,24 @@ func keyValue(v string) bool {
 }
 
 func (x *extractor) key(name, value string, line int) {
-	if name == "" || !keyName(name) || !keyValue(value) {
+	if name == "" || !keyName(name) || !keyValue(value) || strings.EqualFold(sepCutter.Replace(name), sepCutter.Replace(value)) {
 		return
 	}
 	x.recordKey(name, value, line)
+}
+
+func (x *extractor) keyExpr(name string, val js.IExpr) {
+	v, ok := literalString(val)
+	if !ok {
+		return
+	}
+	line := 0
+	if l, ok := ungroup(val).(*js.LiteralExpr); ok && len(l.Data) > 2 {
+		if i := bytes.Index(x.src, l.Data); i >= 0 {
+			line, _ = x.mappedLineCol(i)
+		}
+	}
+	x.key(name, v, line)
 }
 
 func (x *extractor) recordKey(name, value string, line int) {
@@ -645,6 +659,10 @@ type extractor struct {
 	omitted         map[*js.Var]bool
 	supplied        map[*js.Var]bool
 	viaCalls        map[*js.CallExpr]bool
+	wpModExports    map[string]map[string]js.IExpr
+	wpModDefault    map[string]js.IExpr
+	wpReqVars       map[*js.Var]bool
+	jsonObjs        map[*js.CallExpr]*js.ObjectExpr
 }
 
 // newExtractor is an extractor for a script, its tables empty.
@@ -656,6 +674,7 @@ func newExtractor(src, origSrc []byte, lm *esbuildLineMap, nested bool) *extract
 		thisProps: map[string][]js.IExpr{}, baseCands: map[string]bool{}, cloud: map[string]bool{}, concats: map[*js.CallExpr]bool{},
 		args: map[*js.Var]js.IExpr{}, routeCalls: map[*js.CallExpr]bool{}, routeObjs: map[*js.ObjectExpr]bool{}, routeMap: map[string]*RouteEntry{}, keysSeen: map[string]bool{}, secretVals: map[string]bool{},
 		clientPre: map[*js.Var][]string{}, factoryCalls: map[*js.CallExpr]bool{}, noArgs: map[*js.Var][]string{}, qparams: map[*js.Var]int{}, ownPre: map[string]bool{}, basedPre: map[string]bool{}, docVars: map[string][]string{}, docDev: map[string][]string{}, methodDefs: map[string][]methodDef{}, paramOf: map[*js.Var]paramPlace{}, callsTo: map[*js.Var][]*js.CallExpr{}, destructFrom: map[*js.Var]js.IExpr{}, sse: map[*js.Var]int{}, hasSSE: bytes.Contains(src, []byte("text/event-stream")), fromMemo: map[[2]any][]string{}, givenMemo: map[*js.DotExpr]js.IExpr{}, methodMemo: map[methodKey]js.IExpr{}, ownerOf: map[js.INode]js.INode{}, objParent: map[*js.ObjectExpr]*js.ObjectExpr{}, objKey: map[*js.ObjectExpr]string{}, named: map[string][]js.IExpr{}, madeBy: map[*js.ObjectExpr]*js.Var{}, classOf: map[*js.ClassDecl]*js.Var{}, msums: map[js.IExpr]*summary{}, apiBuilders: map[*js.Var]bool{}, producers: map[string][]js.INode{}, inst: map[*js.CallExpr][]string{}, maker: map[*js.CallExpr]bool{}, factories: map[*js.Var]*Factory{}, tailQuery: map[*js.CallExpr][]string{}, propOf: map[*js.Var]string{}, clients: map[*js.Var]bool{}, qset: map[*js.Var][]string{}, settings: map[string]bool{}, propBases: map[string]bool{}, segProps: map[string][]js.IExpr{}, joinedSeg: map[string]bool{}, esImports: map[*js.Var][2]string{}, esNSImports: map[*js.Var]string{}, awaited: map[*js.CallExpr]bool{}, enumProps: map[*js.Var]map[string]js.IExpr{}, enumParamTarget: map[*js.Var]*js.Var{}, omitted: map[*js.Var]bool{}, supplied: map[*js.Var]bool{}, viaCalls: map[*js.CallExpr]bool{},
+		wpModExports: map[string]map[string]js.IExpr{}, wpModDefault: map[string]js.IExpr{}, wpReqVars: map[*js.Var]bool{}, jsonObjs: map[*js.CallExpr]*js.ObjectExpr{},
 		classes: map[*js.ClassDecl]*classInfo{}, classByVar: map[*js.Var]*js.ClassDecl{}, subclasses: map[*js.ClassDecl][]*js.ClassDecl{}, privOwner: map[*js.Var]*js.ClassDecl{}, newSites: map[*js.ClassDecl][]*js.NewExpr{}, urlSets: map[*js.Var][]urlSet{}, urlPath: map[*js.Var][]string{}, exportVars: map[string]*js.Var{}, reqBases: map[string]bool{}}
 }
 

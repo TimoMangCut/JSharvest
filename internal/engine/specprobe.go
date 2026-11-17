@@ -248,15 +248,19 @@ func (e *engine) specFilesWithHeaders(ctx context.Context, c *crawl, base, page 
 func (e *engine) specFilesPhase2(ctx context.Context, c *crawl, page string) {
 	pol := c.getSpecPolicy(e.cfg)
 	plan := c.specCtx.Plan(c.seedOrigin, e.cfg.InScope)
-	budget := frontier.MaxPhase2SpecProbes
+	var budgetPtr *int
+	if frontier.MaxPhase2SpecProbes > 0 {
+		b := frontier.MaxPhase2SpecProbes
+		budgetPtr = &b
+	}
 	seen := map[string]bool{}
 
 	for _, base := range plan.Bases {
-		if ctx.Err() != nil || budget <= 0 {
+		if ctx.Err() != nil || (budgetPtr != nil && *budgetPtr <= 0) {
 			return
 		}
 		hdrs := c.specCtx.HeadersFor(base, e.cfg.InScope)
-		e.specFilesWithHeaders(ctx, c, base, page, hdrs, seen, &budget)
+		e.specFilesWithHeaders(ctx, c, base, page, hdrs, seen, budgetPtr)
 	}
 
 	type gateState struct {
@@ -267,7 +271,7 @@ func (e *engine) specFilesPhase2(ctx context.Context, c *crawl, page string) {
 	}
 	gates := map[string]*gateState{}
 	for _, svc := range plan.Services {
-		if ctx.Err() != nil || budget <= 0 {
+		if ctx.Err() != nil || (budgetPtr != nil && *budgetPtr <= 0) {
 			return
 		}
 		if pol.Check(svc.PrefixURL+"/") != resolve.Allow {
@@ -290,7 +294,7 @@ func (e *engine) specFilesPhase2(ctx context.Context, c *crawl, page string) {
 			}
 		}
 		for _, p := range frontier.ServiceDocPaths {
-			if ctx.Err() != nil || budget <= 0 || gs.braked {
+			if ctx.Err() != nil || (budgetPtr != nil && *budgetPtr <= 0) || gs.braked {
 				break
 			}
 			targetURL := frontier.JoinSpecBase(svc.PrefixURL, p)
@@ -298,7 +302,9 @@ func (e *engine) specFilesPhase2(ctx context.Context, c *crawl, page string) {
 				continue
 			}
 			seen[targetURL] = true
-			budget--
+			if budgetPtr != nil {
+				*budgetPtr--
+			}
 			r, err := e.specProbeFetch(ctx, c, targetURL, hdrMap)
 			if err == nil && r.Status == 200 && r.Text != "" && !r.Challenge && jsapi.IsOpenAPI([]byte(r.Text)) {
 				key, isNew, perr := e.st.Put(store.Record{Body: []byte(r.Text), URL: targetURL, Kind: "file", Via: "probe",

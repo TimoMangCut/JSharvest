@@ -49,7 +49,7 @@ func archiveRun(ctx context.Context, args []string) (*archive.Summary, error) {
 	live := fs.Bool("live", true, "ask the target whether an old script's URL still serves it (GET, no credentials, only hosts the crawls reached)")
 	liveHosts := fs.String("live-hosts", "", "the hosts (host:port) the live check may ask, comma separated; default: those the crawls reached")
 	liveRate := fs.Float64("live-rate", 2, "live checks per second, at most")
-	maxFiles := fs.Int("max-files", 2000, "old scripts to fetch, at most, newest first")
+	maxFiles := fs.Int("max-files", 0, "old scripts to fetch, at most, newest first (0: all)")
 	maxHTML := fs.Int("max-html", 10, "old pages (text/html captures) to read for the scripts they load, the root first (0: none)")
 	vendor := fs.Bool("vendor", false, "fetch vendor libraries too (jquery, react…)")
 	pageSize := fs.Int("page-size", 5000, "rows of a CDX page")

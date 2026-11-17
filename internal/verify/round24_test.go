@@ -107,7 +107,7 @@ func TestWriteUnverifiedAndParentCanary(t *testing.T) {
 	}
 	defer s.Close()
 
-	rep, err := Run(context.Background(), Options{Target: host, Role: "anon", Drafts: ds, Sender: s, InScope: func(string) bool { return true }})
+	rep, err := Run(context.Background(), Options{Target: host, Role: "anon", Drafts: ds, Sender: s, InScope: func(string) bool { return true }, MaxPrefixes: 12})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -388,7 +388,7 @@ func TestExpressHTML404AndUniformJSON404(t *testing.T) {
 	}
 	defer s.Close()
 
-	rep, err := Run(context.Background(), Options{Target: host, Role: "anon", Drafts: ds, Sender: s, InScope: func(string) bool { return true }})
+	rep, err := Run(context.Background(), Options{Target: host, Role: "anon", Drafts: ds, Sender: s, InScope: func(string) bool { return true }, MaxPrefixes: 12})
 	if err != nil {
 		t.Fatal(err)
 	}

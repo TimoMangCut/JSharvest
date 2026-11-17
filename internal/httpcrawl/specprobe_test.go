@@ -417,12 +417,13 @@ fetch("/v1/skipme");
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	// Top 5 by frequency then lexicographically: zebra (freq 3), then alpha, beta, delta, gamma (omega dropped as #6).
-	want := []string{"zebra", "alpha", "beta", "delta", "gamma"}
+	// Ordered by frequency then lexicographically across all valid services (no hard cap):
+	// zebra (freq 3), then alpha, beta, delta, gamma, omega.
+	want := []string{"zebra", "alpha", "beta", "delta", "gamma", "omega"}
 	if !slices.Equal(probedServices, want) {
-		t.Fatalf("service probe order/cap:\n got  %v\n want %v", probedServices, want)
+		t.Fatalf("service probe order:\n got  %v\n want %v", probedServices, want)
 	}
-	if res.Stats.OpenAPI != 5 {
-		t.Errorf("Stats.OpenAPI = %d, want 5", res.Stats.OpenAPI)
+	if res.Stats.OpenAPI != 6 {
+		t.Errorf("Stats.OpenAPI = %d, want 6", res.Stats.OpenAPI)
 	}
 }

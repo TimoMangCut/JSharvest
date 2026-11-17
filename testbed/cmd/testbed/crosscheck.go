@@ -811,8 +811,9 @@ func crosscheck(args []string) error {
 		nestV["/uniform404/dead"].Verdict == "dead_or_fp", fmt.Sprintf("%+v", nestV["/uniform404/dead"]))
 	check("2. GET /v1/test -> verified_alive",
 		nestV["/v1/test"].Verdict == "verified_alive", fmt.Sprintf("%+v", nestV["/v1/test"]))
-	check("2. /zchat/tools/{} beyond maxPrefixes uses /zchat parent 500 canary -> dead_or_fp",
-		nestV["/zchat/tools/{}"].Verdict == "dead_or_fp" && strings.HasSuffix(nestV["/zchat/tools/{}"].Prefix, "/zchat"),
+	check("2. /zchat/tools/{} beyond 12 prefixes uses /zchat or /zchat/tools 500 canary -> dead_or_fp",
+		nestV["/zchat/tools/{}"].Verdict == "dead_or_fp" &&
+			(strings.HasSuffix(nestV["/zchat/tools/{}"].Prefix, "/zchat") || strings.HasSuffix(nestV["/zchat/tools/{}"].Prefix, "/zchat/tools")),
 		fmt.Sprintf("%+v", nestV["/zchat/tools/{}"]))
 
 	// --- Scenario 3: n8n.jsh.test (ENH-10, P0-1, ENH-12) ---

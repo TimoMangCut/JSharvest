@@ -189,7 +189,7 @@ func RunHTTP(ctx context.Context, cfg Config, ho HTTPOptions) (Record, error) {
 				where = m.ScriptURL + "#inline-map"
 			}
 			n := 0
-			for _, f := range sm.Files() {
+			for _, f := range sm.FilesFor(m.ScriptURL) {
 				if f.Vendor {
 					continue // a dependency's: noise for the target's endpoints
 				}

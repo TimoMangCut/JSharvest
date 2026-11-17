@@ -124,6 +124,7 @@ function load() {
 		"https://admin.example.com/api-gateway/inventory",
 		"https://admin.example.com/api-gateway/reports",
 		"https://admin.example.com/api-gateway/users",
+		"https://admin.example.com/api-gateway/alerts",
 	}
 	if !slices.Equal(prefixes, wantPrefixes) {
 		t.Fatalf("SpecCollector Services = %v, want %v", prefixes, wantPrefixes)

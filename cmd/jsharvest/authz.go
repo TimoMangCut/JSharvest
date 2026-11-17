@@ -43,7 +43,7 @@ func addReplayFlags(fs *flag.FlagSet) replayFlags {
 		readAllow:  fs.String("read-allow", "", "regexp of URLs whose POSTs only read (a search): sent without -allow-write"),
 		allowAuth:  fs.String("allow-auth", "", "regexp of login-flow URLs to send all the same (never sent by default: they may rotate the session)"),
 		rate:       fs.Float64("rate", 2, "requests per second, at most"),
-		max:        fs.Int("max", 300, "requests in all, at most (sources, controls, probes and trials)"),
+		max:        fs.Int("max", 0, "requests in all, at most (0: unlimited; sources, controls, probes and trials)"),
 		proxy:      fs.String("proxy", "", "send through this proxy (Burp, Caido, ZAP), e.g. http://127.0.0.1:8080; default JSHARVEST_PROXY, HTTPS_PROXY, HTTP_PROXY; none: no proxy"),
 		insecure:   fs.Bool("insecure", false, "accept any TLS certificate"),
 		hosts:      fs.String("hosts", "", "the hosts (host:port as recorded) to send to, comma separated; default: those of the requests tried, in scope"),

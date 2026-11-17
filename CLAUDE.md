@@ -24,7 +24,7 @@ output/<target>/<role>/
 
 | Chủ đề | Tài liệu (phần kết luận chốt sau review có hiệu lực cao hơn) |
 |---|---|
-| Hiện hành, cờ mới, backlog | `docs/CURRENT.md` (tổng hợp Đợt 32 `docs/plan-32.md` & Đợt 31 `docs/plan-31.md`) |
+| Hiện hành, cờ mới, backlog | `docs/CURRENT.md` (tổng hợp Đợt 33 `docs/plan-33.md`, Đợt 32 `docs/plan-32.md` & Đợt 31 `docs/plan-31.md`) |
 | Đợt 28–30, BOLA ngang | `docs/plan-28.md`, `docs/plan-28-exec.md` (mục 3–4), `docs/gd7-bola-design.md` (mục 8–9) |
 | Engine HTTP, WAF, OpSec, `jsapi` 13–27F | `docs/gd6-waf-design.md` mục 10–48 (bảng Đợt → mục: `docs/rounds-history.md`) |
 | Replay, Docker, Archive, Monitor, Song song | `docs/gd5-{replay,container,archive,monitor,parallel}-design.md` |
@@ -53,7 +53,7 @@ output/<target>/<role>/
 
 **Output.** Mọi file output `0600`, thư mục `0700`. Thư mục host cổng không mặc định là `host_port` (`scope.TargetDir`; loopback giữ tên trần); `archive` ghi theo hostname và là tên role dành riêng. Mỗi run ghi `scripts:[sha]`; snapshot của `monitor` chỉ lưu run ID. Mã thoát: `0` xong, `1` lỗi, `3` bị chặn, `4` mất session, `5` `monitor -fail-on`, `130` bị ngắt. Không bao giờ commit `output/`, `profiles/`, `bin/`, file log hay ground truth lấy từ mục tiêu thật.
 
-**jsapi.** Đổi kết quả thì tăng `jsapi.Version` (hiện `39`). Khi sửa `internal/jsapi`, so snapshot với HEAD (output chỉ khác ở chỗ định sửa):
+**jsapi.** Đổi kết quả thì tăng `jsapi.Version` (hiện `40`). Khi sửa `internal/jsapi`, so snapshot với HEAD (output chỉ khác ở chỗ định sửa):
 `JSAPI_SNAPSHOT=<file đường dẫn tuyệt đối> go test -v -run TestSnapshot ./internal/jsapi | grep '^SNAP' | md5sum` (cần `-v`; corpus dev `output/_live_25e_max/*/anon/js/*.js`). Kiểm mù chạy **một lần** rồi thành dev (dev hiện có: Keycloak, Appwrite, Medusa, Directus, Jellyfin); tập mới chờ xác nhận trước khi tải. Nhiễu: `JSAPI_STATS=list go test -run TestStats ./internal/jsapi`. Trần cứng: `bin/testbed perfgate` — 2.000 script `≤ 15 s`, RSS đỉnh `≤ 500 MB`.
 
 **Đo và so sánh.** So với katana luôn có cả chế độ standard và luôn chạy `katana ... < /dev/null`. Giả định A1–A4 (`docs/gd4-plan.md`) chưa được xác nhận.

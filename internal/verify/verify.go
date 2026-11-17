@@ -66,6 +66,9 @@ type Options struct {
 	// every route), and the host's other drafts are not sent (round 25I,
 	// N4). 0: never.
 	GateAfter int
+	// MaxPrefixes bounds the gateway prefixes per origin before falling back
+	// to 1-segment parent canaries (0: unlimited — every prefix gets its own canary).
+	MaxPrefixes int
 	// Concurrency: hosts verified at once, each one request at a time
 	// (round 25K); the Sender's -rate stays the ceiling on all. 1 (or
 	// less): one host after another, in the order of probeOrder.
@@ -587,20 +590,25 @@ func (v *verifier) judge(ctx context.Context, r *Result, d Draft, sig Sig, body 
 		// The prefix answers so to any path: its OPTIONS may still tell
 		// the route from none.
 		opt := v.options(ctx, raw, target, d.ID)
-		co := v.canaryOptions(ctx, c)
+		co := v.canaryOptions(ctx, d, c)
 		if opt != nil && co != nil && (opt.Status != co.Status || !strings.EqualFold(opt.Allow, co.Allow)) {
-			r.Verdict, r.Reason = Alive, "behind the prefix's auth wall, its OPTIONS differs from the canary's"
-			if opt.Allow != "" {
-				r.VerifiedMethod = methodFrom(opt.Allow, d.Method)
+			// Defense in depth: if OPTIONS on the endpoint merely echoed the exact same
+			// 401/403 auth-wall signature as GET with no Allow header while the canary redirected,
+			// that is still the auth wall, not proof of the route.
+			if !(Same(*opt, sig) && opt.Allow == "" && co.Status >= 300 && co.Status < 400) {
+				r.Verdict, r.Reason = Alive, "behind the prefix's auth wall, its OPTIONS differs from the canary's"
+				if opt.Allow != "" {
+					r.VerifiedMethod = methodFrom(opt.Allow, d.Method)
+				}
+				return
 			}
-			return
 		}
 		r.Verdict, r.Reason = AuthWall, "the prefix answers "+fmt.Sprint(st)+" to any path: run again with a role that is logged in"
 	case same && r.Sent != d.Method && d.Method != "" && (st == 404 || st == 405) && c.Answer != nil && c.Answer.MethodScoped:
 		// ENH-02: a write endpoint probed via read-only GET on a router that
 		// matches (method, path) (Express HTML or NestJS/Fastify JSON "Cannot GET …", or 405).
 		opt := v.options(ctx, raw, target, d.ID)
-		co := v.canaryOptions(ctx, c)
+		co := v.canaryOptions(ctx, d, c)
 		if opt != nil && co != nil && (opt.Status != co.Status || !strings.EqualFold(opt.Allow, co.Allow)) {
 			r.Verdict, r.Reason = Alive, "OPTIONS differs from the canary's"
 			if opt.Allow != "" {
@@ -689,10 +697,32 @@ func isNumber(s string) bool {
 	return s != ""
 }
 
+// canaryHeaderKey distinguishes canaries on the same prefix whose drafts carry
+// different non-identity request headers (e.g. X-Requested-With: XMLHttpRequest),
+// since gateways often switch between 302 login redirect and 401 JSON on them.
+func canaryHeaderKey(d Draft, bare bool) string {
+	var parts []string
+	for _, h := range d.Headers {
+		if bare && slices.ContainsFunc(d.SampleHeaders, func(n string) bool { return strings.EqualFold(n, h[0]) }) {
+			continue
+		}
+		n := strings.ToLower(strings.TrimSpace(h[0]))
+		if n == "" || n == "user-agent" || n == "accept" || n == "host" || n == "content-type" || n == "content-length" {
+			continue
+		}
+		parts = append(parts, n+":"+h[1])
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, "\n")
+}
+
 // canary is the answer of the target's prefix to a path that cannot exist,
 // asked once.
 func (v *verifier) canary(ctx context.Context, d Draft, target string) *Canary {
-	c, cu, key := v.canaryFor(target)
+	c, cu, key := v.canaryFor(d, target)
 	if cu == "" {
 		return c
 	}
@@ -709,16 +739,24 @@ func (v *verifier) canary(ctx context.Context, d Draft, target string) *Canary {
 // canaryFor is the canary a target is judged against: one already asked
 // (cu ""), or a new one to ask at cu. Under v.mu: the canaries are every
 // host's (verify -concurrency).
-func (v *verifier) canaryFor(target string) (c *Canary, cu, key string) {
+func (v *verifier) canaryFor(d Draft, target string) (c *Canary, cu, key string) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	origin, prefix := GatewayPrefix(target)
 	key = origin + prefix
-	if c := v.canaries[key]; c != nil {
+	hk := canaryHeaderKey(d, v.o.Identity == nil)
+	cacheKey := func(p string) string {
+		if hk == "" {
+			return p
+		}
+		return p + "\x00" + hk
+	}
+	if c := v.canaries[cacheKey(key)]; c != nil {
 		c.Drafts++
 		return c, "", key
 	}
-	if v.perOrigin[origin] >= maxPrefixes && prefix != "/" {
+	limit := v.o.MaxPrefixes
+	if limit > 0 && v.perOrigin[origin] >= limit && prefix != "/" {
 		// ENH-13: fall back to the 1-segment parent (/chat of /chat/tools)
 		// before falling all the way back to origin root /. The parent is
 		// asked when no canary has it yet, within a budget of its own: a
@@ -728,11 +766,11 @@ func (v *verifier) canaryFor(target string) (c *Canary, cu, key string) {
 		fellBack := false
 		if rest := strings.TrimPrefix(prefix, "/"); strings.Contains(rest, "/") {
 			seg, _, _ := strings.Cut(rest, "/")
-			if c := v.canaries[origin+"/"+seg]; c != nil {
+			if c := v.canaries[cacheKey(origin+"/"+seg)]; c != nil {
 				c.Drafts++
 				return c, "", key
 			}
-			if v.parents[origin] < maxPrefixes {
+			if v.parents[origin] < limit {
 				v.parents[origin]++
 				prefix, key, fellBack = "/"+seg, origin+"/"+seg, true
 			}
@@ -740,7 +778,7 @@ func (v *verifier) canaryFor(target string) (c *Canary, cu, key string) {
 		if !fellBack {
 			prefix = "/"
 			key = origin + prefix
-			if c := v.canaries[key]; c != nil {
+			if c := v.canaries[cacheKey(key)]; c != nil {
 				c.Drafts++
 				return c, "", key
 			}
@@ -749,7 +787,7 @@ func (v *verifier) canaryFor(target string) (c *Canary, cu, key string) {
 	v.perOrigin[origin]++
 	cu = strings.TrimRight(origin+prefix, "/") + "/" + marker.Slug()
 	c = &Canary{Prefix: key, URL: cu, Drafts: 1}
-	v.canaries[key] = c
+	v.canaries[cacheKey(key)] = c
 	return c, cu, key
 }
 
@@ -794,12 +832,12 @@ func (v *verifier) options(ctx context.Context, raw []byte, target, item string)
 	return &s
 }
 
-func (v *verifier) canaryOptions(ctx context.Context, c *Canary) *Sig {
+func (v *verifier) canaryOptions(ctx context.Context, d Draft, c *Canary) *Sig {
 	if c.Options != nil || c.Err != "" {
 		return c.Options
 	}
-	cd := Draft{ID: "canary", Method: "GET"}
-	raw, err := cd.Raw(c.URL)
+	cd := Draft{ID: "canary", Method: "GET", Headers: d.Headers, SampleHeaders: d.SampleHeaders}
+	raw, err := cd.raw(c.URL, v.o.Identity == nil)
 	if err != nil {
 		return nil
 	}
