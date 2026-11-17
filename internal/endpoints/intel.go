@@ -10,6 +10,8 @@ import (
 	"slices"
 	"sort"
 	"strings"
+
+	"github.com/TimoMangCut/JSharvest/internal/jsapi"
 )
 
 // IntelFile is what the code tells besides its endpoints: the headers its
@@ -25,9 +27,10 @@ type Intel struct {
 	Cloud   []IntelURL    `json:"cloud,omitempty"`
 	// Keys are the settings the code names that are keys, ids or secrets
 	// (a Firebase apiKey, a client_id), with their value.
-	Keys        []IntelHeader `json:"keys,omitempty"`
-	Routes      []IntelRoute  `json:"routes,omitempty"`
-	ClientAuthz *ClientAuthz  `json:"client_authz,omitempty"`
+	Keys        []IntelHeader      `json:"keys,omitempty"`
+	Routes      []IntelRoute       `json:"routes,omitempty"`
+	GraphQLDocs []jsapi.GraphQLDoc `json:"graphql_docs,omitempty"`
+	ClientAuthz *ClientAuthz       `json:"client_authz,omitempty"`
 	// ServerHints and SecurityNotes are read from the answers the crawls
 	// got (requests.jsonl), passively: what the servers run, what of their
 	// configuration is worth a look.
@@ -146,6 +149,7 @@ func BuildIntel(scripts []Script, inScope func(host string) bool) Intel {
 			script = s.URLs[0]
 		}
 		in.Bases = append(in.Bases, s.Bases...)
+		in.GraphQLDocs = mergeGQLDocs(in.GraphQLDocs, s.GraphQLDocs)
 		for _, h := range s.ClientHeaders {
 			k := [2]string{h.Name, h.Value}
 			ih := headers[k]
@@ -263,7 +267,7 @@ func SaveIntel(dir string, inScope func(host string) bool, redact func(name, val
 		}
 	}
 	path := filepath.Join(dir, IntelFile)
-	if len(in.Bases) == 0 && len(in.Headers) == 0 && len(in.Cloud) == 0 && len(in.Keys) == 0 && len(in.Routes) == 0 && in.ClientAuthz == nil && len(in.ServerHints) == 0 && len(in.SecurityNotes) == 0 && len(in.AuthFlows) == 0 {
+	if len(in.Bases) == 0 && len(in.Headers) == 0 && len(in.Cloud) == 0 && len(in.Keys) == 0 && len(in.Routes) == 0 && len(in.GraphQLDocs) == 0 && in.ClientAuthz == nil && len(in.ServerHints) == 0 && len(in.SecurityNotes) == 0 && len(in.AuthFlows) == 0 {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return in, err
 		}

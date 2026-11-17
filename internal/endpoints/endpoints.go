@@ -374,14 +374,15 @@ type Endpoint struct {
 	Host string `json:"host,omitempty"`
 	// Path is a template: {} for what the code computes, {id} and the like
 	// for what the traffic shows varies.
-	Path       string   `json:"path"`
-	Status     string   `json:"status"`
-	Kind       string   `json:"kind"`
-	Query      []string `json:"query,omitempty"`
-	Body       []string `json:"body,omitempty"`
-	Headers    []string `json:"headers,omitempty"`
-	Auth       []string `json:"auth,omitempty"`
-	Operations []string `json:"operations,omitempty"`
+	Path        string             `json:"path"`
+	Status      string             `json:"status"`
+	Kind        string             `json:"kind"`
+	Query       []string           `json:"query,omitempty"`
+	Body        []string           `json:"body,omitempty"`
+	Headers     []string           `json:"headers,omitempty"`
+	Auth        []string           `json:"auth,omitempty"`
+	Operations  []string           `json:"operations,omitempty"`
+	GraphQLDocs []jsapi.GraphQLDoc `json:"graphql_docs,omitempty"`
 	// Base is the prefix a client adds to Path (its baseURL), when the
 	// traffic confirmed it; Bases are the candidates the code names.
 	Base  string   `json:"base,omitempty"`
@@ -940,6 +941,7 @@ func Build(scripts []Script, reqs []Request, inScope func(host string) bool) []E
 		}
 	}
 
+	attachGraphQLDocs(scripts, eps, inScope)
 	out := make([]Endpoint, 0, len(eps))
 	for _, ep := range eps {
 		ep.Query, ep.Body, ep.Headers, ep.Auth, ep.Operations = uniq(ep.Query), uniq(ep.Body), uniq(ep.Headers), uniq(ep.Auth), uniq(ep.Operations)
@@ -2767,6 +2769,7 @@ func canonicalMerge(eps []*Endpoint) []*Endpoint {
 			best.Headers = append(best.Headers, ep.Headers...)
 			best.Auth = append(best.Auth, ep.Auth...)
 			best.Operations = append(best.Operations, ep.Operations...)
+			best.GraphQLDocs = mergeGQLDocs(best.GraphQLDocs, ep.GraphQLDocs)
 			best.Params = jsapi.MergeParams(best.Params, ep.Params)
 			for _, src := range ep.Static {
 				if len(best.Static) < maxSources {
@@ -2932,6 +2935,84 @@ func siblingBases(byKey map[string]*Endpoint) {
 		pf := prefix(ep.Path)
 		if b := uniq(bases[pf]); pf != "" && count[pf] >= 2 && len(b) == 1 {
 			ep.Bases = b
+		}
+	}
+}
+
+var gqlEndpointPathRe = regexp.MustCompile(`(?i)(?:^|/)(?:graphql|gql)/?$`)
+
+func isGraphQLPath(p string) bool {
+	p, _, _ = strings.Cut(p, "?")
+	return gqlEndpointPathRe.MatchString(p)
+}
+
+func mergeGQLDocs(a, b []jsapi.GraphQLDoc) []jsapi.GraphQLDoc {
+	if len(b) == 0 {
+		return a
+	}
+	seen := make(map[string]bool, len(a)+len(b))
+	out := make([]jsapi.GraphQLDoc, 0, len(a)+len(b))
+	for _, d := range a {
+		k := d.Kind + " " + d.Name
+		if !seen[k] {
+			seen[k] = true
+			out = append(out, d)
+		}
+	}
+	for _, d := range b {
+		k := d.Kind + " " + d.Name
+		if !seen[k] {
+			seen[k] = true
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+func attachGraphQLDocs(scripts []Script, eps []*Endpoint, inScope func(host string) bool) {
+	byOrigin := map[string][]jsapi.GraphQLDoc{}
+	var all []jsapi.GraphQLDoc
+	byName := map[string]jsapi.GraphQLDoc{}
+	for _, s := range scripts {
+		if isTrackerScript(s) || len(s.GraphQLDocs) == 0 {
+			continue
+		}
+		all = mergeGQLDocs(all, s.GraphQLDocs)
+		for _, d := range s.GraphQLDocs {
+			if _, exists := byName[d.Name]; !exists {
+				byName[d.Name] = d
+			}
+		}
+		if len(s.URLs) == 0 {
+			byOrigin[""] = mergeGQLDocs(byOrigin[""], s.GraphQLDocs)
+			continue
+		}
+		for _, u := range s.URLs {
+			o := originOf(u)
+			byOrigin[o] = mergeGQLDocs(byOrigin[o], s.GraphQLDocs)
+		}
+	}
+	if len(all) == 0 {
+		return
+	}
+	for _, ep := range eps {
+		if ep.Method == "POST" && isGraphQLPath(ep.Path) {
+			so := pageOrigin(ep, inScope)
+			cands := byOrigin[so]
+			if len(cands) == 0 && (so == "" || len(byOrigin) == 1) {
+				cands = all
+			}
+			for _, d := range cands {
+				ep.Operations = append(ep.Operations, d.Kind+" "+d.Name)
+			}
+			ep.GraphQLDocs = mergeGQLDocs(ep.GraphQLDocs, cands)
+		}
+		for _, op := range ep.Operations {
+			if f := strings.Fields(op); len(f) > 0 {
+				if d, ok := byName[f[len(f)-1]]; ok {
+					ep.GraphQLDocs = mergeGQLDocs(ep.GraphQLDocs, []jsapi.GraphQLDoc{d})
+				}
+			}
 		}
 	}
 }

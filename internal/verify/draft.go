@@ -65,11 +65,74 @@ type Draft struct {
 	// Operation is the GraphQL operation or RPC action ("op=Name") of a
 	// draft made for one of the many an endpoint serves: one draft each.
 	Operation string `json:"operation,omitempty"`
+	// GraphQLWrite marks a draft synthesized from a static GraphQL mutation or
+	// subscription so verify skips it unless -allow-write is set.
+	GraphQLWrite bool `json:"graphql_write,omitempty"`
 }
 
 // Raw is the draft as an HTTP/1.1 request (origin-form, Host first, CRLF),
 // for url (its URL, or a candidate); http.ReadRequest reads it.
 func (d Draft) Raw(target string) ([]byte, error) { return d.raw(target, false) }
+
+func applyGraphQLDoc(d *Draft, gd jsapi.GraphQLDoc) {
+	if d.Method == "" {
+		d.Method = "POST"
+	}
+	vars := make(map[string]any, len(gd.Vars))
+	for _, v := range gd.Vars {
+		vars[v.Name] = sampleGQLVar(v.Name, v.Type)
+	}
+	payload := map[string]any{
+		"operationName": gd.Name,
+		"query":         gd.Query,
+		"variables":     vars,
+	}
+	if b, err := json.Marshal(payload); err == nil {
+		d.Body = b
+	}
+	if len(gd.Vars) > 0 {
+		d.Filled = slices.Clone(d.Filled)
+		if !slices.Contains(d.Filled, "body.variables") {
+			d.Filled = append(d.Filled, "body.variables")
+		}
+		if d.Tier == Ready {
+			d.Tier = Parameterized
+		}
+	}
+	if gd.Kind == "mutation" || gd.Kind == "subscription" {
+		d.GraphQLWrite = true
+	}
+}
+
+func sampleGQLVar(name, typ string) any {
+	clean := strings.TrimSuffix(strings.TrimSpace(typ), "!")
+	if strings.HasPrefix(clean, "[") && strings.HasSuffix(clean, "]") {
+		return []any{}
+	}
+	switch clean {
+	case "Int":
+		return 1
+	case "Float":
+		return 1.0
+	case "Boolean":
+		return false
+	case "ID":
+		if strings.Contains(strings.ToLower(name), "uuid") || strings.Contains(strings.ToLower(name), "guid") {
+			return sampleUUID
+		}
+		return "1"
+	}
+	ln := strings.ToLower(name)
+	switch {
+	case strings.Contains(ln, "uuid") || strings.Contains(ln, "guid"):
+		return sampleUUID
+	case strings.HasSuffix(ln, "id"):
+		return "1"
+	case strings.Contains(ln, "date") || strings.Contains(strings.ToLower(clean), "date") || strings.Contains(strings.ToLower(clean), "time"):
+		return "2026-01-01T00:00:00Z"
+	}
+	return "sample"
+}
 
 // raw writes it; bare leaves the sample headers out.
 func (d Draft) raw(target string, bare bool) ([]byte, error) {
@@ -169,8 +232,18 @@ func Drafts(in Inputs) []Draft {
 		out = append(out, d)
 	}
 	bases := candidateBases(in)
+	intelDocs := map[string]jsapi.GraphQLDoc{}
+	for _, gd := range in.Intel.GraphQLDocs {
+		if _, exists := intelDocs[gd.Name]; !exists {
+			intelDocs[gd.Name] = gd
+		}
+	}
 	for _, e := range in.Catalog {
 		d := draftOf(lineOf(e, in.InScope, in.Intel), "catalog", bases, in)
+		epDocs := map[string]jsapi.GraphQLDoc{}
+		for _, gd := range e.GraphQLDocs {
+			epDocs[gd.Name] = gd
+		}
 		// An endpoint of many operations (a GraphQL batch's, an RPC's):
 		// a draft for each, or the dedup key would merge them.
 		var ops []string
@@ -209,6 +282,14 @@ func Drafts(in Inputs) []Draft {
 				})
 				if cp.Tier == Parameterized && len(cp.Filled) == 0 {
 					cp.Tier = Ready
+				}
+			} else if opName, ok := strings.CutPrefix(o, "op="); ok {
+				gd, hasDoc := epDocs[opName]
+				if !hasDoc {
+					gd, hasDoc = intelDocs[opName]
+				}
+				if hasDoc && gd.Query != "" {
+					applyGraphQLDoc(&cp, gd)
 				}
 			}
 			add(cp)

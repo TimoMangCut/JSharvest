@@ -116,6 +116,7 @@ type Result struct {
 	// Factories are the client factories exports call, or this script
 	// gives a setting's base.
 	Factories     []Factory    `json:"factories,omitempty"`
+	GraphQLDocs   []GraphQLDoc `json:"graphql_docs,omitempty"`
 	ClientAuthz   *ClientAuthz `json:"client_authz,omitempty"`
 	ASTLowered    bool         `json:"ast_lowered,omitempty"`
 	LooseFallback bool         `json:"loose_fallback,omitempty"`
@@ -272,6 +273,7 @@ func extractWithMap(src, origSrc []byte, lm *esbuildLineMap, nested bool) (res R
 	x.cursor = 0
 	js.Walk(stringVisitor{x: x}, ast)
 	res = x.result()
+	res.GraphQLDocs = extractGraphQLDocs(ast, x)
 	res.ClientAuthz = extractClientAuthz(ast, x)
 	return res
 }
@@ -582,30 +584,30 @@ type extractor struct {
 	objKey    map[*js.ObjectExpr]string
 	// fnStack are the functions around the call being read (callVisitor),
 	// or the method being summarized: what this is in this.x(…).
-	fnStack     []js.INode
-	docVars     map[string][]string
-	named       map[string][]js.IExpr
-	madeBy      map[*js.ObjectExpr]*js.Var
-	classOf     map[*js.ClassDecl]*js.Var
+	fnStack []js.INode
+	docVars map[string][]string
+	named   map[string][]js.IExpr
+	madeBy  map[*js.ObjectExpr]*js.Var
+	classOf map[*js.ClassDecl]*js.Var
 	// Round 26A (classes.go): the script's classes, the class each
 	// variable names, the instances made of each, the URL objects whose
 	// parts are set, and while reading: the path of the URL object being
 	// evaluated, the instances being read (innermost last), the class
 	// whose field initialiser the call being read is in.
-	classes    map[*js.ClassDecl]*classInfo
-	classOrder []*js.ClassDecl // the classes in the order the script declares them
-	classByVar map[*js.Var]*js.ClassDecl
-	subclasses map[*js.ClassDecl][]*js.ClassDecl
-	privOwner  map[*js.Var]*js.ClassDecl // the class each #private name is declared in
-	newSites   map[*js.ClassDecl][]*js.NewExpr
-	urlSets    map[*js.Var][]urlSet
-	urlPath    map[*js.Var][]string
-	self       []*js.ClassDecl
-	entryClass *js.ClassDecl
-	thisStack  []js.INode
-	fnBase     int // x.fnStack's length at the call the call pass reads
-	readChain  []*js.CallExpr // the calls in helpers a call read went through
-	usedLog    *[]*js.LiteralExpr // the literals a read marked used, while one is kept
+	classes     map[*js.ClassDecl]*classInfo
+	classOrder  []*js.ClassDecl // the classes in the order the script declares them
+	classByVar  map[*js.Var]*js.ClassDecl
+	subclasses  map[*js.ClassDecl][]*js.ClassDecl
+	privOwner   map[*js.Var]*js.ClassDecl // the class each #private name is declared in
+	newSites    map[*js.ClassDecl][]*js.NewExpr
+	urlSets     map[*js.Var][]urlSet
+	urlPath     map[*js.Var][]string
+	self        []*js.ClassDecl
+	entryClass  *js.ClassDecl
+	thisStack   []js.INode
+	fnBase      int                // x.fnStack's length at the call the call pass reads
+	readChain   []*js.CallExpr     // the calls in helpers a call read went through
+	usedLog     *[]*js.LiteralExpr // the literals a read marked used, while one is kept
 	msums       map[js.IExpr]*summary
 	made        *[]string
 	factories   map[*js.Var]*Factory
@@ -616,7 +618,7 @@ type extractor struct {
 	// ({fetchFn: i = globalThis.fetch} = e: i is fetchFn).
 	propOf map[*js.Var]string
 	// clients are the objects made by a client's constructor or factory.
-	clients   map[*js.Var]bool
+	clients      map[*js.Var]bool
 	exports      []Export
 	imports      []Import
 	reExports    []ReExport

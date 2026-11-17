@@ -80,19 +80,19 @@ type CloudCheck = endpoints.CloudCheck
 
 // Result is what one draft came to.
 type Result struct {
-	ID             string   `json:"id"`
-	Operation      string   `json:"operation,omitempty"`
-	Source         string   `json:"source"`
-	Method         string   `json:"method"`
-	Path           string   `json:"path"`
-	Confidence     string   `json:"confidence,omitempty"`
-	Tier           string   `json:"tier"`
-	Verdict        string   `json:"verdict"`
-	Reason         string   `json:"reason,omitempty"`
-	Sent           string   `json:"sent,omitempty"` // the method sent (GET: a probe of a write)
-	URL            string   `json:"url,omitempty"`
-	Prefix         string   `json:"prefix,omitempty"` // origin + gateway prefix of its canary
-	Answer         *Sig     `json:"answer,omitempty"`
+	ID             string               `json:"id"`
+	Operation      string               `json:"operation,omitempty"`
+	Source         string               `json:"source"`
+	Method         string               `json:"method"`
+	Path           string               `json:"path"`
+	Confidence     string               `json:"confidence,omitempty"`
+	Tier           string               `json:"tier"`
+	Verdict        string               `json:"verdict"`
+	Reason         string               `json:"reason,omitempty"`
+	Sent           string               `json:"sent,omitempty"` // the method sent (GET: a probe of a write)
+	URL            string               `json:"url,omitempty"`
+	Prefix         string               `json:"prefix,omitempty"` // origin + gateway prefix of its canary
+	Answer         *Sig                 `json:"answer,omitempty"`
 	VerifiedBase   string               `json:"verified_base,omitempty"`
 	VerifiedMethod string               `json:"verified_method,omitempty"`
 	ServerMissing  []string             `json:"server_missing_params,omitempty"`
@@ -124,10 +124,10 @@ type Report struct {
 	HostsBlocked map[string]string `json:"hosts_blocked,omitempty"`
 	// HostsGated are the hosts whose probes all answered alike, as their
 	// canaries did: the rest of their drafts were not sent (round 25I).
-	HostsGated map[string]string `json:"hosts_gated,omitempty"`
-	Verdicts   map[string]int    `json:"verdicts"`
-	Tiers      map[string]int    `json:"tiers"`
-	Confidence map[string]int    `json:"confidence"`
+	HostsGated  map[string]string `json:"hosts_gated,omitempty"`
+	Verdicts    map[string]int    `json:"verdicts"`
+	Tiers       map[string]int    `json:"tiers"`
+	Confidence  map[string]int    `json:"confidence"`
 	Canaries    []*Canary         `json:"canaries"`
 	Results     []Result          `json:"results"`
 	CloudChecks []CloudCheck      `json:"cloud_checks,omitempty"`
@@ -418,6 +418,9 @@ func (v *verifier) preSkip(d Draft) string {
 // sent there: the policy's word (never, not read either) or a
 // destructive URL.
 func (v *verifier) sendPlan(d Draft, target string) (method, why string) {
+	if d.GraphQLWrite && !v.o.AllowWrite {
+		return "", "graphql mutation/subscription (use -allow-write to probe)"
+	}
 	method = d.Method
 	if method == "" {
 		method = "GET" // no method known: a read says whether it is there
@@ -428,7 +431,7 @@ func (v *verifier) sendPlan(d Draft, target string) (method, why string) {
 	switch dec := v.o.Policy.Classify(real, false); {
 	case dec.Kind == replay.Never:
 		return "", "never sent: " + dec.Reason
-	case dec.Kind == replay.Read && (method == "GET" || method == "HEAD"):
+	case dec.Kind == replay.Read && (method == "GET" || method == "HEAD" || dec.Reason == "a GraphQL query"):
 	case v.o.AllowWrite && (dec.Kind == replay.Write || dec.Kind == replay.Read):
 	default:
 		// A write, and no -allow-write (or a destructive one, never): the

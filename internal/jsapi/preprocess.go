@@ -150,6 +150,7 @@ func (out *Result) mergeSpan(r Result) {
 	out.DocProd = append(out.DocProd, r.DocProd...)
 	out.DocDev = append(out.DocDev, r.DocDev...)
 	out.Factories = append(out.Factories, r.Factories...)
+	out.GraphQLDocs = append(out.GraphQLDocs, r.GraphQLDocs...)
 	if r.ClientAuthz != nil {
 		if out.ClientAuthz == nil {
 			out.ClientAuthz = &ClientAuthz{}
