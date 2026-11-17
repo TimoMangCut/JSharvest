@@ -22,7 +22,7 @@ import (
 
 // Version changes when what Extract finds changes, so that cached results
 // are made again.
-const Version = 38
+const Version = 39
 
 // Endpoint is one call to a URL that a script makes.
 type Endpoint struct {

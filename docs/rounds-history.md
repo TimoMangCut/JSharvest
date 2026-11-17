@@ -1,4 +1,4 @@
-# Lịch sử các Giai đoạn và Đợt phát triển (`GĐ1` → `Đợt 31`)
+# Lịch sử các Giai đoạn và Đợt phát triển (`GĐ1` → `Đợt 32`)
 
 Đây là chỉ mục tóm tắt gọn các mốc phát triển. Bản ghi nguyên văn đầy đủ GĐ1 → Đợt 30 lưu tại [rounds-history-full.md](archive/rounds-history-full.md). Khi có xung đột, [CLAUDE.md](../CLAUDE.md) và [CURRENT.md](CURRENT.md) có hiệu lực cao hơn.
 
@@ -26,7 +26,7 @@
 | **Đợt 26A–26H** | `35–42` | v24–v30 | OOP `classes.go`, kiểm mù #1 Keycloak (thành dev), #2 `@appwrite/console` (`1.070/1.098`), #3 `@medusajs/dashboard` (`300/420`), #4 `@directus/app` (`89/136` → `93/136`). |
 | **Đợt 27A–27F** | `43–48` | v31–v35 | Liên kết xuyên script `deferred.go` (`PrepareModule`), `urlreturn.go` (Appwrite `1.087/1.098`), kiểm mù #5 Jellyfin Web 12.4 (`3/364` → `302/364`, thành dev), `descriptor.go`. |
 
-## 3. Các Đợt Gần Nhất (`Đợt 28–31`)
+## 3. Các Đợt Gần Nhất (`Đợt 28–32`)
 
 - **Đợt 28–30 (`2026-11-15 → 16`, [plan-28.md](plan-28.md), [gd7-bola-design.md](gd7-bola-design.md), `jsapi v36`):**
   - Hợp nhất bộ kết luận SFC + mã lỗi số trong body 200 + GraphQL theo từng operation.
@@ -36,3 +36,6 @@
 - **Đợt 31 (`2026-11-16`, `3bb9b78..21c82f0`, [plan-31.md](plan-31.md), `jsapi v37` → `v38`):**
   - **(P0)** Dọn dung lượng repo (`4.1 GB -> 540 MB`), xoá `devtools/worker/`, harness 28B và dead code 0-caller, chuẩn hoá `CLAUDE.md` & `docs/`.
   - **(P1–P3)** Bundler Webpack 3/4/5 + `webpackAsyncContext` + liên kết `runtimeChunk`; router phân cấp (`routes` / `route_entries`); gói `internal/secretsig` + MCP redact; sửa `export -format all` khi thiếu flows; Spec Probe 2 pha + cầu chì `D3` (`-no-spec-probe`); Cloud Storage ACL qua `netsafe` (`-no-cloud-probe`) + bóc tách Pre-Auth SSO `auth_flows`; `client_authz` (CASL/guards/ROLES/RouteMeta) + định trị Terser `+=`/`=` & `.map()` 2 chặng (`endpoints` corpus 2.568 file: `lost: 0`, `Routes: 362 -> 425`, `perfgate`: `5.34–5.55 s` / `254.9–274.7 MB` RSS; `regress.sh`: `24/24 PASS`).
+- **Đợt 32 (`2026-11-17`, [plan-32.md](plan-32.md), `jsapi v38` → `v39`):**
+  - **(P1 — Hiệu năng, Đồng bộ An toàn & Đa nền tảng):** Xoá double-AST parsing giữa `httpcrawl` và `endpoints.Analyze` qua `ExtractCached` + lọc sớm `Vendor`/`Tracker`/`Infra` ở `Depth == 0`; tách cross-origin Spec Probe trong `-engine cdp` qua `netsafe`, kích cầu chì `D3` trên `neterr`, gom `resolve.Policy` và mở rộng `nonAPIInfraDomains`; thay đệ quy `QueryUnescape` bằng vòng lặp phẳng tối đa 2 lớp trong `reflector.hit`; đồng bộ `resolve.Policy` với `netsafe`; lọc sớm `direction`/`role` cho MCP `get_authz` + khoá `user`/`user_created` trong `privateMarker`; đồng bộ macOS native (`uahints`, `Setpgid`, `perfgate` RSS).
+  - **(P3–P4 — Giao thức Web Hiện đại):** Bổ sung hỗ trợ tĩnh & động cho **Next.js Server Actions** (`Next-Action` / `$ACTION_ID_<hex>` + giải mã RSC Flight), **tRPC `v10`/`v11`** (proxy chains + tách lô `?batch=1` + span JSON trong query URL-encoded), **GraphQL Tagged Templates** (`gql` / `graphql()` / `Document` -> tổng hợp thân JSON cho `verify`, tự bỏ qua `mutation`/`subscription` khi thiếu `-allow-write`), và **ConnectRPC / gRPC-Web** (service/method descriptors + bảo vệ đường dẫn `/<pkg.Service>/<Method>` + khoá không `Patch` khung nhị phân 5-byte proto).
