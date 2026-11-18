@@ -1472,6 +1472,11 @@ func (x *extractor) memberN(d *js.DotExpr, depth int) (js.IExpr, bool) {
 			return v, true
 		}
 	}
+	if cls := x.classOfExpr(d.X); cls != nil {
+		if v, ok := x.classStaticField(cls, propName(d.Y)); ok {
+			return v, true
+		}
+	}
 	if obj, ok := x.objectN(d.X, depth); ok {
 		if v := x.objectValueSpread(obj, propName(d.Y), depth); v != nil {
 			return v, true

@@ -468,22 +468,8 @@ func runCrawl(args []string) error {
 		SpecProbe:     *probe && !*noSpecProbe,
 		NoSpecProbe:   *noSpecProbe,
 	}
-	switch {
-	case *tabs < 1:
-		return errors.New("crawl: -tabs must be 1 or more")
-	case *tabs > 1 && *urlsFile == "" && *depth == 0 && !*exploreOn:
-		return errors.New("crawl: -tabs works with -urls, or with -depth or -explore (a crawl of the site in several tabs)")
-	case *tabs > 1 && *attach != "":
-		return errors.New("crawl: -tabs cannot be used with -attach: the browser is the user's")
-	}
-	cfg.Tabs = *tabs
-	cfg.Logins = logins
-	if *guardMode == "auto" && len(logins) > 0 && !cfg.Guard {
-		// A list's saved logins are found after -guard auto was read: a
-		// logged-in session is where a stray write costs something.
-		cfg.Guard = true
-		slog.Info("guard on: the URLs run with a saved login")
-	}
+	given := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
 	// The engine: before a login, the target's JavaScript is static files,
 	// which plain HTTP gets fast and without a browser's marks; after one,
 	// or to act on the page, Chrome.
@@ -500,16 +486,43 @@ func runCrawl(args []string) error {
 	default:
 		return fmt.Errorf("-engine: want auto, http or cdp, got %q", *engineMode)
 	}
+	if *engineMode == "http" && !given["depth"] && *urlsFile == "" {
+		// Before a login the pages are cheap to read without a browser:
+		// the site, not its first page, unless -depth says otherwise.
+		cfg.Depth = httpDepth
+	}
+	switch {
+	case *tabs < 1:
+		return errors.New("crawl: -tabs must be 1 or more")
+	case *tabs > 1 && *urlsFile == "" && cfg.Depth == 0 && !*exploreOn:
+		return errors.New("crawl: -tabs works with -urls, or with -depth or -explore (a crawl of the site in several tabs)")
+	case *tabs > 1 && *attach != "":
+		return errors.New("crawl: -tabs cannot be used with -attach: the browser is the user's")
+	}
+	cfg.Tabs = *tabs
+	cfg.Logins = logins
+	if *guardMode == "auto" && len(logins) > 0 && !cfg.Guard {
+		// A list's saved logins are found after -guard auto was read: a
+		// logged-in session is where a stray write costs something.
+		cfg.Guard = true
+		slog.Info("guard on: the URLs run with a saved login")
+	}
 	if *engineMode == "http" {
 		slog.Info("engine: http (no browser); -engine cdp for the page's runtime (events, workers, eval, flows)")
-		ho := engine.HTTPOptions{Rate: *httpRate, Probe: *probe, NoSpecProbe: *noSpecProbe, SourceMaps: *sourceMaps, GuessMaps: *sourceMapGuess}
-		given := map[string]bool{}
-		fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
 		if !given["depth"] && *urlsFile == "" {
-			// Before a login the pages are cheap to read without a browser:
-			// the site, not its first page, unless -depth says otherwise.
-			cfg.Depth = httpDepth
 			slog.Info("depth: the http engine follows the site's links", "depth", httpDepth, "max_pages", cfg.MaxPages, "set", "-depth 0 for the one page")
+		}
+		pageWorkers := max(*tabs, 4)
+		if given["tabs"] {
+			pageWorkers = *tabs
+		}
+		var httpPageRate float64
+		if given["page-rate"] {
+			httpPageRate = *pageRate
+		}
+		ho := engine.HTTPOptions{
+			Rate: *httpRate, PageRate: httpPageRate, PageWorkers: pageWorkers,
+			Probe: *probe, NoSpecProbe: *noSpecProbe, SourceMaps: *sourceMaps, GuessMaps: *sourceMapGuess,
 		}
 		var last error
 		archived := map[string]bool{}
@@ -622,7 +635,7 @@ func parseURLList(r io.Reader) ([]*url.URL, error) {
 }
 
 func env(key, def string) string {
-	if v, ok := os.LookupEnv(key); ok {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
 		return v
 	}
 	return def

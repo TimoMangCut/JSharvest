@@ -345,6 +345,17 @@ func parseBuilderExpr(raw, idVar string) *WebpackRuntime {
 			terms = append(terms, builderTerm{kind: kind, idMap: m})
 			continue
 		}
+		if m, fallback, v, ok := parseTernaryMapTerm(p, idVar); ok {
+			if idVar == "" {
+				idVar = v
+			}
+			kind := termDirectMap
+			if fallback {
+				kind = termFallbackMap
+			}
+			terms = append(terms, builderTerm{kind: kind, idMap: m})
+			continue
+		}
 		return nil
 	}
 
@@ -394,7 +405,7 @@ func assembleBuilderTerms(terms []builderTerm) *WebpackRuntime {
 				hasNamePart: true,
 			}
 		}
-		if terms[idx].kind != termDirectMap {
+		if terms[idx].kind != termDirectMap && terms[idx].kind != termFallbackMap {
 			return nil
 		}
 		hashMap := terms[idx].idMap
@@ -425,7 +436,7 @@ func assembleBuilderTerms(terms []builderTerm) *WebpackRuntime {
 				hasNamePart: false,
 			}
 		}
-		if terms[idx].kind != termDirectMap {
+		if terms[idx].kind != termDirectMap && terms[idx].kind != termFallbackMap {
 			return nil
 		}
 		hashMap := terms[idx].idMap
@@ -490,6 +501,49 @@ func matchIDComparison(litSide, varSide, idVar string) (key, outIDVar string, ok
 		return s, varSide, true
 	}
 	return "", idVar, false
+}
+
+func isSafeChunkToken(s string) bool {
+	return len(s) > 0 && len(s) <= 128 && !strings.ContainsAny(s, " \t\r\n?#:<>\"'\\") && !strings.Contains(s, "..")
+}
+
+// parseTernaryMapTerm parses Terser-minified sub-term chunk name/hash ternaries
+// such as `(76 === e ? "common" : e)` or `(13 === e ? "3e204061" : 76 === e ? "eddd5f04" : void 0)`.
+func parseTernaryMapTerm(s, idVar string) (idMap map[string]string, fallback bool, outIDVar string, ok bool) {
+	cur := trimOuterParens(s)
+	out := map[string]string{}
+	for len(out) < 512 {
+		k, val, rest, v, matched := peelLeadingChunkTernary(cur, idVar)
+		if !matched || !isSafeChunkToken(val) {
+			break
+		}
+		idVar = v
+		if _, exists := out[k]; !exists {
+			out[k] = val
+		}
+		cur = trimOuterParens(rest)
+	}
+	if len(out) == 0 {
+		return nil, false, idVar, false
+	}
+	if isValidJSIdent(cur) && (idVar == "" || cur == idVar) {
+		if idVar == "" {
+			idVar = cur
+		}
+		return out, true, idVar, true
+	}
+	if cur == "void 0" || cur == "undefined" || cur == `""` || cur == `''` {
+		return out, false, idVar, true
+	}
+	if m2, fb2, v2, ok2 := parseChunkMapTerm(cur, idVar); ok2 {
+		for k, val := range m2 {
+			if _, exists := out[k]; !exists {
+				out[k] = val
+			}
+		}
+		return out, fb2, v2, true
+	}
+	return nil, false, idVar, false
 }
 
 // parseChunkMapTerm parses `{...}[id]` or `({...}[id] || id)` (with optional

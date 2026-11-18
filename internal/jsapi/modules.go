@@ -2,6 +2,7 @@ package jsapi
 
 import (
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -38,6 +39,7 @@ type Export struct {
 	URLArg      int        `json:"url_arg,omitempty"`
 	URLProp     string     `json:"url_prop,omitempty"`
 	URLPrefix   string     `json:"url_prefix,omitempty"`
+	URLSuffix   string     `json:"url_suffix,omitempty"`
 	ParamMethod bool       `json:"param_method,omitempty"`
 	MethodArg   int        `json:"method_arg,omitempty"`
 	MethodProp  string     `json:"method_prop,omitempty"`
@@ -108,6 +110,9 @@ type Import struct {
 type ImportArg struct {
 	Keys         []string            `json:"keys,omitempty"`
 	Values       []string            `json:"values,omitempty"`
+	RelValues    []string            `json:"rel_values,omitempty"`
+	ConstRef     *ConstRef           `json:"const_ref,omitempty"`
+	ConstSuffix  string              `json:"const_suffix,omitempty"`
 	Query        []string            `json:"query,omitempty"`
 	Setting      string              `json:"setting,omitempty"`
 	BaseKey      string              `json:"base_key,omitempty"`
@@ -117,10 +122,25 @@ type ImportArg struct {
 }
 
 // moduleVisitor finds the exports (M.s([...], id)) and the calls to
-// imported functions ((0, H.name)(…), H = M.i(id)).
-type moduleVisitor struct{ x *extractor }
+// imported functions ((0, H.name)(…), H = M.i(id)) or injected service
+// methods (this.httpClient.get(…)).
+type moduleVisitor struct {
+	x        *extractor
+	clsStack []*js.ClassDecl
+}
 
-func (v moduleVisitor) Enter(n js.INode) js.IVisitor {
+func (v *moduleVisitor) currentClass() *js.ClassDecl {
+	if len(v.clsStack) == 0 {
+		return nil
+	}
+	return v.clsStack[len(v.clsStack)-1]
+}
+
+func (v *moduleVisitor) Enter(n js.INode) js.IVisitor {
+	if cls, isCls := n.(*js.ClassDecl); isCls {
+		v.clsStack = append(v.clsStack, cls)
+		return v
+	}
 	c, ok := n.(*js.CallExpr)
 	if !ok {
 		return v
@@ -148,7 +168,12 @@ func (v moduleVisitor) Enter(n js.INode) js.IVisitor {
 			}
 		}
 	}
-	if mod, name, ok := x.imported(c.X); ok && !jsxNames[name] && len(as) > 0 && !x.viaCalls[c] {
+	curCls := v.currentClass()
+	if mod, name, ok := x.importedCall(c.X, curCls); ok && !jsxNames[name] && len(as) > 0 && !x.viaCalls[c] {
+		if curCls != nil {
+			x.self = append(x.self, curCls)
+			defer func() { x.self = x.self[:len(x.self)-1] }()
+		}
 		im := Import{Module: mod, Name: name}
 		some := false
 		x.lits = x.lits[:0]
@@ -241,8 +266,19 @@ func (v moduleVisitor) Enter(n js.INode) js.IVisitor {
 						x.lits = append(x.lits, l.Data)
 					}
 					some = true
+				} else if isValidRelEndpointSlug(cu) {
+					ia.RelValues = []string{cu}
+					if l, isLit := a.(*js.LiteralExpr); isLit {
+						x.lits = append(x.lits, l.Data)
+					}
+					some = true
 				}
 			} else {
+				if cref, csfx, cok := x.extractArgConstRef(a); cok {
+					ia.ConstRef = cref
+					ia.ConstSuffix = csfx
+					some = true
+				}
 				var aq []string
 				var clean []string
 				for _, v := range x.eval(a, &aq, 0) {
@@ -251,18 +287,22 @@ func (v moduleVisitor) Enter(n js.INode) js.IVisitor {
 						clean = addAlt(clean, cu)
 					}
 				}
+				if len(aq) > 0 {
+					ia.Query = uniq(aq)
+				}
 				if len(clean) > 0 {
 					ia.Values = uniq(clean)
-					ia.Query = uniq(aq)
 					some = true
-				} else if ks := uniq(x.keys(a, "", 0)); len(ks) > 0 {
-					ia.Keys = ks
-					some = true
+				} else if ia.ConstRef == nil {
+					if ks := uniq(x.keys(a, "", 0)); len(ks) > 0 {
+						ia.Keys = ks
+						some = true
+					}
 				}
 			}
 			im.Args = append(im.Args, ia)
 		}
-		if some && len(x.imports) < maxImports {
+		if some && (len(x.imports) < maxImports || len(x.imports) < maxRichImports && isHighSignalImport(im)) {
 			var loc Endpoint
 			if len(x.lits) > 0 {
 				x.locate(&loc, x.lits)
@@ -281,13 +321,33 @@ func (v moduleVisitor) Enter(n js.INode) js.IVisitor {
 	return v
 }
 
-func (moduleVisitor) Exit(js.INode) {}
+func (v *moduleVisitor) Exit(n js.INode) {
+	if _, isCls := n.(*js.ClassDecl); isCls && len(v.clsStack) > 0 {
+		v.clsStack = v.clsStack[:len(v.clsStack)-1]
+	}
+}
 
 // jsxNames are a JSX runtime's: an element's props are no request's.
 var jsxNames = map[string]bool{"jsx": true, "jsxs": true, "jsxDEV": true, "createElement": true, "cloneElement": true, "Fragment": true}
 
-// maxImports is how many calls to imported functions a script records.
-const maxImports = 4000
+// maxImports bounds generic imported calls per script; maxRichImports reserves
+// headroom for URL/ConstRef/service-method calls in multi-MB SPA bundles.
+const (
+	maxImports     = 4000
+	maxRichImports = 16000
+)
+
+func isHighSignalImport(im Import) bool {
+	if strings.Contains(im.Name, ".") {
+		return true
+	}
+	for _, a := range im.Args {
+		if len(a.Values) > 0 || len(a.RelValues) > 0 || a.ConstRef != nil || len(a.PropValues) > 0 || a.Setting != "" || a.BaseKey != "" {
+			return true
+		}
+	}
+	return false
+}
 
 func moduleID(e js.IExpr) (string, bool) {
 	l, ok := e.(*js.LiteralExpr)
@@ -310,94 +370,52 @@ func (x *extractor) scanESModules(ast *js.AST) {
 		}
 	}
 	for _, stmt := range ast.BlockStmt.List {
-		switch s := stmt.(type) {
-		case *js.ImportStmt:
+		s, ok := stmt.(*js.ImportStmt)
+		if !ok {
+			continue
+		}
+		mod := unquote(s.Module)
+		if mod == "" {
+			continue
+		}
+		if len(s.Default) > 0 {
+			if v := topVars[string(s.Default)]; v != nil {
+				x.esImports[v] = [2]string{mod, "default"}
+			}
+		}
+		for _, al := range s.List {
+			local := string(al.Binding)
+			if local == "" {
+				continue
+			}
+			v := topVars[local]
+			if v == nil {
+				continue
+			}
+			if len(al.Name) == 1 && al.Name[0] == '*' {
+				x.esNSImports[v] = mod
+				continue
+			}
+			expName := local
+			if len(al.Name) > 0 {
+				expName = string(al.Name)
+			}
+			x.esImports[v] = [2]string{mod, expName}
+		}
+	}
+	x.indexDI()
+	for _, stmt := range ast.BlockStmt.List {
+		s, ok := stmt.(*js.ExportStmt)
+		if !ok {
+			continue
+		}
+		if s.Module != nil {
 			mod := unquote(s.Module)
 			if mod == "" {
 				continue
 			}
-			if len(s.Default) > 0 {
-				if v := topVars[string(s.Default)]; v != nil {
-					x.esImports[v] = [2]string{mod, "default"}
-				}
-			}
-			for _, al := range s.List {
-				local := string(al.Binding)
-				if local == "" {
-					continue
-				}
-				v := topVars[local]
-				if v == nil {
-					continue
-				}
-				if len(al.Name) == 1 && al.Name[0] == '*' {
-					x.esNSImports[v] = mod
-					continue
-				}
-				expName := local
-				if len(al.Name) > 0 {
-					expName = string(al.Name)
-				}
-				x.esImports[v] = [2]string{mod, expName}
-			}
-		case *js.ExportStmt:
-			if s.Module != nil {
-				mod := unquote(s.Module)
-				if mod == "" {
-					continue
-				}
-				if len(s.List) == 1 && s.List[0].Name == nil && len(s.List[0].Binding) == 1 && s.List[0].Binding[0] == '*' {
-					x.reExports = append(x.reExports, ReExport{Module: mod, All: true})
-					continue
-				}
-				for _, al := range s.List {
-					expName := string(al.Binding)
-					if expName == "" {
-						continue
-					}
-					target := expName
-					if len(al.Name) > 0 {
-						target = string(al.Name)
-					}
-					x.reExports = append(x.reExports, ReExport{Module: mod, Name: expName, Target: target})
-				}
-				continue
-			}
-			if s.Decl != nil {
-				if s.Default {
-					if ex, ok := x.exported(s.Decl); ok {
-						ex.Module, ex.Name = "", "default"
-						x.exports = append(x.exports, ex)
-					} else {
-						x.esExports["default"] = s.Decl
-					}
-					continue
-				}
-				switch d := s.Decl.(type) {
-				case *js.FuncDecl:
-					if d.Name != nil {
-						x.exportVars[string(d.Name.Data)] = root(d.Name)
-						if ex, ok := x.exported(d); ok {
-							ex.Module, ex.Name = "", string(d.Name.Data)
-							x.exports = append(x.exports, ex)
-						} else {
-							x.noteBuilder(string(d.Name.Data), "", root(d.Name))
-						}
-					}
-				case *js.VarDecl:
-					for _, b := range d.List {
-						if vr, ok := b.Binding.(*js.Var); ok && b.Default != nil {
-							x.exportVars[string(vr.Data)] = root(vr)
-							if ex, ok := x.exported(b.Default); ok {
-								ex.Module, ex.Name = "", string(vr.Data)
-								x.exports = append(x.exports, ex)
-							} else {
-								x.noteBuilder(string(vr.Data), "", root(vr))
-								x.esExports[string(vr.Data)] = b.Default
-							}
-						}
-					}
-				}
+			if len(s.List) == 1 && s.List[0].Name == nil && len(s.List[0].Binding) == 1 && s.List[0].Binding[0] == '*' {
+				x.reExports = append(x.reExports, ReExport{Module: mod, All: true})
 				continue
 			}
 			for _, al := range s.List {
@@ -405,22 +423,89 @@ func (x *extractor) scanESModules(ast *js.AST) {
 				if expName == "" {
 					continue
 				}
-				local := expName
+				target := expName
 				if len(al.Name) > 0 {
-					local = string(al.Name)
+					target = string(al.Name)
 				}
-				if v := topVars[local]; v != nil {
-					x.exportVars[expName] = v
-					if ex, ok := x.exported(v); ok {
-						ex.Module, ex.Name = "", expName
-						if local != expName {
-							ex.Local = local
-						}
+				x.reExports = append(x.reExports, ReExport{Module: mod, Name: expName, Target: target})
+			}
+			continue
+		}
+		if s.Decl != nil {
+			if s.Default {
+				if cls := x.classOfExpr(s.Decl); cls != nil {
+					x.exportedClassMethods("", "default", "", cls)
+					x.esExports["default"] = s.Decl
+				} else if ex, ok := x.exported(s.Decl); ok {
+					ex.Module, ex.Name = "", "default"
+					x.exports = append(x.exports, ex)
+				} else {
+					x.esExports["default"] = s.Decl
+				}
+				continue
+			}
+			switch d := s.Decl.(type) {
+			case *js.FuncDecl:
+				if d.Name != nil {
+					x.exportVars[string(d.Name.Data)] = root(d.Name)
+					if ex, ok := x.exported(d); ok {
+						ex.Module, ex.Name = "", string(d.Name.Data)
 						x.exports = append(x.exports, ex)
 					} else {
-						x.noteBuilder(expName, local, v)
-						x.esExports[expName] = v
+						x.noteBuilder(string(d.Name.Data), "", root(d.Name))
 					}
+				}
+			case *js.ClassDecl:
+				if d.Name != nil {
+					name := string(d.Name.Data)
+					x.exportVars[name] = root(d.Name)
+					x.exportedClassMethods("", name, "", d)
+					x.esExports[name] = d
+				}
+			case *js.VarDecl:
+				for _, b := range d.List {
+					if vr, ok := b.Binding.(*js.Var); ok && b.Default != nil {
+						name := string(vr.Data)
+						x.exportVars[name] = root(vr)
+						if cls := x.classOfExpr(b.Default); cls != nil {
+							x.exportedClassMethods("", name, "", cls)
+							x.esExports[name] = b.Default
+						} else if ex, ok := x.exported(b.Default); ok {
+							ex.Module, ex.Name = "", name
+							x.exports = append(x.exports, ex)
+						} else {
+							x.noteBuilder(name, "", root(vr))
+							x.esExports[name] = b.Default
+						}
+					}
+				}
+			}
+			continue
+		}
+		for _, al := range s.List {
+			expName := string(al.Binding)
+			if expName == "" {
+				continue
+			}
+			local := expName
+			if len(al.Name) > 0 {
+				local = string(al.Name)
+			}
+			if v := topVars[local]; v != nil {
+				x.exportVars[expName] = v
+				localAlias := ""
+				if local != expName {
+					localAlias = local
+				}
+				if cls := x.classOfExpr(v); cls != nil {
+					x.exportedClassMethods("", expName, localAlias, cls)
+					x.esExports[expName] = v
+				} else if ex, ok := x.exported(v); ok {
+					ex.Module, ex.Name, ex.Local = "", expName, localAlias
+					x.exports = append(x.exports, ex)
+				} else {
+					x.noteBuilder(expName, local, v)
+					x.esExports[expName] = v
 				}
 			}
 		}
@@ -492,6 +577,12 @@ func (x *extractor) exportsOf(id string, arr *js.ArrayExpr) {
 			ex.Module, ex.Name = id, name
 			x.exports = append(x.exports, ex)
 		} else if ge := wpGetterExpr(arr.List[j].Value); ge != nil {
+			if cls := x.classOfExpr(ge); cls != nil {
+				x.exportedClassMethods(id, name, "", cls)
+			} else if ex, ok := x.exported(ge); ok {
+				ex.Module, ex.Name = id, name
+				x.exports = append(x.exports, ex)
+			}
 			x.turbopackConst[[2]string{id, name}] = ge
 		}
 		i = j
@@ -515,6 +606,8 @@ func (x *extractor) exported(fn js.IExpr) (Export, bool) {
 	case *js.ArrowFunc:
 		params, body = f.Params, &f.Body
 	case *js.FuncDecl:
+		params, body = f.Params, &f.Body
+	case *js.MethodDecl:
 		params, body = f.Params, &f.Body
 	default:
 		return Export{}, false
@@ -784,6 +877,8 @@ func (x *extractor) exportedFromSummary(outerParams js.Params, body *js.BlockStm
 			}
 			return out, true
 		}
+	} else if x.probeParamURL(outerParams, l.url, &out) {
+		return out, true
 	}
 
 	u := x.methodURL(l.url)
@@ -801,6 +896,119 @@ func (x *extractor) exportedFromSummary(outerParams js.Params, body *js.BlockStm
 	return Export{}, false
 }
 
+const paramURLSentinel = "__jsh_url_param__"
+
+func (x *extractor) exprHasBaseRef(e js.IExpr) bool {
+	if e == nil {
+		return false
+	}
+	found := false
+	js.Walk(nodeVisitor(func(n js.INode) bool {
+		if found {
+			return false
+		}
+		switch n.(type) {
+		case *js.FuncDecl, *js.ArrowFunc, *js.MethodDecl, *js.ClassDecl:
+			return false
+		}
+		if ex, ok := n.(js.IExpr); ok && x.isBaseExpr(ex) {
+			found = true
+			return false
+		}
+		return true
+	}), e)
+	return found
+}
+
+func (x *extractor) isWrapperFrameURL(raw string, urlExpr js.IExpr) bool {
+	u0, _, _ := strings.Cut(cleanURL(raw), "?")
+	if u0 == "" || !strings.Contains(u0, unknown) {
+		return false
+	}
+	pre, after, _ := strings.Cut(u0, unknown)
+	if strings.Trim(strings.ReplaceAll(after, unknown, ""), "/") != "" {
+		return false
+	}
+	switch {
+	case pre == "" || pre == "/":
+		return true
+	case pre == unknown || pre == unknown+"/":
+		return true
+	case schemeRe.MatchString(pre):
+		_, rest, _ := strings.Cut(pre, "://")
+		_, pathAfterHost, hasSlash := strings.Cut(rest, "/")
+		if !hasSlash || strings.Trim(pathAfterHost, "/") == "" {
+			return true
+		}
+		baseCand := strings.TrimRight(pre, "/")
+		return x.bases[baseCand] || x.exprHasBaseRef(urlExpr)
+	case strings.HasPrefix(pre, "/"):
+		baseCand := strings.TrimRight(pre, "/")
+		return x.bases[baseCand] || x.exprHasBaseRef(urlExpr)
+	}
+	return false
+}
+
+func (x *extractor) probeParamURL(outerParams js.Params, urlExpr js.IExpr, out *Export) bool {
+	if len(outerParams.List) == 0 || urlExpr == nil || out == nil {
+		return false
+	}
+	savedNoMark := x.noMarkUsed
+	x.noMarkUsed = true
+	defer func() { x.noMarkUsed = savedNoMark }()
+
+	var uq []string
+	unb := x.eval(urlExpr, &uq, 0)
+	if len(unb) != 1 || !x.isWrapperFrameURL(unb[0], urlExpr) {
+		return false
+	}
+
+	for i, b := range outerParams.List {
+		pv, ok := b.Binding.(*js.Var)
+		if !ok {
+			continue
+		}
+		rv := root(pv)
+		oldBind, hadBind := x.bind[rv]
+		x.bind[rv] = []string{paramURLSentinel}
+		var pq []string
+		pvals := x.eval(urlExpr, &pq, 0)
+		if hadBind {
+			x.bind[rv] = oldBind
+		} else {
+			delete(x.bind, rv)
+		}
+		if len(pvals) != 1 {
+			continue
+		}
+		pu, pquery, hasQ := strings.Cut(cleanURL(pvals[0]), "?")
+		before, after, found := strings.Cut(pu, paramURLSentinel)
+		if !found || strings.Contains(after, paramURLSentinel) {
+			continue
+		}
+		switch {
+		case before == unknown || before == unknown+"/":
+			out.HasDynBase = true
+			out.URLPrefix = ""
+		case !strings.Contains(before, unknown):
+			if before != "" && before != "/" {
+				out.URLPrefix = strings.TrimRight(before, "/")
+			}
+		default:
+			continue
+		}
+		sfx := after
+		if hasQ && pquery != "" && !strings.Contains(pquery, paramURLSentinel) {
+			sfx += "?" + pquery
+		}
+		out.ParamURL = true
+		out.URLArg = i
+		out.URLSuffix = sfx
+		return true
+	}
+	return false
+}
+
 // exportedVia records an Export.Via link when an exported function delegates
 // to an imported helper in another module (File A -> File B -> File C).
 func (x *extractor) exportedVia(params js.Params, body *js.BlockStmt) (Export, bool) {
@@ -809,12 +1017,13 @@ func (x *extractor) exportedVia(params js.Params, body *js.BlockStmt) (Export, b
 	}
 	var out Export
 	found := false
+	curCls := x.selfClass()
 	nf := &nestFinder{}
 	nf.f = func(c *js.CallExpr) {
 		if found || nf.depth > 0 {
 			return
 		}
-		mod, name, ok := x.imported(c.X)
+		mod, name, ok := x.importedCall(c.X, curCls)
 		if !ok || jsxNames[name] {
 			return
 		}
@@ -1532,4 +1741,489 @@ func (x *extractor) wpDefaultObject(e js.IExpr, depth int) (*js.ObjectExpr, bool
 		return x.objectN(def, depth+1)
 	}
 	return nil, false
+}
+
+// --- exported service classes & cross-chunk DI linking ---
+
+var skippedClassMethods = map[string]bool{
+	"constructor": true, "ngOnInit": true, "ngOnDestroy": true,
+	"ngOnChanges": true, "ngAfterViewInit": true, "ngAfterContentInit": true,
+	"render": true, "componentDidMount": true, "componentWillUnmount": true,
+}
+
+func (x *extractor) exportedClassMethods(modID, expName, localAlias string, cls *js.ClassDecl) {
+	if expName == "" || cls == nil {
+		return
+	}
+	seenMethod := map[string]bool{}
+	emit := func(owner *js.ClassDecl, mname string, fn js.IExpr) {
+		if mname == "" || strings.HasPrefix(mname, "#") || skippedClassMethods[mname] || isFrameworkClassMeta(mname) || seenMethod[mname] {
+			return
+		}
+		seenMethod[mname] = true
+		savedEntry := x.entryClass
+		x.entryClass = owner
+		x.self = append(x.self, cls)
+		x.fnStack = append(x.fnStack, fn)
+		ex, ok := x.exported(fn)
+		x.fnStack = x.fnStack[:len(x.fnStack)-1]
+		x.self = x.self[:len(x.self)-1]
+		x.entryClass = savedEntry
+		if !ok {
+			return
+		}
+		ex.Module = modID
+		ex.Name = expName + "." + mname
+		if localAlias != "" {
+			ex.Local = localAlias + "." + mname
+		}
+		for _, prev := range x.exports {
+			if prev.Module == ex.Module && prev.Name == ex.Name {
+				return
+			}
+		}
+		x.exports = append(x.exports, ex)
+	}
+
+	for cur, hops := cls, 0; cur != nil && hops < maxClassChain; cur, hops = x.parentOf(cur), hops+1 {
+		info := x.classes[cur]
+		if info == nil {
+			continue
+		}
+		if len(info.members) > 0 {
+			mnames := make([]string, 0, len(info.members))
+			for mname := range info.members {
+				mnames = append(mnames, mname)
+			}
+			sort.Strings(mnames)
+			for _, mname := range mnames {
+				if ms := info.members[mname]; len(ms) == 1 {
+					emit(cur, mname, ms[0])
+				}
+			}
+		}
+		if len(info.staticMembers) > 0 {
+			snames := make([]string, 0, len(info.staticMembers))
+			for sname := range info.staticMembers {
+				snames = append(snames, sname)
+			}
+			sort.Strings(snames)
+			for _, sname := range snames {
+				if ms := info.staticMembers[sname]; len(ms) == 1 {
+					emit(cur, sname, ms[0])
+				}
+			}
+		}
+	}
+}
+
+func (x *extractor) scanWebpackClassExports() {
+	if len(x.wpModExports) == 0 && len(x.wpModDefault) == 0 {
+		return
+	}
+	modSet := map[string]bool{}
+	for m := range x.wpModExports {
+		modSet[m] = true
+	}
+	for m := range x.wpModDefault {
+		modSet[m] = true
+	}
+	modIDs := make([]string, 0, len(modSet))
+	for m := range modSet {
+		modIDs = append(modIDs, m)
+	}
+	sort.Strings(modIDs)
+	for _, modID := range modIDs {
+		if em := x.wpModExports[modID]; len(em) > 0 {
+			eks := make([]string, 0, len(em))
+			for ek := range em {
+				eks = append(eks, ek)
+			}
+			sort.Strings(eks)
+			for _, ek := range eks {
+				if cls := x.classOfExpr(em[ek]); cls != nil {
+					x.exportedClassMethods(modID, ek, "", cls)
+				}
+			}
+		}
+		if def := x.wpModDefault[modID]; def != nil {
+			if cls := x.classOfExpr(def); cls != nil {
+				x.exportedClassMethods(modID, "default", "", cls)
+			}
+		}
+	}
+}
+
+func isNumericFlag(e js.IExpr) bool {
+	l, ok := ungroup(e).(*js.LiteralExpr)
+	return ok && (l.TokenType == js.IntegerToken || l.TokenType == js.DecimalToken)
+}
+
+func (x *extractor) isInjectorCallee(callee js.IExpr) bool {
+	callee = ungroup(callee)
+	if cm, ok := callee.(*js.CommaExpr); ok && len(cm.List) > 0 {
+		callee = ungroup(cm.List[len(cm.List)-1])
+	}
+	var cname string
+	switch c := callee.(type) {
+	case *js.Var:
+		cname = normClassMetaName(string(c.Data))
+	case *js.DotExpr:
+		cname = normClassMetaName(propName(c.Y))
+	}
+	switch cname {
+	case "inject", "ɵɵinject", "ɵɵdirectiveInject", "get":
+		return true
+	}
+	_, _, isImp := x.imported(callee)
+	return isImp
+}
+
+func (x *extractor) importedServiceToken(e js.IExpr, allowFactoryHelper bool) (mod, exp string, ok bool) {
+	if e == nil {
+		return "", "", false
+	}
+	e = ungroup(e)
+	if cm, isCm := e.(*js.CommaExpr); isCm && len(cm.List) > 0 {
+		e = ungroup(cm.List[len(cm.List)-1])
+	}
+	switch n := e.(type) {
+	case *js.NewExpr:
+		m, ex, iok := x.importRootBinding(n.X, 0)
+		if !iok || m == "" {
+			return "", "", false
+		}
+		if ex == "" {
+			ex = "default"
+		}
+		return m, ex, true
+	case *js.CallExpr:
+		as := args(&n.Args)
+		if len(as) < 1 || len(as) > 2 {
+			return "", "", false
+		}
+		if len(as) == 2 && !isNumericFlag(as[1]) && !allowFactoryHelper {
+			return "", "", false
+		}
+		if !allowFactoryHelper && !x.isInjectorCallee(n.X) {
+			return "", "", false
+		}
+		m, ex, iok := x.importRootBinding(as[0], 0)
+		if !iok || m == "" {
+			return "", "", false
+		}
+		if ex == "" {
+			ex = "default"
+		}
+		return m, ex, true
+	}
+	return "", "", false
+}
+
+func firstFactoryNewArgs(body *js.BlockStmt) ([]js.IExpr, bool) {
+	if body == nil {
+		return nil, false
+	}
+	unwrapNew := func(e js.IExpr) (*js.NewExpr, bool) {
+		for depth := 0; depth < 4 && e != nil; depth++ {
+			switch n := ungroup(e).(type) {
+			case *js.NewExpr:
+				return n, true
+			case *js.BinaryExpr:
+				if n.Op == js.EqToken {
+					e = n.Y
+					continue
+				}
+			case *js.CondExpr:
+				if ne, ok := ungroup(n.X).(*js.NewExpr); ok {
+					return ne, true
+				}
+				e = n.Y
+				continue
+			}
+			break
+		}
+		return nil, false
+	}
+	for _, r := range returnsOf(body) {
+		if ne, ok := unwrapNew(r); ok && ne.Args != nil && len(ne.Args.List) > 0 {
+			return args(ne.Args), true
+		}
+	}
+	var found []js.IExpr
+	walkThisScope(body, func(n js.INode) {
+		if found != nil {
+			return
+		}
+		if ne, ok := n.(*js.NewExpr); ok && ne.Args != nil && len(ne.Args.List) > 0 {
+			found = args(ne.Args)
+		}
+	})
+	return found, len(found) > 0
+}
+
+func (x *extractor) setClassFieldImport(cls *js.ClassDecl, field, mod, exp string) {
+	if cls == nil || field == "" || mod == "" || exp == "" {
+		return
+	}
+	m := x.classFieldImports[cls]
+	if m == nil {
+		m = map[string][2]string{}
+		x.classFieldImports[cls] = m
+	}
+	if _, exists := m[field]; !exists {
+		m[field] = [2]string{mod, exp}
+	}
+}
+
+func (x *extractor) lookupClassFieldImport(cls *js.ClassDecl, field string) ([2]string, bool) {
+	if field == "" {
+		return [2]string{}, false
+	}
+	for cur, hops := cls, 0; cur != nil && hops < maxClassChain; cur, hops = x.parentOf(cur), hops+1 {
+		if m := x.classFieldImports[cur]; m != nil {
+			if target, ok := m[field]; ok {
+				return target, true
+			}
+		}
+	}
+	return [2]string{}, false
+}
+
+func (x *extractor) bindCtorDIArgs(targetCls, ctorCls *js.ClassDecl, newArgs []js.IExpr, depth int) {
+	if targetCls == nil || ctorCls == nil || len(newArgs) == 0 || depth > maxClassChain {
+		return
+	}
+	info := x.classes[ctorCls]
+	if info == nil {
+		return
+	}
+	if info.ctor == nil {
+		if p := x.parentOf(ctorCls); p != nil {
+			x.bindCtorDIArgs(targetCls, p, newArgs, depth+1)
+		}
+		return
+	}
+	ctorParamIdx := map[*js.Var]int{}
+	for idx, b := range info.ctor.Params.List {
+		if pv, ok := b.Binding.(*js.Var); ok {
+			ctorParamIdx[root(pv)] = idx
+		}
+	}
+	for fname, fexprs := range info.fields {
+		for _, fe := range fexprs {
+			pv, ok := ungroup(fe).(*js.Var)
+			if !ok {
+				continue
+			}
+			if k, isParam := ctorParamIdx[root(pv)]; isParam && k < len(newArgs) {
+				if mod, exp, iok := x.importedServiceToken(newArgs[k], true); iok {
+					x.setClassFieldImport(targetCls, fname, mod, exp)
+				}
+			}
+		}
+	}
+	if info.hasSuper {
+		if p := x.parentOf(ctorCls); p != nil && len(info.superArgs) > 0 {
+			forwarded := make([]js.IExpr, len(info.superArgs))
+			for si, sa := range info.superArgs {
+				if pv, ok := ungroup(sa).(*js.Var); ok {
+					if k, isParam := ctorParamIdx[root(pv)]; isParam && k < len(newArgs) {
+						forwarded[si] = newArgs[k]
+						continue
+					}
+				}
+				forwarded[si] = sa
+			}
+			x.bindCtorDIArgs(targetCls, p, forwarded, depth+1)
+		}
+	}
+}
+
+func (x *extractor) indexDI() {
+	for _, cls := range x.classOrder {
+		info := x.classes[cls]
+		if info == nil {
+			continue
+		}
+		for fname, fexprs := range info.fields {
+			for _, fe := range fexprs {
+				if mod, exp, ok := x.importedServiceToken(fe, false); ok {
+					x.setClassFieldImport(cls, fname, mod, exp)
+				}
+			}
+		}
+		if info.facFn != nil {
+			if _, facBody, ok := fnParts(info.facFn); ok {
+				if newArgs, nok := firstFactoryNewArgs(facBody); nok {
+					x.bindCtorDIArgs(cls, cls, newArgs, 0)
+				}
+			}
+		}
+	}
+	for vr, defs := range x.defs {
+		if len(defs) == 1 && defs[0] != nil {
+			if mod, exp, ok := x.importedServiceToken(defs[0], false); ok {
+				x.varInstanceImports[vr] = [2]string{mod, exp}
+			}
+		}
+	}
+}
+
+func (x *extractor) importedCall(callee js.IExpr, curCls *js.ClassDecl) (string, string, bool) {
+	if mod, name, ok := x.imported(callee); ok {
+		return mod, name, true
+	}
+	for {
+		switch c := callee.(type) {
+		case *js.GroupExpr:
+			callee = c.X
+			continue
+		case *js.CommaExpr:
+			if len(c.List) > 0 {
+				callee = c.List[len(c.List)-1]
+				continue
+			}
+		}
+		break
+	}
+	d, ok := callee.(*js.DotExpr)
+	if !ok {
+		return "", "", false
+	}
+	mname := propName(d.Y)
+	if mname == "" || jsxNames[mname] {
+		return "", "", false
+	}
+	recv := ungroup(d.X)
+	if rd, isDot := recv.(*js.DotExpr); isDot && x.isThis(rd.X) && curCls != nil {
+		if target, ok := x.lookupClassFieldImport(curCls, propName(rd.Y)); ok {
+			return target[0], target[1] + "." + mname, true
+		}
+	}
+	if rv, isVar := recv.(*js.Var); isVar {
+		r := root(rv)
+		if target, ok := x.varInstanceImports[r]; ok {
+			return target[0], target[1] + "." + mname, true
+		}
+		if curCls != nil {
+			if src := x.destructFrom[r]; src != nil && x.isThis(src) && x.propOf[r] != "" {
+				if target, ok := x.lookupClassFieldImport(curCls, x.propOf[r]); ok {
+					return target[0], target[1] + "." + mname, true
+				}
+			}
+			if c := x.constOrSingleExpr(r); c != nil {
+				if cd, isDot := ungroup(c).(*js.DotExpr); isDot && x.isThis(cd.X) {
+					if target, ok := x.lookupClassFieldImport(curCls, propName(cd.Y)); ok {
+						return target[0], target[1] + "." + mname, true
+					}
+				}
+			}
+		}
+	}
+	if mod, exp, rok := x.importRootBinding(recv, 0); rok && mod != "" && exp != "" {
+		return mod, exp + "." + mname, true
+	}
+	if mod, exp, tok := x.importedServiceToken(recv, false); tok {
+		return mod, exp + "." + mname, true
+	}
+	return "", "", false
+}
+
+func (x *extractor) extractArgConstRef(a js.IExpr) (*ConstRef, string, bool) {
+	if a == nil {
+		return nil, "", false
+	}
+	a = ungroup(a)
+	if cref, ok := x.extractConstRef(a); ok {
+		return cref, "", true
+	}
+	evalTail := func(tail js.IExpr) (string, bool) {
+		saved := x.noMarkUsed
+		x.noMarkUsed = true
+		var q []string
+		vals := x.eval(tail, &q, 0)
+		x.noMarkUsed = saved
+		if len(vals) != 1 {
+			return "", false
+		}
+		return cleanURL(vals[0]), true
+	}
+	switch n := a.(type) {
+	case *js.TemplateExpr:
+		if n.Tag == nil && len(n.List) >= 1 && templateText(n.List[0].Value, true, false) == "" {
+			if cref, ok := x.extractConstRef(n.List[0].Expr); ok {
+				sfx := ""
+				for j := 1; j < len(n.List); j++ {
+					sfx += templateText(n.List[j].Value, false, false)
+					part, pok := evalTail(n.List[j].Expr)
+					if !pok {
+						return nil, "", false
+					}
+					sfx += part
+				}
+				sfx += templateText(n.Tail, false, true)
+				return cref, cleanURL(sfx), true
+			}
+		}
+	case *js.BinaryExpr:
+		if n.Op == js.AddToken {
+			var rhsTerms []js.IExpr
+			cur := js.IExpr(n)
+			for len(rhsTerms) < 8 {
+				be, isAdd := ungroup(cur).(*js.BinaryExpr)
+				if !isAdd || be.Op != js.AddToken {
+					break
+				}
+				rhsTerms = append(rhsTerms, be.Y)
+				cur = be.X
+			}
+			if cref, ok := x.extractConstRef(cur); ok && len(rhsTerms) > 0 {
+				sfx := ""
+				for i := len(rhsTerms) - 1; i >= 0; i-- {
+					part, pok := evalTail(rhsTerms[i])
+					if !pok {
+						return nil, "", false
+					}
+					sfx += part
+				}
+				return cref, cleanURL(sfx), true
+			}
+		}
+	}
+	return nil, "", false
+}
+
+var nonSlugWords = map[string]bool{
+	"true": true, "false": true, "null": true, "undefined": true,
+	"json": true, "blob": true, "text": true, "arraybuffer": true,
+	"document": true, "utf-8": true, "utf8": true, "base64": true,
+}
+
+func isValidRelEndpointSlug(s string) bool {
+	pathPart, _, _ := strings.Cut(s, "?")
+	if len(pathPart) < 3 || len(s) > 256 || !strings.Contains(pathPart, "/") {
+		return false
+	}
+	if pathPart[0] == '.' || pathPart[0] == '/' || pathPart[len(pathPart)-1] == '.' || pathPart[len(pathPart)-1] == '/' || strings.Contains(pathPart, "//") {
+		return false
+	}
+	if httpMethods[strings.ToUpper(pathPart)] || nonSlugWords[strings.ToLower(pathPart)] {
+		return false
+	}
+	if mimeRe.MatchString(pathPart) || assetRe.MatchString(pathPart) || toolFileRe.MatchString(pathPart) || numericRe.MatchString(pathPart) || dateFmtRe.MatchString(pathPart) {
+		return false
+	}
+	letters := 0
+	for i := 0; i < len(pathPart); i++ {
+		c := pathPart[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z':
+			letters++
+		case c >= '0' && c <= '9', c == '/', c == '-', c == '_', c == '.', c == '{', c == '}':
+		default:
+			return false
+		}
+	}
+	return letters >= 3
 }

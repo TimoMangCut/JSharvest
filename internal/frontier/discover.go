@@ -69,6 +69,23 @@ func hashRoute(frag string) bool {
 	return strings.HasPrefix(frag, "/") || strings.HasPrefix(frag, "!")
 }
 
+// isNonPageLinkMIME reports whether a <link> element's explicit MIME type
+// declares a non-HTML/non-JSON syndication or binary resource (e.g.
+// application/rss+xml, application/atom+xml) rather than a navigable page or
+// JSON/YAML API document. An omitted type returns false.
+func isNonPageLinkMIME(raw string) bool {
+	mt := strings.TrimSpace(strings.ToLower(strings.Split(raw, ";")[0]))
+	if mt == "" {
+		return false
+	}
+	if mt == "text/html" || mt == "application/xhtml+xml" ||
+		mt == "application/json" || strings.HasSuffix(mt, "+json") ||
+		mt == "application/yaml" || mt == "text/yaml" || mt == "application/x-yaml" {
+		return false
+	}
+	return true
+}
+
 // collector gathers the URLs of one document.
 type collector struct {
 	out  []Found
@@ -119,7 +136,11 @@ func (c *collector) element(tag string, attr map[string]string, base *url.URL, s
 		switch rel := strings.ToLower(attr["rel"]); {
 		case strings.Contains(rel, "alternate"), strings.Contains(rel, "next"), strings.Contains(rel, "prev"),
 			strings.Contains(rel, "canonical"):
-			c.add(base, attr["href"], Link, true)
+			if isNonPageLinkMIME(attr["type"]) {
+				c.add(base, attr["href"], Resource, false)
+			} else {
+				c.add(base, attr["href"], Link, true)
+			}
 		default:
 			c.add(base, attr["href"], Resource, false)
 		}

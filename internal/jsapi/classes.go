@@ -29,6 +29,34 @@ type classInfo struct {
 	fields map[string][]js.IExpr
 	// later are the values its other methods give a field.
 	later map[string][]js.IExpr
+	// staticFields and staticMembers hold ES2022 static fields/getters/methods
+	// and post-declaration ClassName.PROP = … assignments; facFn holds ɵfac.
+	staticFields  map[string]js.IExpr
+	staticMembers map[string][]js.IExpr
+	facFn         js.IExpr
+}
+
+func normClassMetaName(name string) string {
+	if strings.Contains(name, `\u0275`) || strings.Contains(name, `\U0275`) {
+		name = strings.ReplaceAll(strings.ReplaceAll(name, `\u0275`, "ɵ"), `\U0275`, "ɵ")
+	}
+	return name
+}
+
+func isIvyFacName(name string) bool {
+	return normClassMetaName(name) == "ɵfac"
+}
+
+func isFrameworkClassMeta(name string) bool {
+	nm := normClassMetaName(name)
+	if strings.HasPrefix(nm, "ɵ") {
+		return true
+	}
+	switch nm {
+	case "ctorParameters", "propDecorators", "decorators", "contextType", "propTypes", "defaultProps", "displayName":
+		return true
+	}
+	return false
 }
 
 // memberName is a class element's name, a #private one with its #.
@@ -42,8 +70,9 @@ func memberName(n *js.ClassElementName) string {
 // classVisitor indexes the script's classes, the instances it makes of
 // them, and the URL objects whose parts it sets (u.pathname = …).
 type classVisitor struct {
-	x    *extractor
-	news *[]*js.NewExpr
+	x             *extractor
+	news          *[]*js.NewExpr
+	staticAssigns *[]propDef
 }
 
 func (v classVisitor) Enter(n js.INode) js.IVisitor {
@@ -73,11 +102,15 @@ func (v classVisitor) Enter(n js.INode) js.IVisitor {
 				x.classByVar[root(v)] = c // X = class {…}
 			}
 		}
-		if d, ok := n.X.(*js.DotExpr); ok {
-			if u, ok := d.X.(*js.Var); ok {
-				switch p := propName(d.Y); p {
+		if d, ok := ungroup(n.X).(*js.DotExpr); ok {
+			if u, ok := ungroup(d.X).(*js.Var); ok {
+				p := propName(d.Y)
+				switch p {
 				case "pathname", "search", "hash":
 					x.urlSets[root(u)] = append(x.urlSets[root(u)], urlSet{p, n.Y})
+				}
+				if p != "" && v.staticAssigns != nil {
+					*v.staticAssigns = append(*v.staticAssigns, propDef{obj: u, name: p, value: n.Y})
 				}
 			}
 		}
@@ -95,7 +128,8 @@ type urlSet struct {
 
 func (x *extractor) indexClasses(ast js.INode) {
 	var news []*js.NewExpr
-	js.Walk(classVisitor{x, &news}, ast)
+	var staticAssigns []propDef
+	js.Walk(classVisitor{x, &news, &staticAssigns}, ast)
 	// In the order the script declares its classes, never a map's: which
 	// instances a call is read in (instanceSites, at most eight) must not
 	// change from run to run.
@@ -103,6 +137,34 @@ func (x *extractor) indexClasses(ast js.INode) {
 		if v := x.classOf[c]; v != nil {
 			if _, ok := x.classByVar[v]; !ok {
 				x.classByVar[v] = c
+			}
+		}
+	}
+	for _, sa := range staticAssigns {
+		cls := x.classOfExpr(sa.obj)
+		if cls == nil {
+			continue
+		}
+		info := x.classes[cls]
+		if info == nil {
+			continue
+		}
+		if isIvyFacName(sa.name) {
+			if info.facFn == nil {
+				info.facFn = ungroup(sa.value)
+			}
+			continue
+		}
+		if strings.HasPrefix(sa.name, "#") || isFrameworkClassMeta(sa.name) {
+			continue
+		}
+		switch fn := ungroup(sa.value).(type) {
+		case *js.ArrowFunc, *js.FuncDecl:
+			info.staticMembers[sa.name] = append(info.staticMembers[sa.name], fn)
+			x.ownerOf[fn] = cls
+		default:
+			if _, exists := info.staticFields[sa.name]; !exists {
+				info.staticFields[sa.name] = unwrapEnumGroup(sa.value)
 			}
 		}
 	}
@@ -119,7 +181,14 @@ func (x *extractor) indexClasses(ast js.INode) {
 }
 
 func (x *extractor) indexClass(c *js.ClassDecl) {
-	info := &classInfo{decl: c, members: map[string][]js.IExpr{}, fields: map[string][]js.IExpr{}, later: map[string][]js.IExpr{}}
+	info := &classInfo{
+		decl:          c,
+		members:       map[string][]js.IExpr{},
+		fields:        map[string][]js.IExpr{},
+		later:         map[string][]js.IExpr{},
+		staticFields:  map[string]js.IExpr{},
+		staticMembers: map[string][]js.IExpr{},
+	}
 	x.classes[c] = info
 	x.classOrder = append(x.classOrder, c)
 	for i := range c.List {
@@ -134,11 +203,79 @@ func (x *extractor) indexClass(c *js.ClassDecl) {
 				info.ctor = el.Method
 				continue
 			}
-			if el.Method.Static || el.Method.Get || el.Method.Set {
+			if el.Method.Static {
+				if isIvyFacName(name) {
+					info.facFn = el.Method
+					continue
+				}
+				if el.Method.Get && len(el.Method.Params.List) == 0 && name != "" && !strings.HasPrefix(name, "#") && !isFrameworkClassMeta(name) {
+					if rets := returnsOf(&el.Method.Body); len(rets) == 1 {
+						info.staticFields[name] = unwrapEnumGroup(rets[0])
+					}
+				} else if !el.Method.Get && !el.Method.Set && name != "" && !strings.HasPrefix(name, "#") && !isFrameworkClassMeta(name) {
+					info.staticMembers[name] = append(info.staticMembers[name], el.Method)
+					x.ownerOf[el.Method] = c
+				}
+				continue
+			}
+			if el.Method.Get || el.Method.Set {
 				continue
 			}
 			info.members[name] = append(info.members[name], el.Method)
 			x.ownerOf[el.Method] = c
+		case el.StaticBlock != nil:
+			walkThisScope(el.StaticBlock, func(n js.INode) {
+				b, ok := n.(*js.BinaryExpr)
+				if !ok || b.Op != js.EqToken {
+					return
+				}
+				d, ok := ungroup(b.X).(*js.DotExpr)
+				if !ok {
+					return
+				}
+				if !isThisLit(ungroup(d.X)) {
+					if cv, isVar := ungroup(d.X).(*js.Var); !isVar || c.Name == nil || root(cv) != root(c.Name) {
+						return
+					}
+				}
+				pname := propName(d.Y)
+				if pname == "" {
+					return
+				}
+				if isIvyFacName(pname) {
+					info.facFn = ungroup(b.Y)
+					return
+				}
+				if strings.HasPrefix(pname, "#") || isFrameworkClassMeta(pname) {
+					return
+				}
+				switch fn := ungroup(b.Y).(type) {
+				case *js.ArrowFunc, *js.FuncDecl:
+					info.staticMembers[pname] = append(info.staticMembers[pname], fn)
+					x.ownerOf[fn] = c
+				default:
+					info.staticFields[pname] = unwrapEnumGroup(b.Y)
+				}
+			})
+		case el.StaticBlock == nil && el.Field.Static:
+			name := memberName(&el.Field.Name)
+			if name == "" || el.Field.Init == nil {
+				continue
+			}
+			if isIvyFacName(name) {
+				info.facFn = ungroup(el.Field.Init)
+				continue
+			}
+			if strings.HasPrefix(name, "#") || isFrameworkClassMeta(name) {
+				continue
+			}
+			switch f := ungroup(el.Field.Init).(type) {
+			case *js.ArrowFunc, *js.FuncDecl:
+				info.staticMembers[name] = append(info.staticMembers[name], f)
+				x.ownerOf[f] = c
+			default:
+				info.staticFields[name] = unwrapEnumGroup(el.Field.Init)
+			}
 		case el.StaticBlock == nil && !el.Field.Static:
 			if pv := el.Field.Name.Private; pv != nil {
 				x.privOwner[root(pv)] = c
@@ -249,9 +386,16 @@ func isThisLit(e js.IExpr) bool {
 	return ok && l.TokenType == js.ThisToken
 }
 
-// classOfExpr is the class an expression names: a class expression, or a
-// variable holding one.
+// classOfExpr is the class an expression names: a class expression, a
+// variable holding one, or a bundler class IIFE ((() => { class C {} return C; })()).
 func (x *extractor) classOfExpr(e js.IExpr) *js.ClassDecl {
+	return x.classOfExprAt(e, 0)
+}
+
+func (x *extractor) classOfExprAt(e js.IExpr, depth int) *js.ClassDecl {
+	if depth > 4 || e == nil {
+		return nil
+	}
 	for {
 		g, ok := e.(*js.GroupExpr)
 		if !ok {
@@ -266,11 +410,34 @@ func (x *extractor) classOfExpr(e js.IExpr) *js.ClassDecl {
 		if c := x.classByVar[root(n)]; c != nil {
 			return c
 		}
-		if c, ok := ungroup(x.constant(n)).(*js.ClassDecl); ok {
-			return c
+		if k := x.constOrSingleExpr(n); k != nil && k != e {
+			return x.classOfExprAt(k, depth+1)
+		}
+	case *js.CallExpr:
+		if len(n.Args.List) == 0 {
+			if _, body, ok := fnParts(n.X); ok && body != nil {
+				if rets := returnsOf(body); len(rets) == 1 {
+					return x.classOfExprAt(rets[0], depth+1)
+				}
+			}
 		}
 	}
 	return nil
+}
+
+func (x *extractor) classStaticField(c *js.ClassDecl, name string) (js.IExpr, bool) {
+	if name == "" {
+		return nil, false
+	}
+	for i := 0; c != nil && i < maxClassChain; i++ {
+		if info := x.classes[c]; info != nil {
+			if v, ok := info.staticFields[name]; ok && v != nil {
+				return v, true
+			}
+		}
+		c = x.parentOf(c)
+	}
+	return nil, false
 }
 
 // maxClassChain is how many classes up an extends chain is read.

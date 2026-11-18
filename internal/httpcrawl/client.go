@@ -43,12 +43,37 @@ type answer struct {
 // client sends the crawl's requests: a browser's headers, a cookie jar of
 // its own for the run, a shared rate, and the host map of -host-resolver-rules.
 type client struct {
-	http    *http.Client
-	ua      string
-	limit   *limiter
-	maxBody int
-	jar     http.CookieJar
-	aia     *tlsutil.AIA
+	http      *http.Client
+	ua        string
+	limit     *limiter
+	pageLimit *limiter
+	maxBody   int
+	jar       http.CookieJar
+	aia       *tlsutil.AIA
+}
+
+// shouldAbortDocumentBody reports whether a k == document response header
+// unambiguously declares a syndication XML stream or binary media file (never
+// an HTML page, JSON/YAML API response, or text/plain payload) so the body
+// stream can be closed immediately without waiting out hung feed generators.
+func shouldAbortDocumentBody(contentType string) bool {
+	ct := strings.TrimSpace(strings.ToLower(strings.Split(contentType, ";")[0]))
+	if ct == "" {
+		return false
+	}
+	switch ct {
+	case "application/rss+xml", "application/atom+xml", "application/rdf+xml",
+		"application/pdf", "application/zip", "application/gzip", "application/x-gzip",
+		"application/x-tar", "application/x-7z-compressed", "application/x-rar-compressed",
+		"application/octet-stream", "application/msword", "application/wasm":
+		return true
+	}
+	for _, pfx := range []string{"image/", "audio/", "video/", "font/", "application/vnd."} {
+		if strings.HasPrefix(ct, pfx) {
+			return true
+		}
+	}
+	return false
 }
 
 // newClient makes the crawl's client. allow decides each URL a redirect
@@ -58,24 +83,27 @@ func newClient(o Options, jar http.CookieJar, allow func(u, first *url.URL, doc 
 	if err != nil {
 		return nil, err
 	}
+	dialTimeout := min(o.Timeout, 10*time.Second)
+	tlsTimeout := min(o.Timeout, 10*time.Second)
+	hdrTimeout := min(o.Timeout, 15*time.Second)
 	// The one dialer (internal/netsafe): the name resolved once, every
 	// address checked, the address checked dialled. A host the user's
 	// -host-resolver-rules map is trusted; an internal target
 	// (!TargetPublic) may reach private addresses.
-	dialer := &netsafe.Dialer{HostRules: rules, AllowPrivate: o.AllowPrivate, Proxy: o.Proxy, Resolver: o.Resolver}
+	dialer := &netsafe.Dialer{HostRules: rules, AllowPrivate: o.AllowPrivate, Proxy: o.Proxy, Resolver: o.Resolver, Timeout: dialTimeout}
 	tr := &http.Transport{
 		Proxy:                 netsafe.ProxyFunc(o.Proxy, rules),
 		ForceAttemptHTTP2:     true,
 		MaxIdleConnsPerHost:   16, // up to 4 pages' scripts at once, o.Workers each (HTTP/1.1)
 		IdleConnTimeout:       60 * time.Second,
-		TLSHandshakeTimeout:   15 * time.Second,
-		ResponseHeaderTimeout: o.Timeout,
+		TLSHandshakeTimeout:   tlsTimeout,
+		ResponseHeaderTimeout: hdrTimeout,
 		DialContext:           dialer.DialContext,
 	}
 	if o.Proxy == nil {
 		tr.Proxy = nil
 	}
-	c := &client{ua: o.UserAgent, limit: newLimiter(o.Rate), maxBody: o.MaxBody, jar: jar}
+	c := &client{ua: o.UserAgent, limit: newLimiter(o.Rate), pageLimit: newLimiter(o.PageRate), maxBody: o.MaxBody, jar: jar}
 	switch {
 	case o.Insecure:
 		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
@@ -138,6 +166,11 @@ func (c *client) get(ctx context.Context, raw, referer string, k kind) answer {
 }
 
 func (c *client) getWithHeaders(ctx context.Context, raw, referer string, k kind, extra []jsapi.Header) answer {
+	if k == document && c.pageLimit != nil {
+		if err := c.pageLimit.wait(ctx); err != nil {
+			return answer{URL: raw, Err: err}
+		}
+	}
 	if err := c.limit.wait(ctx); err != nil {
 		return answer{URL: raw, Err: err}
 	}
@@ -195,7 +228,12 @@ func (c *client) getWithHeaders(ctx context.Context, raw, referer string, k kind
 		return answer{URL: raw, Err: err, Took: time.Since(start)}
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(c.maxBody)+1))
+	var body []byte
+	if k == document && shouldAbortDocumentBody(resp.Header.Get("Content-Type")) {
+		_ = resp.Body.Close()
+	} else {
+		body, err = io.ReadAll(io.LimitReader(resp.Body, int64(c.maxBody)+1))
+	}
 	remote = trace.addr()
 	a := answer{URL: resp.Request.URL.String(), Status: resp.StatusCode, Header: resp.Header, Body: body,
 		RemoteIP: remote, Proto: resp.Proto, Took: time.Since(start)}

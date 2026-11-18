@@ -46,6 +46,7 @@ type Options struct {
 	Depth     int                    // links away from Target (0: the one page)
 	MaxPages  int
 	Rate      float64 // requests a second, of every kind
+	PageRate  float64 // optional document requests a second (0: share Rate alone)
 	// MaxFiles bounds the script, manifest and source map requests
 	// (-resolve-max): the graph of a large app is big.
 	MaxFiles  int
@@ -80,6 +81,7 @@ type Options struct {
 	// Destructive reports a GET the guard would hold back: never visited.
 	Destructive func(raw string) bool
 	Workers     int
+	PageWorkers int // concurrent HTML document fetches within a depth (<= 0 uses maxPagesInFlight)
 	// RecordBody keeps up to this many bytes of a JSON answer in the
 	// request log (0: none).
 	RecordBody int
@@ -249,9 +251,8 @@ type crawler struct {
 	// be the shell again). Another origin (developer.example.com next to
 	// example.com) is another app: its pages are visited until it shows
 	// the same (round 18). Only the crawl's loop touches them.
-	prints  map[string]string
-	spa     map[string]bool
-	toCheck string // the first page of an origin, for spaCheck
+	prints map[string]string
+	spa    map[string]bool
 	// apiOrigins are the target's API hosts the scripts name, asked for
 	// their API's description once the pages are done (PIP-03).
 	specBlocked  map[string]string
@@ -712,19 +713,29 @@ func (cr *crawler) host(raw string) *hostState {
 	return st
 }
 
-func (cr *crawler) page(ctx context.Context, it frontier.Item, first bool, b *bucket) ([]job, []frontier.Found, bool) {
+type fetchedPage struct {
+	it      frontier.Item
+	start   time.Time
+	givenUp bool
+	ans     answer
+	isHTML  bool
+	scan    htmlscan.Page
+	doc     detect.Doc
+	verdict detect.Result
+	blkKind string
+}
+
+// fetchPage runs the network and stateless parse portion of a page visit so
+// multiple document fetches within a BFS depth can run concurrently without
+// touching shared frontier/SPA/script-admission state.
+func (cr *crawler) fetchPage(ctx context.Context, it frontier.Item, first bool) fetchedPage {
 	start := time.Now().UTC()
 	hs := cr.host(it.URL)
 	cr.mu.Lock()
 	givenUp := hs.ok == 0 && hs.challenged >= hostGiveUp
-	if givenUp {
-		cr.res.Challenged = append(cr.res.Challenged, Challenged{URL: it.URL, Depth: it.Depth})
-		cr.res.Listed[ChallengedHost]++
-	}
 	cr.mu.Unlock()
 	if givenUp {
-		cr.o.Page(Page{URL: it.URL, How: it.How, From: it.From, Depth: it.Depth, Reason: ChallengedHost})
-		return nil, nil, true
+		return fetchedPage{it: it, start: start, givenUp: true}
 	}
 	if first && cr.seedActive != nil {
 		cr.seedActive.Store(true)
@@ -733,9 +744,46 @@ func (cr *crawler) page(ctx context.Context, it frontier.Item, first bool, b *bu
 	if first && cr.seedActive != nil {
 		cr.seedActive.Store(false)
 	}
+	fp := fetchedPage{it: it, start: start, ans: a}
+	if a.Err != nil || (first && a.Status >= 300 && a.Status < 400) {
+		return fp
+	}
+	fp.isHTML = strings.Contains(strings.ToLower(a.Header.Get("Content-Type")), "html") || htmlLike(a.Body)
+	if fp.isHTML {
+		fp.scan = htmlscan.Scan(a.Body, a.URL)
+	}
+	fp.doc = detect.Doc{URL: a.URL, Status: int64(a.Status), Headers: lower(a.Header), Title: fp.scan.Title, Body: head(a.Body, 64<<10)}
+	// One classifier for every caller (round 25J review): a 403 with a
+	// WAF's page that names no vendor (wafRe) is a block here too, not a
+	// page that passed.
+	fp.verdict = detect.Check(fp.doc)
+	if cls := detect.Classify(fp.doc); cls != nil {
+		fp.blkKind = string(cls.Kind)
+		if !fp.verdict.Blocked && cls.Kind != detect.BlockRate {
+			fp.verdict = detect.Result{Blocked: true, Vendor: cls.Vendor, Evidence: cls.Evidence}
+		}
+	}
+	return fp
+}
+
+// commitPage applies a completed fetchedPage sequentially on the coordinator
+// loop in exact queue-pop order, preserving 100% deterministic Visited,
+// Page callback, SPA shell detection, and script admission ordering.
+func (cr *crawler) commitPage(fp fetchedPage, first bool, b *bucket) ([]job, []frontier.Found, string, bool) {
+	it := fp.it
+	hs := cr.host(it.URL)
+	if fp.givenUp {
+		cr.mu.Lock()
+		cr.res.Challenged = append(cr.res.Challenged, Challenged{URL: it.URL, Depth: it.Depth})
+		cr.res.Listed[ChallengedHost]++
+		cr.mu.Unlock()
+		cr.o.Page(Page{URL: it.URL, How: it.How, From: it.From, Depth: it.Depth, Reason: ChallengedHost})
+		return nil, nil, "", true
+	}
+	a := fp.ans
 	cr.q.Visited(a.URL)
 	pg := Page{URL: it.URL, Visited: true, FinalURL: a.URL, Status: a.Status, Depth: it.Depth, From: it.From, How: it.How,
-		Started: start, TookMS: a.Took.Milliseconds()}
+		Started: fp.start, TookMS: a.Took.Milliseconds()}
 	cr.mu.Lock()
 	cr.res.Visited++
 	cr.res.Stats.Pages++
@@ -748,7 +796,7 @@ func (cr *crawler) page(ctx context.Context, it frontier.Item, first bool, b *bu
 			cr.mu.Unlock()
 		}
 		cr.o.Page(pg)
-		return nil, nil, false
+		return nil, nil, "", false
 	}
 	if first && a.Status >= 300 && a.Status < 400 {
 		loc := a.Header.Get("Location")
@@ -761,7 +809,7 @@ func (cr *crawler) page(ctx context.Context, it frontier.Item, first bool, b *bu
 		cr.res.SeedError = why
 		cr.mu.Unlock()
 		cr.o.Page(pg)
-		return nil, nil, false
+		return nil, nil, "", false
 	}
 	if first && a.URL != "" {
 		cr.seedFinalURL = a.URL
@@ -777,21 +825,7 @@ func (cr *crawler) page(ctx context.Context, it frontier.Item, first bool, b *bu
 	if pg.FinalURL == pg.URL {
 		pg.FinalURL = ""
 	}
-	isHTML := strings.Contains(strings.ToLower(a.Header.Get("Content-Type")), "html") || htmlLike(a.Body)
-	var p htmlscan.Page
-	if isHTML {
-		p = htmlscan.Scan(a.Body, a.URL)
-	}
-	doc := detect.Doc{URL: a.URL, Status: int64(a.Status), Headers: lower(a.Header), Title: p.Title, Body: head(a.Body, 64<<10)}
-	// One classifier for every caller (round 25J review): a 403 with a
-	// WAF's page that names no vendor (wafRe) is a block here too, not a
-	// page that passed.
-	verdict := detect.Check(doc)
-	if !verdict.Blocked {
-		if b := detect.Classify(doc); b != nil && b.Kind != detect.BlockRate {
-			verdict = detect.Result{Blocked: true, Vendor: b.Vendor, Evidence: b.Evidence}
-		}
-	}
+	isHTML, p, doc, verdict := fp.isHTML, fp.scan, fp.doc, fp.verdict
 	if first {
 		cr.mu.Lock()
 		cr.res.Seed, cr.res.Blocked = doc, verdict
@@ -801,10 +835,7 @@ func (cr *crawler) page(ctx context.Context, it frontier.Item, first bool, b *bu
 	cr.mu.Lock()
 	if verdict.Blocked {
 		hs.challenged++
-		ch := Challenged{URL: it.URL, Depth: it.Depth, Asked: true}
-		if b := detect.Classify(doc); b != nil {
-			ch.Kind = string(b.Kind)
-		}
+		ch := Challenged{URL: it.URL, Depth: it.Depth, Asked: true, Kind: fp.blkKind}
 		cr.res.Challenged = append(cr.res.Challenged, ch)
 	} else {
 		hs.ok++ // answered, if only with a 404: the host lets the crawl in
@@ -828,7 +859,7 @@ func (cr *crawler) page(ctx context.Context, it frontier.Item, first bool, b *bu
 				cr.setStop(fmt.Sprintf("%d pages in a row are %s challenges", n, verdict.Vendor))
 			}
 		}
-		return nil, nil, true
+		return nil, nil, "", true
 	}
 	if !first {
 		cr.mu.Lock()
@@ -853,17 +884,18 @@ func (cr *crawler) page(ctx context.Context, it frontier.Item, first bool, b *bu
 	}
 	if !isHTML || a.Status >= 400 {
 		cr.o.Page(pg)
-		return nil, nil, false
+		return nil, nil, "", false
 	}
+	toCheck := ""
 	if print, origin := shellPrint(p), originOf(a.URL); cr.prints[origin] == "" {
 		cr.prints[origin] = print
-		cr.toCheck = a.URL
+		toCheck = a.URL
 	} else if print == cr.prints[origin] {
 		// The shell again: its scripts are held and its links queued.
 		pg.Shell = true
 		cr.count(func(st *Stats) { st.Shells++ })
 		cr.o.Page(pg)
-		return nil, nil, false
+		return nil, nil, "", false
 	}
 	var jobs []job
 	for _, s := range p.Scripts {
@@ -899,7 +931,7 @@ func (cr *crawler) page(ctx context.Context, it frontier.Item, first bool, b *bu
 	links := frontier.FromHTML(string(a.Body), a.URL)
 	pg.Discovered = len(links)
 	cr.o.Page(pg)
-	return jobs, links, false
+	return jobs, links, toCheck, false
 }
 
 func (cr *crawler) extractScript(body []byte, hint string) jsapi.Result {
@@ -1182,7 +1214,7 @@ func (cr *crawler) probe(ctx context.Context, seed string) ([]job, []frontier.Fo
 	root := u.Scheme + "://" + u.Host
 	var jobs []job
 	var links []frontier.Found
-	get := func(p string) (answer, bool) {
+	fetchProbe := func(p string) (answer, bool) {
 		if cr.stop() != "" {
 			return answer{}, false
 		}
@@ -1192,7 +1224,11 @@ func (cr *crawler) probe(ctx context.Context, seed string) ([]job, []frontier.Fo
 		a := cr.fetch(ctx, root+p, seed, dataReq, "Other")
 		cr.politeAt(a, seed, 0)
 		cr.count(func(st *Stats) { st.Probes[p] = a.Status })
-		return a, a.Err == nil && a.Status == 200 && !htmlLike(a.Body) && len(a.Body) > 0
+		return a, a.Err == nil && a.Status == 200 && len(a.Body) > 0
+	}
+	get := func(p string) (answer, bool) {
+		a, ok := fetchProbe(p)
+		return a, ok && !htmlLike(a.Body)
 	}
 	sitemaps := []string{root + "/sitemap.xml"}
 	if a, ok := get("/robots.txt"); ok {
@@ -1208,8 +1244,11 @@ func (cr *crawler) probe(ctx context.Context, seed string) ([]job, []frontier.Fo
 		if i == 5 {
 			break
 		}
-		if a, ok := get(strings.TrimPrefix(m, root)); ok && bytes.Contains(a.Body, []byte("<loc>")) {
-			links = append(links, frontier.FromSitemap(string(a.Body), m)...)
+		if a, ok := fetchProbe(strings.TrimPrefix(m, root)); ok && bytes.Contains(a.Body, []byte("<loc>")) {
+			head := strings.ToLower(string(a.Body[:min(len(a.Body), 1024)]))
+			if !strings.Contains(head, "<!doctype html") && !strings.Contains(head, "<html") {
+				links = append(links, frontier.FromSitemap(string(a.Body), m)...)
+			}
 		}
 	}
 	add := func(urls []string, how string) {
@@ -1636,11 +1675,40 @@ type inflight struct {
 // the pages were taken: everything found is a level deeper, so the queue
 // gives the pages in the order a crawl of one page at a time gives them.
 // The first page (the seed, its well-known files) is done alone.
+type pageSlot struct {
+	it      frontier.Item
+	origin  string
+	section string
+	skipped bool
+	done    chan struct{}
+	fp      fetchedPage
+}
+
+func sectionKeyOf(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	orig := strings.ToLower(u.Scheme + "://" + u.Host)
+	p := strings.Trim(u.Path, "/")
+	if p == "" {
+		return orig + "/"
+	}
+	if i := strings.IndexByte(p, '/'); i >= 0 {
+		return orig + "/" + p[:i]
+	}
+	return orig + "/"
+}
+
 func (cr *crawler) pages(ctx context.Context) {
 	o := cr.o
-	first := true
+	pageWorkers := o.PageWorkers
+	if pageWorkers <= 0 {
+		pageWorkers = maxPagesInFlight
+	}
+	scriptSlots := max(maxPagesInFlight, pageWorkers)
 	var level []*inflight
-	sem := make(chan struct{}, maxPagesInFlight)
+	sem := make(chan struct{}, scriptSlots)
 	commit := func() {
 		for _, f := range level {
 			<-f.done
@@ -1666,30 +1734,14 @@ func (cr *crawler) pages(ctx context.Context) {
 		level = nil
 	}
 	defer commit()
-	for ctx.Err() == nil && cr.stop() == "" {
-		nx, ok := cr.q.Peek()
-		if len(level) > 0 && (!ok || nx.Depth != level[0].it.Depth) {
-			commit()
-			continue
-		}
-		it, ok := cr.q.Next()
-		if !ok {
-			break
-		}
-		if !first && cr.skel != nil && cr.skel.shouldSkip(it.URL) {
-			cr.q.Refund()
-			cr.mu.Lock()
-			cr.res.Listed[frontier.TemplateSaturated]++
-			cr.mu.Unlock()
-			o.Page(Page{URL: it.URL, How: it.How, From: it.From, Depth: it.Depth, Reason: frontier.TemplateSaturated})
-			continue
-		}
+
+	commitFetched := func(fp fetchedPage, first bool) {
+		it := fp.it
 		b := &bucket{}
-		jobs, links, blocked := cr.page(ctx, it, first, b)
-		if cr.toCheck != "" && o.Depth > 0 && !blocked && cr.stop() == "" {
-			cr.spaCheck(ctx, cr.toCheck, it.Depth)
+		jobs, links, toCheck, blocked := cr.commitPage(fp, first, b)
+		if toCheck != "" && o.Depth > 0 && !blocked && cr.stop() == "" {
+			cr.spaCheck(ctx, toCheck, it.Depth)
 		}
-		cr.toCheck = ""
 		fromURL := it.URL
 		if first {
 			if o.Probe && cr.stop() == "" && cr.res.SeedError == "" {
@@ -1714,9 +1766,7 @@ func (cr *crawler) pages(ctx context.Context) {
 		// taken (round 25L review): a bundle two pages of the level share
 		// is the first page's, its routes queued with that page's, as a
 		// one-page-at-a-time crawl has it, whichever page's scripts are
-		// fetched first. (A chunk a script names is claimed when that
-		// script is read: one a later page names in its HTML may go with
-		// that page.)
+		// fetched first.
 		admitted := jobs[:0]
 		for _, j := range jobs {
 			if cr.admit(j) {
@@ -1732,19 +1782,155 @@ func (cr *crawler) pages(ctx context.Context) {
 		f := &inflight{it: it, links: links, from: fromURL, blocked: blocked, b: b, done: make(chan struct{})}
 		level = append(level, f)
 		if first {
-			// The seed alone: its well-known files and scripts before any
-			// other page, its findings queued at once.
-			first = false
 			cr.drain(ctx, jobs)
 			close(f.done)
 			commit()
-			continue
+			return
 		}
 		sem <- struct{}{}
 		go func() {
 			defer func() { <-sem; close(f.done) }()
 			cr.drain(ctx, jobs)
 		}()
+	}
+
+	// Seed page runs alone first so landing host, shell print, and well-known
+	// probes settle before any deeper level starts.
+	if ctx.Err() == nil && cr.stop() == "" {
+		if it, ok := cr.q.Next(); ok {
+			fp := cr.fetchPage(ctx, it, true)
+			commitFetched(fp, true)
+		} else {
+			return
+		}
+	}
+
+	var win []*pageSlot
+	activeWorkers := 0
+	originInFlight := map[string]int{}
+	sectionInFlight := map[string]int{}
+
+	canDispatch := func(nx frontier.Item) bool {
+		if activeWorkers >= pageWorkers || ctx.Err() != nil || cr.stop() != "" {
+			return false
+		}
+		if len(level) > 0 && nx.Depth != level[0].it.Depth {
+			return false
+		}
+		if len(win) > 0 && nx.Depth != win[0].it.Depth {
+			return false
+		}
+		hs := cr.host(nx.URL)
+		cr.mu.Lock()
+		inChallengeStreak := cr.challenged > 0
+		hostChallenged := hs.challenged > 0
+		cr.mu.Unlock()
+		if inChallengeStreak && activeWorkers > 0 {
+			return false
+		}
+		orig := originOf(nx.URL)
+		// Hold a second request to an origin whose first shell print / SPA
+		// check has not settled yet, or that has challenged before.
+		if cr.prints[orig] == "" || hostChallenged {
+			return originInFlight[orig] == 0
+		}
+		sec := sectionKeyOf(nx.URL)
+		if originInFlight[orig] == 0 {
+			return true
+		}
+		return originInFlight[orig] < 2 && sectionInFlight[sec] == 0
+	}
+
+	commitSlot := func(slot *pageSlot) {
+		if slot.skipped || (cr.skel != nil && cr.skel.shouldSkip(slot.it.URL)) {
+			if slot.skipped {
+				cr.q.Refund()
+			}
+			cr.mu.Lock()
+			cr.res.Listed[frontier.TemplateSaturated]++
+			cr.mu.Unlock()
+			o.Page(Page{URL: slot.it.URL, How: slot.it.How, From: slot.it.From, Depth: slot.it.Depth, Reason: frontier.TemplateSaturated})
+			return
+		}
+		commitFetched(slot.fp, false)
+	}
+
+	for ctx.Err() == nil && cr.stop() == "" {
+		progressed := false
+		for len(win) > 0 && cr.stop() == "" && ctx.Err() == nil {
+			select {
+			case <-win[0].done:
+				slot := win[0]
+				win = win[1:]
+				if !slot.skipped {
+					activeWorkers--
+					originInFlight[slot.origin]--
+					sectionInFlight[slot.section]--
+				}
+				commitSlot(slot)
+				progressed = true
+			default:
+				goto fill
+			}
+		}
+	fill:
+		for ctx.Err() == nil && cr.stop() == "" {
+			nx, ok := cr.q.Peek()
+			if !ok {
+				break
+			}
+			if len(win) == 0 && cr.skel != nil && cr.skel.shouldSkip(nx.URL) {
+				it, _ := cr.q.Next()
+				cr.q.Refund()
+				cr.mu.Lock()
+				cr.res.Listed[frontier.TemplateSaturated]++
+				cr.mu.Unlock()
+				o.Page(Page{URL: it.URL, How: it.How, From: it.From, Depth: it.Depth, Reason: frontier.TemplateSaturated})
+				progressed = true
+				continue
+			}
+			if !canDispatch(nx) {
+				break
+			}
+			it, _ := cr.q.Next()
+			if cr.skel != nil && cr.skel.shouldSkip(it.URL) {
+				ch := make(chan struct{})
+				close(ch)
+				win = append(win, &pageSlot{it: it, skipped: true, done: ch})
+				continue
+			}
+			orig := originOf(it.URL)
+			sec := sectionKeyOf(it.URL)
+			slot := &pageSlot{it: it, origin: orig, section: sec, done: make(chan struct{})}
+			activeWorkers++
+			originInFlight[orig]++
+			sectionInFlight[sec]++
+			win = append(win, slot)
+			go func(s *pageSlot) {
+				defer close(s.done)
+				s.fp = cr.fetchPage(ctx, s.it, false)
+			}(slot)
+		}
+		if progressed {
+			continue
+		}
+		if len(win) > 0 {
+			<-win[0].done
+			continue
+		}
+		if len(level) > 0 {
+			nx, ok := cr.q.Peek()
+			if !ok || nx.Depth != level[0].it.Depth {
+				commit()
+				continue
+			}
+		}
+		if _, ok := cr.q.Peek(); !ok {
+			break
+		}
+	}
+	for _, s := range win {
+		<-s.done
 	}
 }
 

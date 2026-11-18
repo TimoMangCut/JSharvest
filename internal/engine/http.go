@@ -35,6 +35,8 @@ import (
 // HTTPOptions are what the HTTP engine takes on top of Config.
 type HTTPOptions struct {
 	Rate        float64 // requests a second
+	PageRate    float64 // optional document requests a second (0: share Rate)
+	PageWorkers int     // concurrent document fetches (<= 0: default)
 	Probe       bool    // the well-known files
 	NoSpecProbe bool    // skip OpenAPI/Swagger and OIDC probes
 	SourceMaps  bool
@@ -148,7 +150,8 @@ func RunHTTP(ctx context.Context, cfg Config, ho HTTPOptions) (Record, error) {
 	}
 	o := httpcrawl.Options{
 		Proxy:  proxyURL,
-		Target: cfg.Target, InScope: cfg.InScope, PageScope: pageScope, Depth: cfg.Depth, MaxPages: cfg.MaxPages, Rate: ho.Rate,
+		Target: cfg.Target, InScope: cfg.InScope, PageScope: pageScope, Depth: cfg.Depth, MaxPages: cfg.MaxPages, Rate: ho.Rate, PageRate: ho.PageRate,
+		Workers: max(cfg.Tabs, 4), PageWorkers: ho.PageWorkers,
 		MaxFiles: cfg.ResolveMax, MaxBody: cfg.MaxBody, Timeout: cfg.NavTimeout, UserAgent: httpUA(cfg),
 		HostRules: cfg.Browser.HostRules, NoDNS: cfg.Browser.Proxy != "" || cfg.Browser.HostRules != "", Insecure: cfg.Browser.Insecure, RecordBody: cfg.RecordBody,
 		Probe: ho.Probe, NoSpecProbe: cfg.NoSpecProbe || ho.NoSpecProbe, SourceMaps: ho.SourceMaps, GuessMaps: ho.GuessMaps,

@@ -1182,7 +1182,11 @@ func (x *extractor) instantiateHOF(c *js.CallExpr, as []js.IExpr) bool {
 				x.inst[ic] = append(x.inst[ic], made...)
 			}
 		}), ib)
-		js.Walk(moduleVisitor{x}, ib)
+		mv := &moduleVisitor{x: x}
+		if cur := x.selfClass(); cur != nil {
+			mv.clsStack = []*js.ClassDecl{cur}
+		}
+		js.Walk(mv, ib)
 	}
 	return true
 }

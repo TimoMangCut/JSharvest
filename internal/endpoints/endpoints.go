@@ -245,7 +245,7 @@ func analyzeDir(dir string, workers int, skip map[string]bool, slim bool) ([]Scr
 	return out, nil
 }
 
-const heavyScriptBytes = 512 << 10
+const heavyScriptBytes = 192 << 10
 
 func extractJS(src []byte, hint string, heavySem chan struct{}) jsapi.Result {
 	// Clip slice capacity so tdewolff/parse/v2.NewInputBytes (which appends a
@@ -1080,6 +1080,7 @@ func Build(scripts []Script, reqs []Request, inScope func(host string) bool) []E
 			}
 		}
 	}
+	rebindDevLoopbackEndpoints(scripts, eps, inScope)
 	eps = canonicalMerge(eps)
 
 	attachGraphQLDocs(scripts, eps, inScope)
@@ -1366,7 +1367,191 @@ func linkModules(scripts []Script, byKey map[string]*Endpoint, order *[]string, 
 		return qOut, bOut
 	}
 
-	applyLeaf := func(caller Script, im jsapi.Import, ex indexedExport, effArgs []jsapi.ImportArg, viaQ, viaB []string) {
+	type constKey struct {
+		mod, exp, key string
+	}
+	scriptConsts := make([]map[constKey]constSlot, len(scripts))
+	bundlerConsts := map[[4]string]constSlot{}
+	putSlot := func(m map[constKey]constSlot, ck constKey, val string) {
+		if val == "" {
+			return
+		}
+		if cur, ok := m[ck]; ok {
+			if cur.val != val {
+				cur.clashed = true
+				m[ck] = cur
+			}
+			return
+		}
+		m[ck] = constSlot{val: val}
+	}
+	putBundlerConst := func(orig, mod, exp, key, val string) {
+		if val == "" {
+			return
+		}
+		bk := [4]string{orig, mod, exp, key}
+		if cur, ok := bundlerConsts[bk]; ok {
+			if cur.val != val {
+				cur.clashed = true
+				bundlerConsts[bk] = cur
+			}
+			return
+		}
+		bundlerConsts[bk] = constSlot{val: val}
+	}
+	for si, s := range scripts {
+		if len(s.ConstExports) == 0 || isTrackerScript(s) {
+			continue
+		}
+		sm := map[constKey]constSlot{}
+		origs := scriptOrigins[si]
+		if len(origs) == 0 {
+			origs = []string{""}
+		}
+		for _, cd := range s.ConstExports {
+			for k, v := range cd.Values {
+				putSlot(sm, constKey{cd.Module, cd.Export, k}, v)
+				if cd.Module != "" {
+					for _, orig := range origs {
+						putBundlerConst(orig, cd.Module, cd.Export, k, v)
+					}
+				}
+			}
+			if cd.Scalar != "" {
+				putSlot(sm, constKey{cd.Module, cd.Export, ""}, cd.Scalar)
+				if cd.Module != "" {
+					for _, orig := range origs {
+						putBundlerConst(orig, cd.Module, cd.Export, "", cd.Scalar)
+					}
+				}
+			}
+		}
+		scriptConsts[si] = sm
+	}
+
+	lookupSlotInMap := func(sm map[constKey]constSlot, mod, exp, key string) (string, bool) {
+		if len(sm) == 0 {
+			return "", false
+		}
+		if sl, ok := sm[constKey{mod, exp, key}]; ok && !sl.clashed {
+			return sl.val, true
+		}
+		if exp == "a" || exp == "default" {
+			if sl, ok := sm[constKey{mod, "*", key}]; ok && !sl.clashed {
+				return sl.val, true
+			}
+		}
+		if exp != "*" && exp != "" && key != "" {
+			if sl, ok := sm[constKey{mod, "*", exp + "." + key}]; ok && !sl.clashed {
+				return sl.val, true
+			}
+		}
+		return "", false
+	}
+
+	lookupBundlerSlot := func(orig, mod, exp, key string) (string, bool) {
+		if sl, ok := bundlerConsts[[4]string{orig, mod, exp, key}]; ok && !sl.clashed {
+			return sl.val, true
+		}
+		if exp == "a" || exp == "default" {
+			if sl, ok := bundlerConsts[[4]string{orig, mod, "*", key}]; ok && !sl.clashed {
+				return sl.val, true
+			}
+		}
+		if exp != "*" && exp != "" && key != "" {
+			if sl, ok := bundlerConsts[[4]string{orig, mod, "*", exp + "." + key}]; ok && !sl.clashed {
+				return sl.val, true
+			}
+		}
+		return "", false
+	}
+
+	var resolveConstAt func(curIdx int, modSpec, expName, key string, hop int) (string, bool)
+	resolveConstAt = func(curIdx int, modSpec, expName, key string, hop int) (string, bool) {
+		if hop > 4 || modSpec == "" || expName == "" {
+			return "", false
+		}
+		tids, _ := targetScripts(curIdx, modSpec)
+		if len(tids) > 0 {
+			resolved := ""
+			for _, tid := range tids {
+				if v, ok := lookupSlotInMap(scriptConsts[tid], "", expName, key); ok {
+					if resolved != "" && resolved != v {
+						return "", false
+					}
+					resolved = v
+					continue
+				}
+				for _, re := range scripts[tid].ReExports {
+					var sub string
+					var rok bool
+					if re.All {
+						sub, rok = resolveConstAt(tid, re.Module, expName, key, hop+1)
+					} else if re.Name == expName && re.Target != "" && re.Target != "*" {
+						sub, rok = resolveConstAt(tid, re.Module, re.Target, key, hop+1)
+					}
+					if rok {
+						if resolved != "" && resolved != sub {
+							return "", false
+						}
+						resolved = sub
+					}
+				}
+			}
+			if resolved != "" {
+				return resolved, true
+			}
+		}
+		if !strings.HasPrefix(modSpec, ".") && !strings.HasPrefix(modSpec, "/") {
+			origs := scriptOrigins[curIdx]
+			if len(origs) == 0 {
+				origs = []string{""}
+			}
+			resolved := ""
+			for _, orig := range origs {
+				if v, ok := lookupBundlerSlot(orig, modSpec, expName, key); ok {
+					if resolved != "" && resolved != v {
+						return "", false
+					}
+					resolved = v
+				}
+			}
+			if resolved != "" {
+				return resolved, true
+			}
+		}
+		return "", false
+	}
+
+	isValidConstEndpointVal := func(v string, hasBasePrefix bool) bool {
+		v = strings.TrimSpace(v)
+		if v == "" || len(v) > 512 || strings.ContainsAny(v, " \t\r\n<>\"'`\\") {
+			return false
+		}
+		if strings.HasPrefix(v, "http://") || strings.HasPrefix(v, "https://") || strings.HasPrefix(v, "//") || (strings.HasPrefix(v, "/") && len(v) > 1) {
+			return true
+		}
+		if strings.Contains(v, "/") {
+			return !hasStaticAssetExt(v)
+		}
+		if !hasBasePrefix {
+			return false
+		}
+		hasAlpha := false
+		for i := 0; i < len(v); i++ {
+			c := v[i]
+			switch {
+			case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z':
+				hasAlpha = true
+			case c >= '0' && c <= '9', c == '-', c == '_', c == '.':
+			default:
+				return false
+			}
+		}
+		return hasAlpha && len(v) >= 2 && !hasStaticAssetExt(v)
+	}
+
+	applyLeaf := func(callerIdx int, caller Script, im jsapi.Import, ex indexedExport, effArgs []jsapi.ImportArg, viaQ, viaB []string) {
 		exScript := scripts[ex.si]
 		if !ex.ParamURL {
 			ep := lookup(ex.Method + " " + ex.URL)
@@ -1406,6 +1591,7 @@ func linkModules(scripts []Script, byKey map[string]*Endpoint, order *[]string, 
 		if ex.URLArg < 0 || ex.URLArg >= len(effArgs) {
 			return
 		}
+		hasBasePrefix := ex.URLPrefix != "" || ex.HasDynBase || ex.BaseArg >= 0
 		var rawURLs []string
 		if ex.URLProp != "" {
 			rawURLs = effArgs[ex.URLArg].PropValues[ex.URLProp]
@@ -1415,7 +1601,28 @@ func linkModules(scripts []Script, byKey map[string]*Endpoint, order *[]string, 
 				rawURLs = effArgs[ex.URLArg].PropValues["endpoint"]
 			}
 		} else {
-			rawURLs = effArgs[ex.URLArg].Values
+			ua := effArgs[ex.URLArg]
+			if ua.ConstRef != nil {
+				if cv, cok := resolveConstAt(callerIdx, ua.ConstRef.Module, ua.ConstRef.Export, ua.ConstRef.Key, 0); cok {
+					joinedConst := cv
+					if ua.ConstSuffix != "" {
+						if strings.HasSuffix(joinedConst, "/") && strings.HasPrefix(ua.ConstSuffix, "/") {
+							joinedConst += strings.TrimPrefix(ua.ConstSuffix, "/")
+						} else {
+							joinedConst += ua.ConstSuffix
+						}
+					}
+					if isValidConstEndpointVal(joinedConst, hasBasePrefix) {
+						rawURLs = []string{joinedConst}
+					}
+				}
+			}
+			if len(rawURLs) == 0 {
+				rawURLs = ua.Values
+			}
+			if len(rawURLs) == 0 && hasBasePrefix && len(ua.RelValues) > 0 {
+				rawURLs = ua.RelValues
+			}
 		}
 		if len(rawURLs) == 0 {
 			return
@@ -1558,11 +1765,32 @@ func linkModules(scripts []Script, byKey map[string]*Endpoint, order *[]string, 
 
 			for _, rawU := range rawURLs {
 				uStr := strings.TrimSpace(rawU)
-				if ex.URLPrefix != "" && !strings.Contains(uStr, "://") && !strings.HasPrefix(uStr, ex.URLPrefix+"/") {
+				if ex.URLPrefix != "" && !strings.Contains(uStr, "://") && !strings.HasPrefix(uStr, "//") && !strings.HasPrefix(uStr, ex.URLPrefix+"/") && uStr != ex.URLPrefix {
 					if strings.HasPrefix(uStr, "/") {
 						uStr = ex.URLPrefix + uStr
 					} else {
 						uStr = ex.URLPrefix + "/" + uStr
+					}
+				}
+				if ex.URLSuffix != "" {
+					uBasePath, uBaseQ, hasBaseQ := strings.Cut(uStr, "?")
+					sfxPath, sfxQ, hasSfxQ := strings.Cut(ex.URLSuffix, "?")
+					if sfxPath != "" {
+						if strings.HasSuffix(uBasePath, "/") && strings.HasPrefix(sfxPath, "/") {
+							uBasePath += strings.TrimPrefix(sfxPath, "/")
+						} else {
+							uBasePath += sfxPath
+						}
+					}
+					switch {
+					case hasBaseQ && uBaseQ != "" && hasSfxQ && sfxQ != "":
+						uStr = uBasePath + "?" + uBaseQ + "&" + sfxQ
+					case hasBaseQ && uBaseQ != "":
+						uStr = uBasePath + "?" + uBaseQ
+					case hasSfxQ && sfxQ != "":
+						uStr = uBasePath + "?" + sfxQ
+					default:
+						uStr = uBasePath
 					}
 				}
 				uPath, uQuery, _ := strings.Cut(uStr, "?")
@@ -1670,11 +1898,11 @@ func linkModules(scripts []Script, byKey map[string]*Endpoint, order *[]string, 
 							nq, nb := extendKeys(be.Export)
 							if !resolveChain(be.si, be.Via.Module, be.Via.Name, composeViaArgs(be.Via.Args, curArgs), nq, nb, depth+1) && (be.ParamURL || be.URL != "") && !applied[vk] {
 								applied[vk] = true
-								applyLeaf(s, im, be, curArgs, viaQ, viaB)
+								applyLeaf(callerIdx, s, im, be, curArgs, viaQ, viaB)
 							}
 						} else if !applied[vk] {
 							applied[vk] = true
-							applyLeaf(s, im, be, curArgs, viaQ, viaB)
+							applyLeaf(callerIdx, s, im, be, curArgs, viaQ, viaB)
 						}
 						delete(visited, vk)
 					}
@@ -1704,14 +1932,15 @@ func linkModules(scripts []Script, byKey map[string]*Endpoint, order *[]string, 
 							nq, nb := extendKeys(ex)
 							if !resolveChain(tid, ex.Via.Module, ex.Via.Name, composeViaArgs(ex.Via.Args, curArgs), nq, nb, depth+1) && (ex.ParamURL || ex.URL != "") && !applied[lk] {
 								applied[lk] = true
-								applyLeaf(s, im, indexedExport{ex, tid}, curArgs, viaQ, viaB)
+								applyLeaf(callerIdx, s, im, indexedExport{ex, tid}, curArgs, viaQ, viaB)
 							}
 						} else if !applied[lk] {
 							applied[lk] = true
-							applyLeaf(s, im, indexedExport{ex, tid}, curArgs, viaQ, viaB)
+							applyLeaf(callerIdx, s, im, indexedExport{ex, tid}, curArgs, viaQ, viaB)
 						}
 					}
 					// Follow ES module re-exports (`export { a as b } from "./x"`, `export * from "./x"`)
+					clsPart, methodPart, hasMethodDot := strings.Cut(expName, ".")
 					for _, re := range ts.ReExports {
 						if re.All {
 							if resolveChain(tid, re.Module, expName, curArgs, viaQ, viaB, depth+1) {
@@ -1719,6 +1948,11 @@ func linkModules(scripts []Script, byKey map[string]*Endpoint, order *[]string, 
 							}
 						} else if re.Name == expName && re.Target != "*" && re.Target != "" {
 							if resolveChain(tid, re.Module, re.Target, curArgs, viaQ, viaB, depth+1) {
+								foundAny = true
+							}
+							matchedDirect = true
+						} else if hasMethodDot && re.Name == clsPart && re.Target != "*" && re.Target != "" {
+							if resolveChain(tid, re.Module, re.Target+"."+methodPart, curArgs, viaQ, viaB, depth+1) {
 								foundAny = true
 							}
 							matchedDirect = true
@@ -1736,11 +1970,11 @@ func linkModules(scripts []Script, byKey map[string]*Endpoint, order *[]string, 
 								nq, nb := extendKeys(ex)
 								if !resolveChain(tid, ex.Via.Module, ex.Via.Name, composeViaArgs(ex.Via.Args, curArgs), nq, nb, depth+1) && (ex.ParamURL || ex.URL != "") && !applied[lk] {
 									applied[lk] = true
-									applyLeaf(s, im, indexedExport{ex, tid}, curArgs, viaQ, viaB)
+									applyLeaf(callerIdx, s, im, indexedExport{ex, tid}, curArgs, viaQ, viaB)
 								}
 							} else if !applied[lk] {
 								applied[lk] = true
-								applyLeaf(s, im, indexedExport{ex, tid}, curArgs, viaQ, viaB)
+								applyLeaf(callerIdx, s, im, indexedExport{ex, tid}, curArgs, viaQ, viaB)
 							}
 						}
 					}
@@ -1814,11 +2048,15 @@ func linkModules(scripts []Script, byKey map[string]*Endpoint, order *[]string, 
 					}
 					addProp(ex.BaseProp)
 				}
+				clsPart, methodPart, hasMethodDot := strings.Cut(en, ".")
 				for _, re := range ts.ReExports {
 					if re.All {
 						walk(tid, re.Module, en, depth+1)
 					} else if re.Name == en && re.Target != "*" && re.Target != "" {
 						walk(tid, re.Module, re.Target, depth+1)
+						matchedDirect = true
+					} else if hasMethodDot && re.Name == clsPart && re.Target != "*" && re.Target != "" {
+						walk(tid, re.Module, re.Target+"."+methodPart, depth+1)
 						matchedDirect = true
 					}
 				}
@@ -1990,10 +2228,19 @@ func evalSingleViaArg(va jsapi.ViaArg, callerArgs []jsapi.ImportArg) jsapi.Impor
 				for _, v := range ca.Values {
 					vals = append(vals, joinViaAffix(va.Prefix, v, va.Suffix))
 				}
+			} else if len(ca.RelValues) > 0 && va.Prefix != "" {
+				for _, v := range ca.RelValues {
+					vals = append(vals, joinViaAffix(va.Prefix, v, va.Suffix))
+				}
 			} else if strings.HasSuffix(va.Prefix, "/") || strings.HasPrefix(va.Suffix, "/") {
 				vals = []string{va.Prefix + placeholder + va.Suffix}
 			}
-			return jsapi.ImportArg{Values: uniq(vals), Query: ca.Query, BaseKey: ca.BaseKey}
+			out := jsapi.ImportArg{Values: uniq(vals), Query: ca.Query, BaseKey: ca.BaseKey}
+			if ca.ConstRef != nil && va.Prefix == "" {
+				out.ConstRef = ca.ConstRef
+				out.ConstSuffix = ca.ConstSuffix + va.Suffix
+			}
+			return out
 		}
 		return ca
 	}
@@ -3171,5 +3418,162 @@ func attachGraphQLDocs(scripts []Script, eps []*Endpoint, inScope func(host stri
 				}
 			}
 		}
+	}
+}
+
+func isLoopbackHost(rawHost string) bool {
+	h := strings.TrimSpace(strings.ToLower(rawHost))
+	if h == "" {
+		return false
+	}
+	if strings.HasPrefix(h, "[") {
+		if i := strings.IndexByte(h, ']'); i > 0 {
+			h = h[1:i]
+		}
+	} else if strings.Count(h, ":") == 1 {
+		h, _, _ = strings.Cut(h, ":")
+	}
+	switch h {
+	case "localhost", "127.0.0.1", "::1", "0.0.0.0":
+		return true
+	}
+	return false
+}
+
+// rebindDevLoopbackEndpoints safely re-anchors static developer loopback URLs
+// (e.g. http://localhost:8081/realms/x/...) left inside first-party in-scope
+// bundles onto the matching in-scope gateway/origin before canonicalMerge runs.
+// When the target scope itself includes loopback (local testbeds), it is a no-op.
+func rebindDevLoopbackEndpoints(scripts []Script, eps []*Endpoint, inScope func(host string) bool) {
+	if inScope == nil || inScope("localhost") || inScope("127.0.0.1") || inScope("::1") {
+		return
+	}
+	hasLoopback := false
+	for _, ep := range eps {
+		if ep.Observed == nil && ep.Host != "" && !ep.collector && isLoopbackHost(ep.Host) {
+			hasLoopback = true
+			break
+		}
+	}
+	if !hasLoopback {
+		return
+	}
+
+	type scopedBase struct {
+		host string
+		path string
+	}
+	parseScopedBases := func(s Script) []scopedBase {
+		var out []scopedBase
+		addRaw := func(raw string) {
+			u, err := url.Parse(strings.TrimSpace(raw))
+			if err != nil || u.Host == "" || isLoopbackHost(u.Host) || !inScope(u.Hostname()) {
+				return
+			}
+			bp := strings.TrimRight(u.EscapedPath(), "/")
+			if bp == "" || strings.Contains(bp, placeholder) {
+				return
+			}
+			sb := scopedBase{host: canonHost(u.Host), path: bp}
+			if !slices.Contains(out, sb) {
+				out = append(out, sb)
+			}
+		}
+		for _, b := range s.Bases {
+			addRaw(b)
+		}
+		for _, st := range s.Settings {
+			addRaw(st.Value)
+		}
+		return out
+	}
+
+	bySHA := map[string][]scopedBase{}
+	var allBases []scopedBase
+	for _, s := range scripts {
+		if isTrackerScript(s) {
+			continue
+		}
+		sbs := parseScopedBases(s)
+		if len(sbs) == 0 {
+			continue
+		}
+		bySHA[s.SHA256] = sbs
+		for _, sb := range sbs {
+			if !slices.Contains(allBases, sb) {
+				allBases = append(allBases, sb)
+			}
+		}
+	}
+
+	matchPrefixHost := func(epPath string, pool []scopedBase) string {
+		bestLen := 0
+		bestHost := ""
+		ambig := false
+		for _, sb := range pool {
+			if epPath != sb.path && !strings.HasPrefix(epPath, sb.path+"/") {
+				continue
+			}
+			if len(sb.path) > bestLen {
+				bestLen = len(sb.path)
+				bestHost = sb.host
+				ambig = false
+			} else if len(sb.path) == bestLen && sb.host != bestHost {
+				ambig = true
+			}
+		}
+		if ambig {
+			return ""
+		}
+		return bestHost
+	}
+
+	firstPartyHost := func(ep *Endpoint) string {
+		if so := epScriptOrigin(ep, inScope); so != "" {
+			if u, err := url.Parse(so); err == nil && u.Host != "" && !isLoopbackHost(u.Host) {
+				return canonHost(u.Host)
+			}
+		}
+		one := ""
+		for _, src := range ep.Static {
+			u, err := url.Parse(src.Script)
+			if err != nil || u.Host == "" || isLoopbackHost(u.Host) || !inScope(u.Hostname()) {
+				continue
+			}
+			ch := canonHost(u.Host)
+			if one != "" && one != ch {
+				return ""
+			}
+			one = ch
+		}
+		return one
+	}
+
+	for _, ep := range eps {
+		if ep.Observed != nil || ep.Host == "" || ep.collector || !isLoopbackHost(ep.Host) {
+			continue
+		}
+		fpHost := firstPartyHost(ep)
+		if fpHost == "" {
+			continue
+		}
+		var ownPool []scopedBase
+		for _, src := range ep.Static {
+			for _, sb := range bySHA[src.SHA256] {
+				if !slices.Contains(ownPool, sb) {
+					ownPool = append(ownPool, sb)
+				}
+			}
+		}
+		targetHost := matchPrefixHost(ep.Path, ownPool)
+		if targetHost == "" {
+			targetHost = matchPrefixHost(ep.Path, allBases)
+		}
+		if targetHost == "" {
+			targetHost = fpHost
+		}
+		ep.Host = targetHost
+		ep.ThirdParty = false
+		ep.Bases = nil
 	}
 }

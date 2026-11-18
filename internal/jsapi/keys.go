@@ -8,13 +8,26 @@ import (
 	"github.com/tdewolff/parse/v2/js"
 )
 
+const maxKeySteps = 2048
+
+type keysBusyVar struct{ v *js.Var }
+
 // keys lists the field names an expression sends: the leaves of an object
 // literal (nested ones as a.b, three levels at most), through
 // JSON.stringify, URLSearchParams and FormData, and constants.
 func (x *extractor) keys(e js.IExpr, prefix string, depth int) []string {
+	steps := 0
+	return x.keysAt(e, prefix, depth, &steps)
+}
+
+func (x *extractor) keysAt(e js.IExpr, prefix string, depth int, steps *int) []string {
+	if e == nil || steps == nil {
+		return nil
+	}
+	*steps++
 	// Three levels of nesting at most (a.b.c), and a bound on the
-	// variables, calls and spreads gone through to find them.
-	if depth > 10 || strings.Count(prefix, ".") > 3 {
+	// variables, calls, branches and spreads gone through to find them.
+	if *steps > maxKeySteps || depth > 16 || strings.Count(prefix, ".") > 3 {
 		return nil
 	}
 	switch n := e.(type) {
@@ -23,7 +36,7 @@ func (x *extractor) keys(e js.IExpr, prefix string, depth int) []string {
 		for _, p := range n.List {
 			if p.Spread {
 				// {...base, ...cond ? {k: v} : {}}: the fields it spreads.
-				out = append(out, x.keys(p.Value, prefix, depth+1)...)
+				out = append(out, x.keysAt(p.Value, prefix, depth+1, steps)...)
 				continue
 			}
 			if p.Name == nil {
@@ -34,7 +47,7 @@ func (x *extractor) keys(e js.IExpr, prefix string, depth int) []string {
 				continue
 			}
 			x.noteKey(prefix+k, p.Value)
-			if sub := x.keys(p.Value, prefix+k+".", depth+1); len(sub) > 0 && x.nests(p.Value, 0) {
+			if sub := x.keysAt(p.Value, prefix+k+".", depth+1, steps); len(sub) > 0 && x.nests(p.Value, 0) {
 				out = append(out, sub...)
 				continue
 			}
@@ -45,7 +58,7 @@ func (x *extractor) keys(e js.IExpr, prefix string, depth int) []string {
 		d, ok := n.X.(*js.DotExpr)
 		if !ok {
 			// make(r): the object a function of the app's returns.
-			return x.returnedKeys(n, prefix, depth)
+			return x.returnedKeys(n, prefix, depth, steps)
 		}
 		if len(n.Args.List) == 0 {
 			break
@@ -53,22 +66,22 @@ func (x *extractor) keys(e js.IExpr, prefix string, depth int) []string {
 		switch propName(d.Y) {
 		case "map", "flatMap":
 			// list.map(e => ({k: e.v})): each element's fields.
-			return x.fnKeys(n.Args.List[0].Value, prefix, depth)
+			return x.fnKeys(n.Args.List[0].Value, prefix, depth, steps)
 		case "stringify":
 			// JSON.stringify, and qs.stringify for a form's body
-			return x.keys(n.Args.List[0].Value, prefix, depth)
+			return x.keysAt(n.Args.List[0].Value, prefix, depth+1, steps)
 		case "assign":
 			if isGlobal(d.X, "Object") {
 				var out []string
 				for _, a := range n.Args.List {
-					out = append(out, x.keys(a.Value, prefix, depth)...)
+					out = append(out, x.keysAt(a.Value, prefix, depth+1, steps)...)
 				}
 				return out
 			}
 		}
 	case *js.DotExpr:
 		if v, ok := x.member(n); ok {
-			return x.keys(v, prefix, depth+1)
+			return x.keysAt(v, prefix, depth+1, steps)
 		}
 		// this.loginForm, when one object literal is all it is given:
 		// several (this.form in many components) say nothing for sure.
@@ -83,24 +96,31 @@ func (x *extractor) keys(e js.IExpr, prefix string, depth int) []string {
 				}
 			}
 			if obj != nil {
-				return x.keys(obj, prefix, depth+1)
+				return x.keysAt(obj, prefix, depth+1, steps)
 			}
 		}
 	case *js.NewExpr:
 		switch globalName(n.X) {
 		case "URLSearchParams", "FormData":
 			if n.Args != nil && len(n.Args.List) > 0 {
-				return x.keys(n.Args.List[0].Value, prefix, depth)
+				return x.keysAt(n.Args.List[0].Value, prefix, depth+1, steps)
 			}
 		}
 	case *js.Var:
-		if a, ok := x.args[root(n)]; ok {
-			return x.keys(a, prefix, depth+1)
+		rv := root(n)
+		bk := keysBusyVar{rv}
+		if x.busy[bk] {
+			return nil
 		}
-		if src := x.destructFrom[root(n)]; src != nil && x.propOf[root(n)] != "" {
+		x.busy[bk] = true
+		defer delete(x.busy, bk)
+		if a, ok := x.args[rv]; ok {
+			return x.keysAt(a, prefix, depth+1, steps)
+		}
+		if src := x.destructFrom[rv]; src != nil && x.propOf[rv] != "" {
 			if obj, ok := x.object(src); ok {
-				if val := objectValue(obj, x.propOf[root(n)]); val != nil {
-					return x.keys(val, prefix, depth+1)
+				if val := objectValue(obj, x.propOf[rv]); val != nil {
+					return x.keysAt(val, prefix, depth+1, steps)
 				}
 			}
 		}
@@ -111,43 +131,67 @@ func (x *extractor) keys(e js.IExpr, prefix string, depth int) []string {
 					// r = new FormData; r.append("file", t): what it is
 					// given, and what is added to it.
 					var out []string
-					for _, k := range x.qset[root(n)] {
+					for _, k := range x.qset[rv] {
 						out = append(out, prefix+k)
 					}
-					return append(out, x.keys(c, prefix, depth+1)...)
+					return append(out, x.keysAt(c, prefix, depth+1, steps)...)
+				case "Map", "Set", "WeakMap", "WeakSet", "Headers":
+				default:
+					if len(x.qset[rv]) > 0 {
+						var out []string
+						for _, k := range x.qset[rv] {
+							out = append(out, prefix+k)
+						}
+						return out
+					}
 				}
 			}
 			// r = o || Object.assign({}, this.form); r.start_index = e: what
 			// it is set to, and the fields set on it after.
-			out := x.keys(c, prefix, depth+1)
-			for _, k := range x.setOn(root(n)) {
+			out := x.keysAt(c, prefix, depth+1, steps)
+			for _, k := range x.setOn(rv) {
 				out = append(out, prefix+k)
 			}
 			return out
+		}
+		if len(x.qset[rv]) > 0 && len(x.chains[rv]) > 0 && len(x.chains[rv][0]) > 0 {
+			if ne, ok := ungroup(x.chains[rv][0][0].expr).(*js.NewExpr); ok {
+				switch globalName(ne.X) {
+				case "Map", "Set", "WeakMap", "WeakSet", "Headers":
+				default:
+					// Immutable query builders reassigned across conditions
+					// (let p = new HttpParams(); p = p.set("k", v)).
+					var out []string
+					for _, k := range x.qset[rv] {
+						out = append(out, prefix+k)
+					}
+					return out
+				}
+			}
 		}
 	case *js.ArrayExpr:
 		// {files: [{content_type, file_size}]}: its elements' fields.
 		var out []string
 		for _, el := range n.List {
 			if !el.Spread {
-				out = append(out, x.keys(el.Value, prefix, depth+1)...)
+				out = append(out, x.keysAt(el.Value, prefix, depth+1, steps)...)
 			}
 		}
 		return out
 	case *js.GroupExpr:
-		return x.keys(n.X, prefix, depth)
+		return x.keysAt(n.X, prefix, depth+1, steps)
 	case *js.CommaExpr:
 		// return a && (r.x = a), r: the last is the value.
 		if len(n.List) > 0 {
-			return x.keys(n.List[len(n.List)-1], prefix, depth+1)
+			return x.keysAt(n.List[len(n.List)-1], prefix, depth+1, steps)
 		}
 	case *js.CondExpr:
 		// cond ? formData : {...fields}
-		return append(x.keys(n.X, prefix, depth), x.keys(n.Y, prefix, depth)...)
+		return append(x.keysAt(n.X, prefix, depth+1, steps), x.keysAt(n.Y, prefix, depth+1, steps)...)
 	case *js.BinaryExpr:
 		// body && JSON.stringify(body), headers ?? {}
 		if n.Op == js.AndToken || n.Op == js.OrToken || n.Op == js.NullishToken {
-			return append(x.keys(n.X, prefix, depth), x.keys(n.Y, prefix, depth)...)
+			return append(x.keysAt(n.X, prefix, depth+1, steps), x.keysAt(n.Y, prefix, depth+1, steps)...)
 		}
 	}
 	return nil
@@ -219,7 +263,7 @@ func (x *extractor) nests(e js.IExpr, depth int) bool {
 }
 
 // fnKeys are the fields of the object a function literal returns.
-func (x *extractor) fnKeys(fn js.IExpr, prefix string, depth int) []string {
+func (x *extractor) fnKeys(fn js.IExpr, prefix string, depth int, steps *int) []string {
 	var body *js.BlockStmt
 	switch f := fn.(type) {
 	case *js.ArrowFunc:
@@ -231,7 +275,7 @@ func (x *extractor) fnKeys(fn js.IExpr, prefix string, depth int) []string {
 	}
 	var out []string
 	for _, r := range returnsOf(body) {
-		out = append(out, x.keys(r, prefix, depth+1)...)
+		out = append(out, x.keysAt(r, prefix, depth+1, steps)...)
 	}
 	return out
 }
@@ -240,7 +284,7 @@ func (x *extractor) fnKeys(fn js.IExpr, prefix string, depth int) []string {
 // its parameters bound to the call's arguments: an object literal, a
 // parameter (a check that hands its argument back), or a local object it
 // fills (const r = {page_size: t}; if (n) r.page_token = n; return r).
-func (x *extractor) returnedKeys(c *js.CallExpr, prefix string, depth int) []string {
+func (x *extractor) returnedKeys(c *js.CallExpr, prefix string, depth int, steps *int) []string {
 	v, params, body, ok := x.fnOf(c.X)
 	if !ok || x.busy[v] {
 		return nil
@@ -250,7 +294,7 @@ func (x *extractor) returnedKeys(c *js.CallExpr, prefix string, depth int) []str
 		// A check or a sanitizer of many cases (H(obj, "json.object")):
 		// the object it is given is the one it hands back.
 		if as := args(&c.Args); len(as) > 0 && isObject(as[0]) {
-			return x.keys(as[0], prefix, depth+1)
+			return x.keysAt(as[0], prefix, depth+1, steps)
 		}
 		return nil
 	}
@@ -261,7 +305,7 @@ func (x *extractor) returnedKeys(c *js.CallExpr, prefix string, depth int) []str
 	defer restore()
 	var out []string
 	for _, r := range rets {
-		out = append(out, x.keys(r, prefix, depth+1)...)
+		out = append(out, x.keysAt(r, prefix, depth+1, steps)...)
 		for {
 			if c, ok := r.(*js.CommaExpr); ok && len(c.List) > 0 {
 				r = c.List[len(c.List)-1]

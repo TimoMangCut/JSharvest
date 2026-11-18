@@ -534,7 +534,13 @@ func looksLikePath(t string, lv level) bool {
 		if h := strings.TrimSuffix(strings.TrimPrefix(rest, "//"), "/"); h == unknown {
 			return false
 		}
-		return strings.HasPrefix(rest, "//") && realHost(rest[2:])
+		if !strings.HasPrefix(rest, "//") || !realHost(rest[2:]) {
+			return false
+		}
+		if _, afterHost, hasSlash := strings.Cut(rest[2:], "/"); hasSlash && strings.Contains(afterHost, unknown) && strings.Trim(strings.ReplaceAll(afterHost, unknown, ""), "/") == "" {
+			return false
+		}
+		return true
 	case strings.HasPrefix(path, "//"):
 		return realHost(path[2:])
 	case strings.HasPrefix(path, "/"):

@@ -105,6 +105,27 @@ func (x *extractor) extractConstDictExpr(e js.IExpr) (vals map[string]string, sc
 			}
 		}
 	}
+	if cls := x.classOfExpr(e); cls != nil {
+		if info := x.classes[cls]; info != nil && len(info.staticFields) > 0 && len(info.staticFields) <= 4*maxConstKeysPerDict {
+			ks := make([]string, 0, len(info.staticFields))
+			for k := range info.staticFields {
+				ks = append(ks, k)
+			}
+			sort.Strings(ks)
+			out := map[string]string{}
+			for _, k := range ks {
+				if k == "" || len(out) >= maxConstKeysPerDict {
+					continue
+				}
+				if s, sok := x.evalConstScalar(info.staticFields[k]); sok {
+					out[k] = s
+				}
+			}
+			if len(out) > 0 {
+				return out, "", true
+			}
+		}
+	}
 	if obj, isObj := x.objectN(e, 0); isObj && obj != nil && !isSchemaOrUIDescriptor(obj) && len(obj.List) > 0 && len(obj.List) <= maxConstKeysPerDict {
 		out := map[string]string{}
 		for i := range obj.List {
