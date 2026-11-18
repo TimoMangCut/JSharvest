@@ -72,9 +72,15 @@ func Find(scriptURL string, headers map[string]string, body []byte, guess bool) 
 	return Ref{}, false
 }
 
+const (
+	maxInlineMapDataLen  = 44 << 20 // ~33 MiB decoded
+	maxSingleSourceBytes = 16 << 20
+	maxTotalSourcesBytes = 64 << 20
+)
+
 func dataURI(s string) ([]byte, bool) {
 	meta, data, ok := strings.Cut(strings.TrimPrefix(s, "data:"), ",")
-	if !ok {
+	if !ok || len(data) > maxInlineMapDataLen {
 		return nil, false
 	}
 	if strings.HasSuffix(meta, ";base64") {
@@ -165,12 +171,21 @@ func (m *Map) Files() []File {
 func (m *Map) FilesFor(scriptURL string) []File {
 	libScript, libStem := standaloneLibraryInfo(scriptURL)
 	var raw []File
+	var rawBytes int64
 	monorepoHits := 0
 	for i, s := range m.Sources {
 		if i >= len(m.SourcesContent) || m.SourcesContent[i] == nil || *m.SourcesContent[i] == "" {
 			continue
 		}
-		f := File{Path: Clean(m.SourceRoot, s), Content: *m.SourcesContent[i]}
+		content := *m.SourcesContent[i]
+		if len(content) > maxSingleSourceBytes {
+			continue
+		}
+		if rawBytes+int64(len(content)) > 2*maxTotalSourcesBytes {
+			break
+		}
+		rawBytes += int64(len(content))
+		f := File{Path: Clean(m.SourceRoot, s), Content: content}
 		f.Vendor = vendorPath(f.Path)
 		if !f.Vendor && libStem != "" && hasMonorepoStem(f.Path, libStem) {
 			monorepoHits++
@@ -189,7 +204,23 @@ func (m *Map) FilesFor(scriptURL string) []File {
 			own = append(own, f)
 		}
 	}
-	return append(own, vendor...)
+	out := make([]File, 0, len(own)+len(vendor))
+	var keptBytes int64
+	for _, f := range own {
+		if keptBytes+int64(len(f.Content)) > maxTotalSourcesBytes && len(out) > 0 {
+			break
+		}
+		keptBytes += int64(len(f.Content))
+		out = append(out, f)
+	}
+	for _, f := range vendor {
+		if keptBytes+int64(len(f.Content)) > maxTotalSourcesBytes {
+			break
+		}
+		keptBytes += int64(len(f.Content))
+		out = append(out, f)
+	}
+	return out
 }
 
 var (

@@ -9,7 +9,7 @@ import (
 
 const (
 	maxConstDictsPerScript = 128
-	maxConstKeysPerDict    = 256
+	maxConstKeysPerDict    = 1024
 	maxUnresolvedPerScript = 512
 )
 
@@ -285,7 +285,7 @@ func (x *extractor) thisPropImportBinding(name string, depth int) (mod, exp stri
 		return "", "", false
 	}
 	vs := x.thisProps[name]
-	if len(vs) == 0 || len(vs) > 64 {
+	if len(vs) == 0 || len(vs) > 256 {
 		return "", "", false
 	}
 	m0, e0, ok0 := x.importRootBinding(vs[0], depth+1)

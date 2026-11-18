@@ -43,6 +43,7 @@ var schemaOrUIKeys = map[string]bool{
 
 var authzHintTokens = [][]byte{
 	[]byte(".can"), []byte("$can"), []byte("cannot"), []byte("(can"),
+	[]byte("can=>"), []byte("can =>"),
 	[]byte(`["can"]`), []byte(`['can']`), []byte("Can"), []byte("Ability"),
 	[]byte("role"), []byte("Role"), []byte("ROLE"),
 	[]byte("perm"), []byte("Perm"), []byte("PERM"),
@@ -65,7 +66,9 @@ func hasAuthzHint(src []byte, hasCanVar bool) bool {
 func hasAuthzPass1Hint(src []byte) bool {
 	return bytes.Contains(src, []byte("Can")) ||
 		bytes.Contains(src, []byte("Ability")) ||
-		bytes.Contains(src, []byte("(can"))
+		bytes.Contains(src, []byte("(can")) ||
+		bytes.Contains(src, []byte("can=>")) ||
+		bytes.Contains(src, []byte("can =>"))
 }
 
 func extractClientAuthz(ast *js.AST, x *extractor) *ClientAuthz {
@@ -250,11 +253,32 @@ func extractCallAuthz(
 		if (len(args) == 2 || len(args) == 3) && !args[0].Rest && !args[1].Rest {
 			actions, okA := resolveAuthzStrings(x, args[0].Value, true)
 			subjects, okS := resolveAuthzStrings(x, args[1].Value, true)
-			if okA && okS {
+			switch {
+			case okA && okS:
 				for _, a := range actions {
 					for _, s := range subjects {
 						addRule(a, s)
 					}
+				}
+			case okA:
+				if sr, srok := x.extractConstRef(args[1].Value); srok {
+					for _, a := range actions {
+						x.addUnresolvedAuthzRule(UnresolvedAuthzRule{Kind: "rule", ActionLit: a, Subject: sr})
+					}
+				}
+			case okS:
+				if ar, arok := x.extractConstRef(args[0].Value); arok {
+					for _, s := range subjects {
+						x.addUnresolvedAuthzRule(UnresolvedAuthzRule{Kind: "rule", Action: ar, SubjectLit: s})
+					}
+				}
+			default:
+				ar, arok := x.extractConstRef(args[0].Value)
+				sr, srok := x.extractConstRef(args[1].Value)
+				if arok && srok {
+					x.addUnresolvedAuthzRule(UnresolvedAuthzRule{Kind: "rule", Action: ar, Subject: sr})
+				} else if arok && !isLiteralNonString(args[1].Value) {
+					x.addUnresolvedAuthzRule(UnresolvedAuthzRule{Kind: "rule", Action: ar})
 				}
 			}
 		}
@@ -426,6 +450,22 @@ func extractCanComponentAuthz(
 		}
 		actions, okA := resolveAuthzStrings(x, actExpr, true)
 		if !okA {
+			if ar, arok := x.extractConstRef(actExpr); arok {
+				if subjExpr == nil {
+					x.addUnresolvedAuthzRule(UnresolvedAuthzRule{Kind: "rule", Action: ar})
+					return
+				}
+				if subjects, okS := resolveAuthzStrings(x, subjExpr, true); okS {
+					for _, s := range subjects {
+						x.addUnresolvedAuthzRule(UnresolvedAuthzRule{Kind: "rule", Action: ar, SubjectLit: s})
+					}
+					return
+				}
+				if sr, srok := x.extractConstRef(subjExpr); srok {
+					x.addUnresolvedAuthzRule(UnresolvedAuthzRule{Kind: "rule", Action: ar, Subject: sr})
+					return
+				}
+			}
 			continue
 		}
 		if subjExpr == nil {
@@ -439,6 +479,12 @@ func extractCanComponentAuthz(
 				for _, s := range subjects {
 					addRule(a, s)
 				}
+			}
+			return
+		}
+		if sr, srok := x.extractConstRef(subjExpr); srok {
+			for _, a := range actions {
+				x.addUnresolvedAuthzRule(UnresolvedAuthzRule{Kind: "rule", ActionLit: a, Subject: sr})
 			}
 			return
 		}

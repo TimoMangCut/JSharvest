@@ -90,28 +90,20 @@ func (c *crawl) closeSpecClient() {
 }
 
 // specProbeFetch fetches a candidate OpenAPI/Swagger/OIDC document.
-// Same-origin URLs (or attached Chrome without an explicit -proxy) run through
-// the tab's Isolated World so same-origin session cookies apply without CORS
-// preflight; cross-origin URLs run through a netsafe-guarded Go HTTP client so
-// missing CORS headers or custom client_headers preflights do not break or stall.
+// Same-origin URLs run through the tab's Isolated World so same-origin session
+// cookies apply without CORS preflight; all cross-origin URLs (including in
+// -attach mode) run strictly through a netsafe-guarded Go HTTP client so they
+// never bypass private-IP/DNS-rebinding protections via the browser's network stack.
 func (e *engine) specProbeFetch(ctx context.Context, c *crawl, targetURL string, hdrMap map[string]string) (fetchResult, error) {
 	curPage := ""
 	if e.harvest != nil {
 		curPage = e.harvest.Page()
 	}
-	sameOrig := curPage != "" && sameOrigin(targetURL, curPage)
-	inBrowser := sameOrig || (e.cfg.Browser.Attach != "" && e.cfg.Browser.Proxy == "" && len(hdrMap) == 0)
-	if inBrowser {
-		var res fetchResult
-		var err error
+	if curPage != "" && sameOrigin(targetURL, curPage) {
 		if len(hdrMap) > 0 {
-			res, err = e.pageFetchHeaders(targetURL, hdrMap)
-		} else {
-			res, err = e.pageFetch(targetURL, true)
+			return e.pageFetchHeaders(targetURL, hdrMap)
 		}
-		if sameOrig || (err == nil && res.Status > 0) {
-			return res, err
-		}
+		return e.pageFetch(targetURL, true)
 	}
 	return c.directSpecFetch(ctx, e, targetURL, hdrMap)
 }

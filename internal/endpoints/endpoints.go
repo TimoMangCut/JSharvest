@@ -38,20 +38,23 @@ import (
 const (
 	CacheDir = "static"          // <dir>/static/<sha256>.json
 	File     = "endpoints.jsonl" // the catalog
-	// maxScript is the largest script analysed: bigger ones are rarely an
-	// app's, and their syntax tree would take much memory.
-	maxScript = 16 << 20
+	// maxScript is the largest script parsed into an AST: bigger monolith
+	// bundles (up to maxLooseScript) fall back to the linear loose scanner so
+	// endpoints are still recovered without multi-GB AST allocations.
+	maxScript      = 16 << 20
+	maxLooseScript = 64 << 20
 )
 
 // AnalyzeStats summarizes static analysis coverage and parse fallbacks across
 // stored scripts so bundle parser failures are never silent.
 type AnalyzeStats struct {
-	Total               int      `json:"total"`
-	BundleParseErrors   int      `json:"bundle_parse_errors"`
-	BundleASTLowered    int      `json:"bundle_ast_lowered,omitempty"`
-	SourceParseFallback int      `json:"source_parse_fallbacks,omitempty"`
-	OversizeSkipped     int      `json:"oversize_skipped,omitempty"`
-	FailedBundles       []string `json:"failed_bundles,omitempty"`
+	Total                 int      `json:"total"`
+	BundleParseErrors     int      `json:"bundle_parse_errors"`
+	BundleASTLowered      int      `json:"bundle_ast_lowered,omitempty"`
+	SourceParseFallback   int      `json:"source_parse_fallbacks,omitempty"`
+	OversizeLooseFallback int      `json:"oversize_loose_fallback,omitempty"`
+	OversizeSkipped       int      `json:"oversize_skipped,omitempty"`
+	FailedBundles         []string `json:"failed_bundles,omitempty"`
 
 	// StaleCache counts the scripts read from a cache an older extractor
 	// made: a reader (Load) cannot analyse again, so it says so.
@@ -68,6 +71,10 @@ func SummarizeScripts(scripts []Script) AnalyzeStats {
 		}
 		if strings.HasPrefix(s.Error, "not analysed:") {
 			st.OversizeSkipped++
+			continue
+		}
+		if strings.HasPrefix(s.ParseError, "oversize_ast_bypass:") {
+			st.OversizeLooseFallback++
 			continue
 		}
 		isParseFallback := s.LooseFallback || strings.HasPrefix(s.Error, "parse")
@@ -104,6 +111,7 @@ type Script struct {
 	URLs       []string `json:"urls,omitempty"`
 	ThirdParty bool     `json:"third_party,omitempty"`
 	Source     bool     `json:"source,omitempty"`
+	Inline     bool     `json:"inline,omitempty"`
 	// Load reads the script's source, for evaluating a URL builder it
 	// exports with another script's arguments (round 27A); nil when the
 	// source is not at hand (the deferred URLs are then left).
@@ -116,6 +124,7 @@ type scriptInfo struct {
 	// source: an original source out of a source map (TypeScript, JSX…),
 	// read loosely when the parser does not take it.
 	source bool
+	inline bool
 	// openapi: an OpenAPI or Swagger document the crawl fetched.
 	openapi bool
 }
@@ -149,8 +158,14 @@ func readIndex(dir string) (map[string]scriptInfo, error) {
 		if detect.Quarantined(e.Tags, e.URLs, inits) {
 			continue
 		}
-		out[e.SHA256] = scriptInfo{urls: e.URLs, thirdParty: slices.Contains(e.Tags, "third-party"), source: slices.Contains(e.Tags, "sourcemap"),
-			openapi: slices.Contains(e.Tags, "openapi")}
+		isInline := slices.Contains(e.Kinds, "inline") && !slices.Contains(e.Kinds, "file")
+		out[e.SHA256] = scriptInfo{
+			urls:       e.URLs,
+			thirdParty: slices.Contains(e.Tags, "third-party"),
+			source:     slices.Contains(e.Tags, "sourcemap"),
+			inline:     isInline,
+			openapi:    slices.Contains(e.Tags, "openapi"),
+		}
 	}
 	return out, sc.Err()
 }
@@ -159,6 +174,23 @@ func readIndex(dir string) (map[string]scriptInfo, error) {
 // one from another version of the extractor), with the given number of
 // workers, and returns the results of all of them.
 func Analyze(dir string, workers int) ([]Script, error) {
+	return analyzeDir(dir, workers, nil, false)
+}
+
+// AnalyzeExcept is Analyze restricted to scripts whose SHA-256 is not in skip,
+// avoiding repeated re-unmarshaling of already-processed scripts across frontier levels.
+func AnalyzeExcept(dir string, workers int, skip map[string]bool) ([]Script, error) {
+	return analyzeDir(dir, workers, skip, false)
+}
+
+// AnalyzeSlim runs Analyze while stripping Paths and Routes on the returned
+// in-memory Script structs (after persisting the full result to static/<sha>.json),
+// cutting catalog assembly RAM on multi-thousand-script archive stores.
+func AnalyzeSlim(dir string, workers int) ([]Script, error) {
+	return analyzeDir(dir, workers, nil, true)
+}
+
+func analyzeDir(dir string, workers int, skip map[string]bool, slim bool) ([]Script, error) {
 	index, err := readIndex(dir)
 	if err != nil {
 		return nil, err
@@ -176,7 +208,13 @@ func Analyze(dir string, workers int) ([]Script, error) {
 	}
 	shas := make([]string, 0, len(index))
 	for sha := range index {
+		if skip != nil && skip[sha] {
+			continue
+		}
 		shas = append(shas, sha)
+	}
+	if len(shas) == 0 {
+		return nil, nil
 	}
 	sort.Strings(shas)
 	out := make([]Script, len(shas))
@@ -192,7 +230,12 @@ func Analyze(dir string, workers int) ([]Script, error) {
 		go func() {
 			defer wg.Done()
 			for i := range next {
-				out[i] = analyzeOne(dir, shas[i], index[shas[i]], heavySem)
+				s := analyzeOne(dir, shas[i], index[shas[i]], heavySem)
+				if slim {
+					s.Paths = nil
+					s.Routes = nil
+				}
+				out[i] = s
 			}
 		}()
 	}
@@ -210,8 +253,18 @@ func extractJS(src []byte, hint string, heavySem chan struct{}) jsapi.Result {
 	// Clip slice capacity so tdewolff/parse/v2.NewInputBytes (which appends a
 	// NUL sentinel byte) never mutates a shared backing array across workers.
 	src = src[:len(src):len(src)]
-	if len(src) > maxScript {
+	if len(src) > maxLooseScript {
 		return jsapi.Result{Version: jsapi.Version, Error: fmt.Sprintf("not analysed: %d bytes", len(src))}
+	}
+	if len(src) > maxScript {
+		if heavySem != nil {
+			heavySem <- struct{}{}
+			defer func() { <-heavySem }()
+		}
+		res := jsapi.ExtractLoose(src)
+		res.LooseFallback = true
+		res.ParseError = fmt.Sprintf("oversize_ast_bypass: %d bytes", len(src))
+		return res
 	}
 	if heavySem != nil && len(src) >= heavyScriptBytes {
 		heavySem <- struct{}{}
@@ -234,14 +287,18 @@ func writeStaticCache(cache string, res jsapi.Result) {
 	}
 	// A temporary file of its own: a watch's background analysis and
 	// the one at its end may write the same script's cache.
-	if f, err := os.CreateTemp(filepath.Dir(cache), filepath.Base(cache)+".*.tmp"); err == nil {
-		_ = f.Chmod(0o600)
-		_, werr := f.Write(b)
-		if f.Close() == nil && werr == nil {
-			_ = os.Rename(f.Name(), cache)
-		}
-		_ = os.Remove(f.Name())
+	f, err := os.CreateTemp(filepath.Dir(cache), filepath.Base(cache)+".*.tmp")
+	if err != nil {
+		return
 	}
+	tmpName := f.Name()
+	_ = f.Chmod(0o600)
+	_, werr := f.Write(b)
+	cerr := f.Close()
+	if werr == nil && cerr == nil && os.Rename(tmpName, cache) == nil {
+		return
+	}
+	_ = os.Remove(tmpName)
 }
 
 // ExtractCached extracts JS/TS/SFC metadata for src using <dir>/static/<sha256>.json
@@ -289,7 +346,7 @@ func ExtractCached(dir string, src []byte, hint string) jsapi.Result {
 }
 
 func analyzeOne(dir, sha string, info scriptInfo, heavySem chan struct{}) Script {
-	s := Script{SHA256: sha, URLs: info.urls, ThirdParty: info.thirdParty, Source: info.source, Load: sourceOf(dir, sha)}
+	s := Script{SHA256: sha, URLs: info.urls, ThirdParty: info.thirdParty, Source: info.source, Inline: info.inline, Load: sourceOf(dir, sha)}
 	cache := filepath.Join(dir, CacheDir, sha+".json")
 	if !info.openapi {
 		if res, ok := memGetResult(sha); ok {
@@ -315,12 +372,14 @@ func analyzeOne(dir, sha string, info scriptInfo, heavySem chan struct{}) Script
 	case err != nil:
 		s.Result = jsapi.Result{Version: jsapi.Version, Error: "read: " + err.Error()}
 		return s // not cached: the file may come later
-	case len(src) > maxScript:
+	case len(src) > maxLooseScript:
 		s.Result = jsapi.Result{Version: jsapi.Version, Error: fmt.Sprintf("not analysed: %d bytes", len(src))}
-	case info.openapi && jsapi.IsOIDC(src):
+	case info.openapi && len(src) <= maxScript && jsapi.IsOIDC(src):
 		s.Result = jsapi.ExtractOIDC(src) // an OpenID Provider's configuration (PIP-03)
-	case info.openapi:
+	case info.openapi && len(src) <= maxScript:
 		s.Result = jsapi.ExtractOpenAPI(src)
+	case info.openapi:
+		s.Result = jsapi.Result{Version: jsapi.Version, Error: fmt.Sprintf("not analysed: %d bytes", len(src))}
 	default:
 		s.Result = extractJS(src, sourceHint(info.urls), heavySem)
 		memPutResult(sha, s.Result)
@@ -361,6 +420,10 @@ func sourceOf(dir, sha string) func() []byte {
 // extractor made is read all the same (a reader cannot analyse again) and
 // counted in AnalyzeStats.StaleCache.
 func Load(dir string) ([]Script, error) {
+	return loadDir(dir, false)
+}
+
+func loadDir(dir string, slim bool) ([]Script, error) {
 	index, err := readIndex(dir)
 	if err != nil {
 		return nil, err
@@ -373,8 +436,12 @@ func Load(dir string) ([]Script, error) {
 		}
 		// The source too: a builder another script calls is evaluated in
 		// it (linkDeferred), as the analysing catalog does (plan-28 2.1).
-		s := Script{SHA256: sha, URLs: info.urls, ThirdParty: info.thirdParty, Source: info.source, Load: sourceOf(dir, sha)}
+		s := Script{SHA256: sha, URLs: info.urls, ThirdParty: info.thirdParty, Source: info.source, Inline: info.inline, Load: sourceOf(dir, sha)}
 		if json.Unmarshal(b, &s.Result) == nil {
+			if slim {
+				s.Paths = nil
+				s.Routes = nil
+			}
 			out = append(out, s)
 		}
 	}
@@ -902,26 +969,42 @@ func Build(scripts []Script, reqs []Request, inScope func(host string) bool) []E
 	obsBaseUntagged := map[string]map[string]bool{}
 	obsOriginHasKeyed := map[string]bool{}
 	for _, ep := range eps {
-		if ep.client && ep.Base != "" && ep.Host == "" && isAPIPropagatableBase(ep.Base) && !hasStaticAssetExt(ep.Path) {
-			so := epScriptOrigin(ep, inScope)
-			if so == "" {
-				continue
+		if !ep.client || ep.Host != "" || hasStaticAssetExt(ep.Path) {
+			continue
+		}
+		candBase := ""
+		if ep.Base != "" && isAPIPropagatableBase(ep.Base) {
+			candBase = ep.Base
+		} else if ep.Base == "" && ep.Observed != nil && len(ep.baseKeys) > 0 && !strings.HasPrefix(ep.Path, placeholder) {
+			// When a boot call's base (e.g. JSON.parse('{"baseUrl":"/rest"}')) already
+			// resolved statically into ep.Path AND traffic confirmed it at runtime,
+			// record that leading API root segment for sibling calls sharing ep.baseKeys.
+			seg, restPath, ok := strings.Cut(strings.TrimPrefix(ep.Path, "/"), "/")
+			if ok && seg != "" && restPath != "" && !strings.Contains(seg, placeholder) && obsAPIRootSegRe.MatchString(seg) {
+				candBase = "/" + seg
 			}
-			if len(ep.baseKeys) > 0 {
-				obsOriginHasKeyed[so] = true
-				for bk := range ep.baseKeys {
-					ok := so + "\x00" + canonBaseKey(bk)
-					if obsBaseByOriginKey[ok] == nil {
-						obsBaseByOriginKey[ok] = map[string]bool{}
-					}
-					obsBaseByOriginKey[ok][ep.Base] = true
+		}
+		if candBase == "" {
+			continue
+		}
+		so := epScriptOrigin(ep, inScope)
+		if so == "" {
+			continue
+		}
+		if len(ep.baseKeys) > 0 {
+			obsOriginHasKeyed[so] = true
+			for bk := range ep.baseKeys {
+				ok := so + "\x00" + canonBaseKey(bk)
+				if obsBaseByOriginKey[ok] == nil {
+					obsBaseByOriginKey[ok] = map[string]bool{}
 				}
-			} else {
-				if obsBaseUntagged[so] == nil {
-					obsBaseUntagged[so] = map[string]bool{}
-				}
-				obsBaseUntagged[so][ep.Base] = true
+				obsBaseByOriginKey[ok][candBase] = true
 			}
+		} else {
+			if obsBaseUntagged[so] == nil {
+				obsBaseUntagged[so] = map[string]bool{}
+			}
+			obsBaseUntagged[so][candBase] = true
 		}
 	}
 	obsSegByHost := map[string]map[string]bool{}
@@ -999,6 +1082,7 @@ func Build(scripts []Script, reqs []Request, inScope func(host string) bool) []E
 			}
 		}
 	}
+	eps = canonicalMerge(eps)
 
 	attachGraphQLDocs(scripts, eps, inScope)
 	out := make([]Endpoint, 0, len(eps))
@@ -2645,9 +2729,9 @@ func CatalogWithStats(dir string, inScope func(host string) bool, analyze bool) 
 	var scripts []Script
 	var err error
 	if analyze {
-		scripts, err = Analyze(dir, 0)
+		scripts, err = analyzeDir(dir, 0, nil, true)
 	} else {
-		scripts, err = Load(dir)
+		scripts, err = loadDir(dir, true)
 	}
 	if err != nil {
 		return nil, AnalyzeStats{}, err
@@ -2838,6 +2922,11 @@ func canonicalMerge(eps []*Endpoint) []*Endpoint {
 			if kindRank(ep.Kind) > kindRank(best.Kind) {
 				best.Kind = ep.Kind
 			}
+			if best.Observed == nil && ep.Observed != nil {
+				best.Observed = ep.Observed
+				best.runs = ep.runs
+				best.obsHosts = ep.obsHosts
+			}
 			best.ThirdParty = best.ThirdParty && ep.ThirdParty
 			best.bundleStatic = best.bundleStatic || ep.bundleStatic
 			best.addBaseKeys(ep.baseKeys)
@@ -2860,6 +2949,9 @@ func canonicalMerge(eps []*Endpoint) []*Endpoint {
 // otherwise), the more specific the better (…/hub/auth + /v1/oauth/token
 // over …/hub + /auth/v1/oauth/token), then one from code or a spec.
 func better(a, b *Endpoint) bool {
+	if (a.Observed != nil) != (b.Observed != nil) {
+		return a.Observed != nil
+	}
 	if (len(a.Bases) == 1) != (len(b.Bases) == 1) {
 		return len(a.Bases) == 1
 	}

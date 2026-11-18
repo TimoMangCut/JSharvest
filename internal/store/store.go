@@ -291,8 +291,9 @@ func (s *Store) Put(r Record) (string, bool, error) {
 	if !ok {
 		s.newSinceFlush++
 		if s.newSinceFlush >= flushEveryNew {
-			// A failure here is retried by the next flush; Flush reports it.
-			s.flushLocked()
+			if err := s.flushLocked(); err != nil {
+				return "", false, err
+			}
 		}
 	}
 	return key, !ok, nil

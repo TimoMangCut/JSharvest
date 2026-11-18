@@ -63,21 +63,27 @@ func SetMemCacheMB(mb int) {
 	atomic.StoreInt64(&globalMem.budgetBytes, int64(mb)<<20)
 }
 
-// ClearMemCache releases all in-memory cached AST results and script bodies.
-func ClearMemCache() {
+// ClearResultMemCache releases all cached jsapi.Result entries while keeping
+// cached script bodies intact for deferred builder/export linking.
+func ClearResultMemCache() {
 	for i := range globalMem.resShards {
 		s := &globalMem.resShards[i]
 		s.mu.Lock()
 		s.m = nil
 		s.mu.Unlock()
 	}
+	globalMem.resUsedBytes.Store(0)
+}
+
+// ClearMemCache releases all in-memory cached AST results and script bodies.
+func ClearMemCache() {
+	ClearResultMemCache()
 	for i := range globalMem.bodyShards {
 		s := &globalMem.bodyShards[i]
 		s.mu.Lock()
 		s.m = nil
 		s.mu.Unlock()
 	}
-	globalMem.resUsedBytes.Store(0)
 	globalMem.bodyUsedBytes.Store(0)
 }
 
@@ -98,15 +104,53 @@ func shardIdx(sha string) int {
 	}
 }
 
+func sumStringsBytes(ss []string) int64 {
+	var n int64
+	for _, s := range ss {
+		n += 16 + int64(len(s))
+	}
+	return n
+}
+
 func estimateResultBytes(r jsapi.Result) int64 {
-	n := int64(256)
-	n += int64(len(r.Endpoints)) * 192
-	n += int64(len(r.Bases)+len(r.Routes)+len(r.Paths)+len(r.Operations)+len(r.Cloud)) * 64
-	n += int64(len(r.PropBases)+len(r.Settings)+len(r.ClientHeaders)+len(r.Keys)+len(r.Exports)+len(r.Imports)+len(r.Builders)+len(r.Deferred)) * 96
-	n += int64(len(r.GraphQLDocs)+len(r.RouteEntries)) * 192
+	n := int64(256 + len(r.Error) + len(r.ParseError))
+	for _, e := range r.Endpoints {
+		n += 160 + int64(len(e.Method)+len(e.URL)+len(e.Base)+len(e.Kind)+len(e.Snippet))
+		n += sumStringsBytes(e.Query) + sumStringsBytes(e.Body) + sumStringsBytes(e.Headers) + sumStringsBytes(e.Operations)
+	}
+	n += sumStringsBytes(r.Bases) + sumStringsBytes(r.Routes) + sumStringsBytes(r.Paths) +
+		sumStringsBytes(r.Operations) + sumStringsBytes(r.Cloud) + sumStringsBytes(r.DocProd)
+	for _, h := range r.PropBases {
+		n += 48 + int64(len(h.Name)+len(h.Value))
+	}
+	for _, h := range r.Settings {
+		n += 48 + int64(len(h.Name)+len(h.Value))
+	}
+	for _, h := range r.ClientHeaders {
+		n += 48 + int64(len(h.Name)+len(h.Value))
+	}
+	for _, h := range r.Keys {
+		n += 48 + int64(len(h.Name)+len(h.Value))
+	}
+	for _, h := range r.DocVars {
+		n += 48 + int64(len(h.Name)+len(h.Value))
+	}
+	for _, h := range r.DocDev {
+		n += 48 + int64(len(h.Name)+len(h.Value))
+	}
+	n += int64(len(r.Exports)+len(r.Imports)+len(r.Builders)+len(r.Deferred)) * 128
+	for _, g := range r.GraphQLDocs {
+		n += 96 + int64(len(g.Name)+len(g.Kind)+len(g.Query))
+	}
+	for _, re := range r.RouteEntries {
+		n += 96 + int64(len(re.Path)+len(re.Redirect)) + sumStringsBytes(re.Roles) + sumStringsBytes(re.Permissions)
+	}
 	n += int64(len(r.UnresolvedRoutePerms)+len(r.UnresolvedAuthzRules)) * 128
 	for _, ce := range r.ConstExports {
-		n += 128 + int64(len(ce.Values))*64
+		n += 128 + int64(len(ce.Module)+len(ce.Export)+len(ce.Scalar))
+		for k, v := range ce.Values {
+			n += 48 + int64(len(k)+len(v))
+		}
 	}
 	return n
 }

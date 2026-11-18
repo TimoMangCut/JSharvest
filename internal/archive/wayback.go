@@ -29,20 +29,29 @@ const tsLayout = "20060102150405"
 
 // Wayback lists and fetches from the Wayback Machine.
 type Wayback struct {
-	Base     string // https://web.archive.org
-	Client   *Client
-	Index    *Budget // the CDX server: slow
-	Files    *Budget // mementos
-	PageSize int
-	Collapse string // adjacent field collapse (e.g. "digest")
-	Sharded  bool   // use ZipNum showNumPages + parallel page=0..N-1 shards
+	Base        string  // https://web.archive.org
+	Client      *Client // mementos (/web/...)
+	IndexClient *Client // optional separate client for CDX (/cdx/search/cdx); defaults to Client
+	Index       *Budget // the CDX server: slow
+	Files       *Budget // mementos
+	PageSize    int
+	Collapse    string // adjacent field collapse (e.g. "digest")
+	Sharded     bool   // use ZipNum showNumPages + parallel page=0..N-1 shards
+}
+
+func (w *Wayback) indexClient() *Client {
+	if w.IndexClient != nil {
+		return w.IndexClient
+	}
+	return w.Client
 }
 
 var cdxFields = []string{"timestamp", "original", "mimetype", "statuscode", "digest"}
 
 func (w *Wayback) getCDX(ctx context.Context, u string) ([]byte, error) {
+	ic := w.indexClient()
 	for try := 1; ; try++ {
-		a, err := w.Client.GetIndex(ctx, w.Index, u, 512<<20)
+		a, err := ic.GetIndex(ctx, w.Index, u, 64<<20)
 		if err != nil {
 			return nil, err
 		}
@@ -52,10 +61,10 @@ func (w *Wayback) getCDX(ctx context.Context, u string) ([]byte, error) {
 		if a.Status == 200 && offline(a.Body) {
 			// The Internet Archive's "Temporarily Offline" page, sent as a
 			// 200 (ARC-05): the same page again, after a while.
-			if try >= w.Client.Tries {
+			if try >= ic.Tries {
 				return nil, fmt.Errorf("%w: the CDX server answered %d times with a page: %s", ErrUnavailable, try, head(a.Body, 120))
 			}
-			if err := sleep(ctx, w.Client.Wait); err != nil {
+			if err := sleep(ctx, ic.Wait); err != nil {
 				return nil, err
 			}
 			continue

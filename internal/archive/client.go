@@ -152,6 +152,19 @@ func (c *Client) isBlocked() bool {
 	return b
 }
 
+// ResetBreaker clears the connection-refusal/429 circuit breaker so a new
+// sequential phase (e.g. main memento fetch after opportunistic prefetch) gets
+// one clean budgeted attempt before latching again.
+func (c *Client) ResetBreaker() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.blocked = false
+	c.refused = 0
+	c.mu.Unlock()
+}
+
 func (c *Client) decayRefused() {
 	c.mu.Lock()
 	if !c.blocked && c.refused > 0 {

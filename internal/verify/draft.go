@@ -134,27 +134,71 @@ func sampleGQLVar(name, typ string) any {
 	return "sample"
 }
 
+func isValidDraftToken(s string) bool {
+	if len(s) == 0 || len(s) > 128 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
+			continue
+		}
+		switch c {
+		case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func cleanHTTPField(s string) string {
+	if !strings.ContainsAny(s, "\r\n\x00") {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '\r' || c == '\n' || c == 0 {
+			continue
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
+}
+
 // raw writes it; bare leaves the sample headers out.
 func (d Draft) raw(target string, bare bool) ([]byte, error) {
 	u, err := url.Parse(target)
 	if err != nil || u.Host == "" {
 		return nil, fmt.Errorf("draft %s: bad URL %q", d.ID, target)
 	}
-	method := d.Method
-	if method == "" {
+	method := strings.TrimSpace(d.Method)
+	if method == "" || !isValidDraftToken(method) {
 		method = "GET"
 	}
+	reqURI := cleanHTTPField(u.RequestURI())
+	host := cleanHTTPField(u.Host)
 	var b bytes.Buffer
-	b.WriteString(method + " " + u.RequestURI() + " HTTP/1.1\r\n")
-	b.WriteString("Host: " + u.Host + "\r\n")
-	if !slices.ContainsFunc(d.Headers, func(h [2]string) bool { return strings.EqualFold(h[0], "accept") }) {
+	b.WriteString(method + " " + reqURI + " HTTP/1.1\r\n")
+	b.WriteString("Host: " + host + "\r\n")
+	if !slices.ContainsFunc(d.Headers, func(h [2]string) bool { return strings.EqualFold(strings.TrimSpace(h[0]), "accept") }) {
 		b.WriteString("Accept: application/json, */*\r\n")
 	}
 	for _, h := range d.Headers {
-		if bare && slices.ContainsFunc(d.SampleHeaders, func(n string) bool { return strings.EqualFold(n, h[0]) }) {
+		name := strings.TrimSpace(h[0])
+		if !isValidDraftToken(name) {
 			continue
 		}
-		b.WriteString(h[0] + ": " + h[1] + "\r\n")
+		if bare && slices.ContainsFunc(d.SampleHeaders, func(n string) bool { return strings.EqualFold(n, name) }) {
+			continue
+		}
+		val := strings.TrimSpace(cleanHTTPField(h[1]))
+		if strings.ContainsAny(h[1], "\r\n\x00") && val == "" {
+			continue
+		}
+		b.WriteString(name + ": " + val + "\r\n")
 	}
 	if len(d.Body) > 0 {
 		b.WriteString("Content-Type: application/json\r\n")

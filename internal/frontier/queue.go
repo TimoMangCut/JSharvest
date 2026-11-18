@@ -108,6 +108,12 @@ type Options struct {
 	Destructive func(rawURL string) bool
 }
 
+const (
+	maxListedEntries     = 50000
+	maxListedKeys        = 200000
+	maxQueuedOrSeenPages = 500000
+)
+
 // Queue is the frontier: the pages to visit, breadth first with fair-share
 // Weighted DRR across hosts at the same (depth, how) tier, and the ones
 // that will not be, with why.
@@ -117,6 +123,7 @@ type Queue struct {
 	seen        map[string]bool // normalised URLs queued or visited
 	listed      map[string]bool
 	Listed      []Listed
+	ExtraListed map[string]int // counts beyond maxListedEntries
 	taken       int
 	seq         int
 	dropped     int // pages over the limit
@@ -134,6 +141,7 @@ func NewQueue(o Options) *Queue {
 		o:           o,
 		seen:        map[string]bool{},
 		listed:      map[string]bool{},
+		ExtraListed: map[string]int{},
 		bandFloor:   map[bandKey]int64{},
 		bandHostVT:  map[bandKey]map[string]int64{},
 		hostWeight:  map[string]int{},
@@ -186,6 +194,24 @@ func (q *Queue) nextVTime(rawURL string, depth int, how string) int64 {
 	return vt
 }
 
+func (q *Queue) recordListed(f Found, from, reason string) {
+	key := f.URL + " " + f.Method + " " + reason
+	if len(q.Listed) < maxListedEntries {
+		if !q.listed[key] {
+			q.listed[key] = true
+			q.Listed = append(q.Listed, Listed{URL: f.URL, How: f.How, Method: f.Method, From: from, Reason: reason})
+		}
+		return
+	}
+	if len(q.listed) < maxListedKeys {
+		if q.listed[key] {
+			return
+		}
+		q.listed[key] = true
+	}
+	q.ExtraListed[reason]++
+}
+
 // Add queues a found URL, depth links away from the seed, or records why
 // not. It returns the reason, "" when queued.
 func (q *Queue) Add(f Found, depth int, from string) string {
@@ -199,16 +225,14 @@ func (q *Queue) Add(f Found, depth int, from string) string {
 		heap.Push(&q.h, Item{URL: f.URL, Depth: depth, From: from, How: f.How, vtime: vt, seq: q.seq})
 	case seenAlready:
 	default:
-		key := f.URL + " " + f.Method + " " + reason
-		if !q.listed[key] {
-			q.listed[key] = true
-			q.Listed = append(q.Listed, Listed{URL: f.URL, How: f.How, Method: f.Method, From: from, Reason: reason})
-		}
+		q.recordListed(f, from, reason)
 	}
 	return reason
 }
 
-func (q *Queue) why(f Found, depth int) string {
+// Precheck reports the non-budget reason f would not be visited at depth, or
+// "" when f is an unseen, in-scope, visitable GET page within MaxDepth.
+func (q *Queue) Precheck(f Found, depth int) string {
 	u, err := url.Parse(f.URL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 		return NotHTTP
@@ -237,7 +261,15 @@ func (q *Queue) why(f Found, depth int) string {
 		return Destructive
 	case depth > q.o.MaxDepth:
 		return TooDeep
-	case q.o.MaxPages > 0 && q.taken+q.h.Len() >= q.o.MaxPages:
+	}
+	return ""
+}
+
+func (q *Queue) why(f Found, depth int) string {
+	if r := q.Precheck(f, depth); r != "" {
+		return r
+	}
+	if (q.o.MaxPages > 0 && q.taken+q.h.Len() >= q.o.MaxPages) || len(q.seen) >= maxQueuedOrSeenPages {
 		q.dropped++
 		return Limit
 	}
@@ -263,11 +295,7 @@ func (q *Queue) ListAs(f Found, from, reason string) {
 	if q.seen[n] {
 		return
 	}
-	key := f.URL + " " + f.Method + " " + reason
-	if !q.listed[key] {
-		q.listed[key] = true
-		q.Listed = append(q.Listed, Listed{URL: f.URL, How: f.How, Method: f.Method, From: from, Reason: reason})
-	}
+	q.recordListed(f, from, reason)
 }
 
 // Next takes the next page: the shallowest, then by how it was found,

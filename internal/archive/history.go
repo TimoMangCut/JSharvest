@@ -165,39 +165,54 @@ func classify(archived []endpoints.Endpoint, cur *current, script func(sha strin
 	return lines, inCode
 }
 
+const maxLiveJSReadBytes = 32 << 20
+
+type pendingHist struct {
+	outIdx   int
+	matchers []*pathMatcher
+}
+
+func compileEndpointMatchers(a endpoints.Endpoint) []*pathMatcher {
+	ps := paths(a)
+	var out []*pathMatcher
+	for _, p := range ps {
+		if m := compilePath(p); m != nil {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
 func classifyCtx(ctx context.Context, archived []endpoints.Endpoint, cur *current, script func(sha string) (store.Entry, bool)) ([]HistLine, int, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, 0, err
 	}
+	var catalogs [][]endpoints.Endpoint
+	var jsDirs []string
+	if cur != nil {
+		catalogs = cur.catalogs
+		jsDirs = cur.jsDirs
+	}
 	var out []HistLine
+	var pending []pendingHist
 	inCode := 0
-	files := cur.files()
-	unverCats := unversionedAll(cur.catalogs)
+	unverCats := unversionedAll(catalogs)
 	for _, a := range archived {
 		if err := ctx.Err(); err != nil {
 			return nil, 0, err
 		}
-		if a.ThirdParty || matches(a, cur.catalogs) {
+		if a.ThirdParty || matches(a, catalogs) {
 			continue
 		}
 		class := "historical"
+		var candMatchers []*pathMatcher
 		switch {
 		case matches(unversioned(a), unverCats):
 			class = "version_changed"
 		case weak(a):
 			class = "low"
 		default:
-			found, err := inScriptsCtx(ctx, a, files)
-			if err != nil {
-				return nil, 0, err
-			}
-			if found {
-				// Today's scripts write its path out, but the crawls' catalog
-				// has no call to it (a document's text, code the crawl did not
-				// run): kept, under its own class, never dropped (COV-01).
-				inCode++
-				class = "in_current_code"
-			}
+			candMatchers = compileEndpointMatchers(a)
 		}
 		l := HistLine{Class: class, Method: a.Method, Host: a.Host, Origin: a.Origin, Path: a.Path, Base: a.Base, Bases: a.Bases, Kind: a.Kind, Query: a.Query, Body: a.Body,
 			Headers: a.Headers, Params: a.Params, Confidence: a.Confidence}
@@ -217,7 +232,66 @@ func classifyCtx(ctx context.Context, archived []endpoints.Endpoint, cur *curren
 			}
 			l.Scripts = append(l.Scripts, hs)
 		}
+		idx := len(out)
 		out = append(out, l)
+		if len(candMatchers) > 0 {
+			pending = append(pending, pendingHist{outIdx: idx, matchers: candMatchers})
+		}
+	}
+
+	if len(pending) > 0 && len(jsDirs) > 0 {
+		seenFiles := map[string]bool{}
+		for _, d := range jsDirs {
+			ents, err := os.ReadDir(d)
+			if err != nil {
+				continue
+			}
+			for _, e := range ents {
+				if err := ctx.Err(); err != nil {
+					return nil, 0, err
+				}
+				name := e.Name()
+				if len(name) == 67 && strings.HasSuffix(name, ".js") {
+					if seenFiles[name] {
+						continue
+					}
+					seenFiles[name] = true
+				}
+				if info, err := e.Info(); err == nil && (info.IsDir() || info.Size() > maxLiveJSReadBytes) {
+					continue
+				}
+				b, err := os.ReadFile(filepath.Join(d, name))
+				if err != nil || len(b) == 0 || len(b) > maxLiveJSReadBytes {
+					continue
+				}
+				kept := pending[:0]
+				for _, cand := range pending {
+					matched := false
+					for _, m := range cand.matchers {
+						if m.matches(b) {
+							matched = true
+							break
+						}
+					}
+					if matched {
+						// Today's scripts write its path out, but the crawls' catalog
+						// has no call to it (a document's text, code the crawl did not
+						// run): kept, under its own class, never dropped (COV-01).
+						out[cand.outIdx].Class = "in_current_code"
+						inCode++
+					} else {
+						kept = append(kept, cand)
+					}
+				}
+				pending = kept
+				if len(pending) == 0 {
+					break
+				}
+			}
+			if len(pending) == 0 {
+				break
+			}
+		}
 	}
 	return out, inCode, nil
 }

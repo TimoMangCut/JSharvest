@@ -123,9 +123,12 @@ func decode(coding string, b []byte, max int) ([]byte, error) {
 			// Some archives store the body decoded but keep the header.
 			return b, nil
 		}
+		defer zr.Close()
 		r = zr
 	case "deflate":
-		r = flate.NewReader(bytes.NewReader(b))
+		rc := flate.NewReader(bytes.NewReader(b))
+		defer rc.Close()
+		r = rc
 	default:
 		return nil, fmt.Errorf("content coding %q not supported", coding)
 	}

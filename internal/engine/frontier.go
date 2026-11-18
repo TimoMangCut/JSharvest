@@ -206,9 +206,28 @@ func runFrontier(ctx context.Context, cfg Config, tab context.Context, g *guard.
 		return e.run, err
 	}
 	defer pages.Close()
-	c := &crawl{specProbe: cfg.SpecProbe && !cfg.NoSpecProbe, seedOrigin: strings.ToLower(cfg.Target.Scheme + "://" + cfg.Target.Host), inScope: cfg.InScope, pageScope: pageScope,
-		q: q, st: e.st, enc: json.NewEncoder(pages), stats: &FrontierStats{Listed: map[string]int{}}, limit: newLimiter(cfg.PageRate),
-		visited: map[string]string{}, blamed: map[string]bool{}, scripts: map[string]bool{}, dedupe: n > 1}
+	c := &crawl{
+		runID:          e.run.RunID,
+		specProbe:      cfg.SpecProbe && !cfg.NoSpecProbe,
+		seedOrigin:     strings.ToLower(cfg.Target.Scheme + "://" + cfg.Target.Host),
+		inScope:        cfg.InScope,
+		pageScope:      pageScope,
+		q:              q,
+		st:             e.st,
+		enc:            json.NewEncoder(pages),
+		stats:          &FrontierStats{Listed: map[string]int{}},
+		limit:          newLimiter(cfg.PageRate),
+		visited:        map[string]string{},
+		blamed:         map[string]bool{},
+		scripts:        map[string]bool{},
+		thirdPartyDone: map[string]bool{},
+		skel:           frontier.NewSkeleton(),
+		seenScriptSHA:  map[string]bool{},
+		queuedBySkel:   map[string]int{},
+		deferredBySkel: map[string][]deferredFound{},
+		deferredSeen:   map[string]bool{},
+		dedupe:         n > 1,
+	}
 	c.cond = sync.NewCond(&c.mu)
 	var wg sync.WaitGroup
 	for i, t := range tabs {
@@ -230,7 +249,8 @@ func runFrontier(ctx context.Context, cfg Config, tab context.Context, g *guard.
 	}
 	c.mu.Lock()
 	c.commit()
-	if c.stopped == "" && q.Len() > 0 {
+	extraQueued := c.finalizeDeferredLocked()
+	if c.stopped == "" && (q.Len() > 0 || extraQueued > 0) {
 		c.stopped = "tab-failed"
 	}
 	stats := c.stats
@@ -254,11 +274,14 @@ func runFrontier(ctx context.Context, cfg Config, tab context.Context, g *guard.
 	}
 	c.closeSpecClient()
 
-	stats.Queued = q.Len()
+	stats.Queued = q.Len() + extraQueued
 	q.SortListed()
 	for _, l := range q.Listed {
 		stats.Listed[l.Reason]++
 		c.enc.Encode(Page{Run: e.run.RunID, URL: l.URL, How: l.How, Method: l.Method, From: l.From, Reason: l.Reason})
+	}
+	for reason, cnt := range q.ExtraListed {
+		stats.Listed[reason] += cnt
 	}
 	if n := q.Dropped(); n > 0 {
 		e.warn(fmt.Sprintf("frontier: %d pages over -max-pages not visited", n))
@@ -295,9 +318,18 @@ func runFrontier(ctx context.Context, cfg Config, tab context.Context, g *guard.
 // order the pages were taken: the queue sees what it sees with one tab, so
 // the pages visited and those listed are the same with N
 // (docs/gd5-parallel-design.md 8.3, 8.14).
+const cdpDynamicWindow = 12
+
+type deferredFound struct {
+	f     frontier.Found
+	depth int
+	from  string
+}
+
 type crawl struct {
 	mu      sync.Mutex
 	cond    *sync.Cond
+	runID   string
 	q       *frontier.Queue
 	level   int
 	busy    int // pages taken and not done
@@ -339,9 +371,40 @@ type crawl struct {
 	dedupe  bool
 	visited map[string]string
 
-	st         *store.Store
-	scripts    map[string]bool // read for URLs already
-	readAnyYet bool            // the first page to read scripts reads every one in the store
+	st             *store.Store
+	scripts        map[string]bool // read for URLs already
+	thirdPartyDone map[string]bool // third-party scripts already scanned by noteAPIOrigins
+	readAnyYet     bool            // the first page to read scripts reads every one in the store
+
+	skel           *frontier.Skeleton
+	seenScriptSHA  map[string]bool
+	queuedBySkel   map[string]int
+	deferredBySkel map[string][]deferredFound
+	deferredKeys   []string
+	deferredSeen   map[string]bool
+}
+
+func isFrontierSpecURL(raw string) bool {
+	u, err := url.Parse(raw)
+	return err == nil && frontier.SpecFile(u.Path)
+}
+
+func (c *crawl) decSkelQueuedLocked(rawURL string) {
+	if c.skel == nil || isFrontierSpecURL(rawURL) {
+		return
+	}
+	if k, dyn := c.skel.Key(rawURL, false); dyn && k != "" && c.queuedBySkel[k] > 0 {
+		c.queuedBySkel[k]--
+	}
+}
+
+func (c *crawl) incSkelQueuedLocked(rawURL string) {
+	if c.skel == nil || isFrontierSpecURL(rawURL) {
+		return
+	}
+	if k, dyn := c.skel.Key(rawURL, false); dyn && k != "" {
+		c.queuedBySkel[k]++
+	}
 }
 
 // donePage is a page visited, waiting for its level to be done.
@@ -378,6 +441,14 @@ func (c *crawl) next(ctx context.Context) (frontier.Item, int, bool) {
 			continue
 		}
 		if it, ok := c.q.Peek(); ok && it.Depth <= c.level {
+			if it.How != frontier.Seed && c.skel != nil && c.skel.ShouldSkip(it.URL) {
+				c.q.Next()
+				c.q.Refund()
+				c.decSkelQueuedLocked(it.URL)
+				c.stats.Listed[frontier.TemplateSaturated]++
+				c.enc.Encode(Page{Run: c.runID, URL: it.URL, Depth: it.Depth, From: it.From, How: it.How, Reason: frontier.TemplateSaturated})
+				continue
+			}
 			if c.blamed[it.URL] {
 				if c.busy > 0 {
 					c.cond.Wait()
@@ -386,6 +457,7 @@ func (c *crawl) next(ctx context.Context) (frontier.Item, int, bool) {
 				c.solo, c.soloOrder = true, c.taken+1
 			}
 			c.q.Next()
+			c.decSkelQueuedLocked(it.URL)
 			c.busy++
 			c.taken++
 			if n, ok := frontier.Normalize(it.URL); ok {
@@ -417,6 +489,7 @@ func (c *crawl) finish(d donePage, stop string, retry bool) {
 	defer c.mu.Unlock()
 	if retry {
 		c.q.Retry(d.it)
+		c.incSkelQueuedLocked(d.it.URL)
 	}
 	c.done = append(c.done, d)
 	if c.solo && d.order == c.soloOrder {
@@ -429,6 +502,109 @@ func (c *crawl) finish(d donePage, stop string, retry bool) {
 	c.cond.Broadcast()
 }
 
+func (c *crawl) admitFoundLocked(f frontier.Found, depth int, from string) bool {
+	if pre := c.q.Precheck(f, depth); pre != "" {
+		c.q.Add(f, depth, from)
+		return false
+	}
+	if c.skel != nil && !isFrontierSpecURL(f.URL) {
+		if skelKey, dynamic := c.skel.Key(f.URL, true); dynamic && skelKey != "" {
+			if c.skel.IsSaturated(skelKey) {
+				c.q.ListAs(f, from, frontier.TemplateSaturated)
+				return false
+			}
+			if c.queuedBySkel[skelKey] >= cdpDynamicWindow {
+				if norm, ok := frontier.Normalize(f.URL); ok && !c.deferredSeen[norm] {
+					c.deferredSeen[norm] = true
+					if len(c.deferredBySkel[skelKey]) == 0 {
+						c.deferredKeys = append(c.deferredKeys, skelKey)
+					}
+					c.deferredBySkel[skelKey] = append(c.deferredBySkel[skelKey], deferredFound{f: f, depth: depth, from: from})
+				}
+				return false
+			}
+			if c.q.Add(f, depth, from) == "" {
+				c.queuedBySkel[skelKey]++
+				return true
+			}
+			return false
+		}
+	}
+	return c.q.Add(f, depth, from) == ""
+}
+
+func (c *crawl) flushDeferredLocked() {
+	if len(c.deferredKeys) == 0 {
+		return
+	}
+	keptKeys := c.deferredKeys[:0]
+	for _, k := range c.deferredKeys {
+		list := c.deferredBySkel[k]
+		if len(list) == 0 {
+			delete(c.deferredBySkel, k)
+			continue
+		}
+		if c.skel != nil && c.skel.IsSaturated(k) {
+			for _, df := range list {
+				if norm, ok := frontier.Normalize(df.f.URL); ok {
+					delete(c.deferredSeen, norm)
+				}
+				c.q.ListAs(df.f, df.from, frontier.TemplateSaturated)
+			}
+			delete(c.deferredBySkel, k)
+			continue
+		}
+		for len(list) > 0 && c.queuedBySkel[k] < cdpDynamicWindow {
+			df := list[0]
+			list = list[1:]
+			if norm, ok := frontier.Normalize(df.f.URL); ok {
+				delete(c.deferredSeen, norm)
+			}
+			if c.q.Add(df.f, df.depth, df.from) == "" {
+				c.queuedBySkel[k]++
+			}
+		}
+		if len(list) > 0 {
+			c.deferredBySkel[k] = list
+			keptKeys = append(keptKeys, k)
+		} else {
+			delete(c.deferredBySkel, k)
+		}
+	}
+	c.deferredKeys = keptKeys
+}
+
+func (c *crawl) finalizeDeferredLocked() int {
+	if len(c.deferredKeys) == 0 {
+		return 0
+	}
+	extraQueued := 0
+	hitLimit := c.q.Dropped() > 0
+	for _, k := range c.deferredKeys {
+		list := c.deferredBySkel[k]
+		if len(list) == 0 {
+			continue
+		}
+		if c.skel != nil && c.skel.IsSaturated(k) {
+			for _, df := range list {
+				c.q.ListAs(df.f, df.from, frontier.TemplateSaturated)
+			}
+			continue
+		}
+		if hitLimit {
+			for _, df := range list {
+				c.q.Add(df.f, df.depth, df.from)
+			}
+			continue
+		}
+		extraQueued += len(list)
+	}
+	c.deferredBySkel = map[string][]deferredFound{}
+	c.deferredKeys = nil
+	c.deferredSeen = map[string]bool{}
+	return extraQueued
+}
+
 // commit gives the queue what the level's pages found, in the order they
 // were taken, and writes their lines. Call it with c.mu held.
 func (c *crawl) commit() {
@@ -438,8 +614,17 @@ func (c *crawl) commit() {
 		if err := c.st.Flush(); err != nil {
 			slog.Debug("flush index", "err", err)
 		}
+		var skip map[string]bool
+		if c.readAnyYet {
+			skip = map[string]bool{}
+			for sha := range c.seenScriptSHA {
+				if c.scripts[sha] || c.thirdPartyDone[sha] {
+					skip[sha] = true
+				}
+			}
+		}
 		var err error
-		if ss, err = endpoints.Analyze(c.st.Dir(), 0); err != nil {
+		if ss, err = endpoints.AnalyzeExcept(c.st.Dir(), 0, skip); err != nil {
 			slog.Debug("analyze scripts", "err", err)
 		}
 	}
@@ -451,6 +636,10 @@ func (c *crawl) commit() {
 			c.q.Visited(u)
 		}
 		found := d.found
+		var jsFound []frontier.Found
+		var pageOrigins []string
+		var newScripts []string
+		var inlineSigs [][32]byte
 		if d.readScripts {
 			var mine map[string]bool
 			if c.readAnyYet {
@@ -460,12 +649,48 @@ func (c *crawl) commit() {
 				}
 			}
 			c.readAnyYet = true
-			c.noteAPIOrigins(ss, mine)
-			found = append(found, scriptURLs(ss, d.p.FinalURL, c.scripts, mine)...)
+			for _, s := range ss {
+				if (mine != nil && !mine[s.SHA256]) || c.seenScriptSHA[s.SHA256] {
+					continue
+				}
+				c.seenScriptSHA[s.SHA256] = true
+				if s.Inline {
+					if sig, ok := endpoints.SemanticAPISig(s.Result); ok {
+						inlineSigs = append(inlineSigs, sig)
+					}
+				} else if !s.ThirdParty || !frontier.IsTrackerURL(s.URLs...) {
+					newScripts = append(newScripts, s.SHA256)
+				}
+			}
+			pageOrigins = c.noteAPIOrigins(ss, mine)
+			jsFound = scriptURLs(ss, d.p.FinalURL, c.scripts, mine)
+			found = append(found, jsFound...)
+		}
+		if c.skel != nil && d.p.Error == "" && d.p.DuplicateOf == "" && d.p.Status > 0 {
+			obsURL := d.p.FinalURL
+			if obsURL == "" {
+				obsURL = d.it.URL
+			}
+			jsURLs := make([]string, 0, len(jsFound))
+			for _, jf := range jsFound {
+				jsURLs = append(jsURLs, jf.URL)
+			}
+			gained := c.skel.Observe(frontier.Observation{
+				PageURL:      obsURL,
+				Status:       int(d.p.Status),
+				NewScripts:   newScripts,
+				InlineSigs:   inlineSigs,
+				JSFoundURLs:  jsURLs,
+				JSAPIOrigins: pageOrigins,
+				Links:        d.found,
+				InScope:      c.pageScope,
+				ExtraGain:    d.p.Explored > 0,
+			})
+			c.q.Feedback(obsURL, gained)
 		}
 		found = append(found, d.after...)
 		for _, f := range found {
-			if c.q.Add(f, d.it.Depth+1, d.p.FinalURL) == "" {
+			if c.admitFoundLocked(f, d.it.Depth+1, d.p.FinalURL) {
 				d.p.Discovered++
 			}
 		}
@@ -476,6 +701,7 @@ func (c *crawl) commit() {
 		}
 	}
 	c.done = nil
+	c.flushDeferredLocked()
 }
 
 // ruledPage counts the pages in a row, in any tab, whose document a WAF
@@ -517,31 +743,39 @@ func (c *crawl) blame(u string) bool {
 // the first one that gets that far.
 // noteAPIOrigins keeps the API hosts the scripts not read yet name.
 // Under c.mu (commit).
-func (c *crawl) noteAPIOrigins(ss []endpoints.Script, mine map[string]bool) {
-	if !c.specProbe {
-		return
-	}
+func (c *crawl) noteAPIOrigins(ss []endpoints.Script, mine map[string]bool) []string {
+	var added []string
 	if c.apiSeen == nil {
 		c.apiSeen = map[string]bool{c.seedOrigin: true}
 	}
 	for _, s := range ss {
-		if c.scripts[s.SHA256] || (mine != nil && !mine[s.SHA256]) || frontier.Vendor(s.URLs...) || frontier.IsTrackerURL(s.URLs...) {
+		if c.scripts[s.SHA256] || c.thirdPartyDone[s.SHA256] || (mine != nil && !mine[s.SHA256]) {
+			continue
+		}
+		if s.ThirdParty {
+			c.thirdPartyDone[s.SHA256] = true
+		}
+		if frontier.Vendor(s.URLs...) || frontier.IsTrackerURL(s.URLs...) {
 			continue
 		}
 		scriptURL := ""
 		if len(s.URLs) > 0 {
 			scriptURL = s.URLs[0]
 		}
-		if !s.ThirdParty {
+		if c.specProbe && !s.ThirdParty {
 			c.specCtx.AddScript(s.Result, c.seedOrigin, scriptURL)
 		}
 		for _, o := range frontier.APIOrigins(s.Result, c.inScope) {
 			if !c.apiSeen[o] && (frontier.MaxAPIOrigins <= 0 || len(c.apiSeen) <= frontier.MaxAPIOrigins) {
 				c.apiSeen[o] = true
-				c.apiPending = append(c.apiPending, o)
+				added = append(added, o)
+				if c.specProbe {
+					c.apiPending = append(c.apiPending, o)
+				}
 			}
 		}
 	}
+	return added
 }
 
 // takeAPIOrigins hands the API hosts not asked yet to a page.

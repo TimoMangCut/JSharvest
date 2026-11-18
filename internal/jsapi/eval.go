@@ -1289,7 +1289,7 @@ func (x *extractor) thisPropObject(name string, depth int) *js.ObjectExpr {
 		return x.thisObjCache[name]
 	}
 	vs := x.thisProps[name]
-	if len(vs) == 0 || len(vs) > 64 {
+	if len(vs) == 0 || len(vs) > 256 {
 		x.thisObjDone[name] = true
 		return nil
 	}
@@ -1436,7 +1436,7 @@ func (x *extractor) thisPropEnum(name string, depth int) *js.Var {
 		return x.thisEnumCache[name]
 	}
 	vs := x.thisProps[name]
-	if len(vs) == 0 || len(vs) > 64 {
+	if len(vs) == 0 || len(vs) > 256 {
 		x.thisEnumDone[name] = true
 		return nil
 	}

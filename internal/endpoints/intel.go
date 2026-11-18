@@ -263,10 +263,17 @@ func BuildIntel(scripts []Script, inScope func(host string) bool) Intel {
 // analyze fills it) and writes it, or removes an old one when there is
 // nothing. redact, when not nil, hides a header's value.
 func SaveIntel(dir string, inScope func(host string) bool, redact func(name, value string) string) (Intel, error) {
-	scripts, err := Load(dir)
+	scripts, err := loadDir(dir, true)
 	if err != nil {
 		return Intel{}, err
 	}
+	return SaveIntelFromScripts(dir, scripts, inScope, redact)
+}
+
+// SaveIntelFromScripts builds and persists intel.json from an already-loaded
+// slice of scripts so callers that just ran AnalyzeSlim/Catalog avoid a second
+// full pass over thousands of static/<sha>.json files.
+func SaveIntelFromScripts(dir string, scripts []Script, inScope func(host string) bool, redact func(name, value string) string) (Intel, error) {
 	in := BuildIntel(scripts, inScope)
 	in.Bases = enrichIntelBases(dir, scripts, in.Bases, inScope)
 	in.ServerHints, in.SecurityNotes, in.AuthFlows = infraAll(dir, inScope)
@@ -291,9 +298,14 @@ func SaveIntel(dir string, inScope func(host string) bool, redact func(name, val
 	}
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, append(b, '\n'), 0o600); err != nil {
+		_ = os.Remove(tmp)
 		return in, err
 	}
-	return in, os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return in, err
+	}
+	return in, nil
 }
 
 // Names lists the headers' names, once each.

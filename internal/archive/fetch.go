@@ -26,8 +26,8 @@ import (
 
 func (r *runner) prefetchWorker(ctx context.Context, ch <-chan *group) {
 	for g := range ch {
-		if ctx.Err() != nil {
-			return
+		if ctx.Err() != nil || r.prefetchHalted.Load() {
+			continue
 		}
 		if r.isDone(g.key) || r.isDone("pre:"+g.key) || r.isDone("dead:"+g.key) {
 			continue
@@ -39,6 +39,12 @@ func (r *runner) prefetchWorker(ctx context.Context, ch <-chan *group) {
 		bodies, archBody, ferr := r.fetchOne(ctx, g, meta)
 		for _, b := range bodies {
 			_ = r.chunks(g, b)
+		}
+		if errors.Is(ferr, ErrBlocked) {
+			// Memento upstream throttled/refused during concurrent listing; stop
+			// opportunistic prefetch quietly without aborting CDX index shards.
+			r.prefetchHalted.Store(true)
+			continue
 		}
 		if errors.Is(ferr, errNotArchived) {
 			r.sum(func(s *Summary) { s.NotArchived++ })
@@ -136,6 +142,9 @@ func (r *runner) fetch(ctx context.Context) error {
 
 	if ctx.Err() != nil {
 		return ctx.Err()
+	}
+	if r.prefetchHalted.Load() && r.o.Wayback != nil && r.o.Wayback.Client != nil {
+		r.o.Wayback.Client.ResetBreaker()
 	}
 	initial, fc := newFamilyController(r, gs)
 	if len(initial) == 0 {

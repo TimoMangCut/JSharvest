@@ -123,16 +123,25 @@ func archiveRun(ctx context.Context, args []string) (*archive.Summary, error) {
 	services := []string{env("JSHARVEST_WAYBACK_URL", "https://web.archive.org"), env("JSHARVEST_OTX_URL", "https://otx.alienvault.com"),
 		env("JSHARVEST_CC_INDEX_URL", "https://index.commoncrawl.org"), env("JSHARVEST_CC_DATA_URL", "https://data.commoncrawl.org"),
 		env("JSHARVEST_URLSCAN_URL", "https://urlscan.io")}
-	// Separate Client per archive service so connection-reset circuit breakers
-	// are strictly isolated per upstream host.
-	wbClient := archive.NewClientSafe(proxyURL, hostRuleSet, services)
-	wbClient.Wait = gap(60 * time.Second)
+	// Separate Client per archive service — and separate Wayback CDX vs Memento
+	// clients — so connection-reset circuit breakers are strictly isolated per
+	// upstream cluster.
 	wbBase := env("JSHARVEST_WAYBACK_URL", "https://web.archive.org")
 	wb, _ := url.Parse(wbBase)
+	wbIndexClient := archive.NewClientSafe(proxyURL, hostRuleSet, services)
+	wbIndexClient.Wait = gap(60 * time.Second)
+	wbIndexClient.HTTP.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if req.URL.Host != wb.Host || len(via) >= 4 {
+			return http.ErrUseLastResponse
+		}
+		return nil
+	}
+	wbFilesClient := archive.NewClientSafe(proxyURL, hostRuleSet, services)
+	wbFilesClient.Wait = gap(60 * time.Second)
 	// A memento may move to the nearest capture, at times by a few hops
 	// (/web/2id_/ → a time stamp → the scheme the capture has): within the
 	// Wayback only (ARC-06).
-	wbClient.HTTP.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+	wbFilesClient.HTTP.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if req.URL.Host != wb.Host || len(via) >= 8 {
 			return http.ErrUseLastResponse
 		}
@@ -151,8 +160,9 @@ func archiveRun(ctx context.Context, args []string) (*archive.Summary, error) {
 	if *concurrency > 1 {
 		wbFilesGap = gap(300 * time.Millisecond)
 	}
-	o.Wayback = &archive.Wayback{Base: wbBase, Client: wbClient, Index: &archive.Budget{Gap: wbIndexGap},
-		Files: &archive.Budget{Gap: wbFilesGap}, PageSize: *pageSize, Collapse: collapseVal, Sharded: shardedWB}
+	o.Wayback = &archive.Wayback{Base: wbBase, Client: wbFilesClient, IndexClient: wbIndexClient,
+		Index: &archive.Budget{Gap: wbIndexGap}, Files: &archive.Budget{Gap: wbFilesGap},
+		PageSize: *pageSize, Collapse: collapseVal, Sharded: shardedWB}
 
 	otxClient := archive.NewClientSafe(proxyURL, hostRuleSet, services)
 	otxClient.Wait = gap(60 * time.Second)
@@ -161,10 +171,20 @@ func archiveRun(ctx context.Context, args []string) (*archive.Summary, error) {
 
 	// Common Crawl's index answers 504 when busy: two fast tries across
 	// parallel collections so dead collections fail fast (MAX-01).
+	ccIndexURL := env("JSHARVEST_CC_INDEX_URL", "https://index.commoncrawl.org")
+	ccDataURL := env("JSHARVEST_CC_DATA_URL", "https://data.commoncrawl.org")
+	ccIdxU, _ := url.Parse(ccIndexURL)
+	ccDataU, _ := url.Parse(ccDataURL)
 	ccClient := archive.NewClientSafe(proxyURL, hostRuleSet, services)
 	ccClient.Tries, ccClient.Wait = 2, gap(6*time.Second)
-	o.CC = &archive.CommonCrawl{Index: env("JSHARVEST_CC_INDEX_URL", "https://index.commoncrawl.org"),
-		Data: env("JSHARVEST_CC_DATA_URL", "https://data.commoncrawl.org"), Client: ccClient,
+	ccClient.HTTP.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 4 || (req.URL.Host != ccIdxU.Host && req.URL.Host != ccDataU.Host) {
+			return http.ErrUseLastResponse
+		}
+		return nil
+	}
+	o.CC = &archive.CommonCrawl{Index: ccIndexURL,
+		Data: ccDataURL, Client: ccClient,
 		Budget: &archive.Budget{Gap: gap(3 * time.Second)}, Files: &archive.Budget{Gap: gap(500 * time.Millisecond)}, Collections: *ccCollections}
 
 	usClient := archive.NewClientSafe(proxyURL, hostRuleSet, services)

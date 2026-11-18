@@ -177,6 +177,14 @@ func resolveScriptAuthzConsts(scripts []Script) map[int]*resolvedScriptAuthz {
 				return sl.val, true
 			}
 		}
+		// Direct CJS nested dictionary access (`var c = n("9999"); c.PERMISSION.READ`)
+		// parses as Export="PERMISSION", Key="READ" while `module.exports = { PERMISSION: { READ: ... } }`
+		// stores Export="*", Key="PERMISSION.READ".
+		if exp != "*" && exp != "" && key != "" {
+			if sl, exists := table[[4]string{scope, mod, "*", exp + "." + key}]; exists && !sl.clashed {
+				return sl.val, true
+			}
+		}
 		return "", false
 	}
 

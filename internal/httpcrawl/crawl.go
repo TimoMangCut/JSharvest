@@ -486,6 +486,9 @@ func Crawl(ctx context.Context, o Options) (*Result, error) {
 		res.Listed[l.Reason]++
 		o.Page(Page{URL: l.URL, How: l.How, Method: l.Method, From: l.From, Reason: l.Reason})
 	}
+	for reason, cnt := range cr.q.ExtraListed {
+		res.Listed[reason] += cnt
+	}
 	if d := cr.q.Dropped(); d > 0 {
 		res.Listed[frontier.Limit] += d
 	}

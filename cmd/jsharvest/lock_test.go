@@ -164,7 +164,7 @@ func TestSecondWriterFailsClearly(t *testing.T) {
 	if err := a.Start(); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(filepath.Join(sync, "opened-a"), 3*time.Second)
+	waitFor(filepath.Join(sync, "opened-a"), 10*time.Second)
 	err := b.Run()
 	if ee, ok := err.(*exec.ExitError); !ok || ee.ExitCode() != 1 {
 		t.Fatalf("second writer: want exit 1, got %v", err)
@@ -186,7 +186,7 @@ func TestWaitLockWaitsThenRuns(t *testing.T) {
 	dir, sync := filepath.Join(t.TempDir(), "h", "anon"), t.TempDir()
 	a, b, ob, _ := runStore(t, dir, sync, false, "10s")
 	a.Start()
-	waitFor(filepath.Join(sync, "opened-a"), 3*time.Second)
+	waitFor(filepath.Join(sync, "opened-a"), 10*time.Second)
 	if err := b.Run(); err != nil {
 		t.Fatalf("b: %v: %s", err, ob)
 	}

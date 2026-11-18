@@ -12,10 +12,12 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/TimoMangCut/JSharvest/internal/endpoints"
 	"github.com/TimoMangCut/JSharvest/internal/replay"
+	"github.com/TimoMangCut/JSharvest/internal/results"
 	"github.com/TimoMangCut/JSharvest/internal/store"
 )
 
@@ -151,10 +153,11 @@ type runner struct {
 	hasWorst  bool
 
 	// Streaming shard -> memento prefetch state during sharded Wayback listing.
-	prefetchCh    chan *group
-	prefetchSeen  map[string]bool
-	prefetchFam   map[string]int
-	prefetchFirst map[string]time.Time
+	prefetchCh     chan *group
+	prefetchSeen   map[string]bool
+	prefetchFam    map[string]int
+	prefetchFirst  map[string]time.Time
+	prefetchHalted atomic.Bool
 
 	// namedURLs are the scripts old pages and fetched scripts named, filed
 	// once.
@@ -389,20 +392,32 @@ func (r *runner) history(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	eps, err := endpoints.Catalog(r.o.Dir, r.o.InScope, true)
+	scripts, err := endpoints.AnalyzeSlim(r.o.Dir, 0)
 	if err != nil {
 		return err
+	}
+	if r.store.Len() > 1000 {
+		endpoints.ClearResultMemCache()
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	d := results.Open(r.o.Dir)
+	if err := d.Refresh(); err != nil {
+		return err
+	}
+	eps := endpoints.Assemble(r.o.Dir, scripts, endpoints.Requests(d), r.o.InScope)
 	if err := endpoints.Write(r.o.Dir, eps); err != nil {
 		return err
 	}
 	// Old code's client headers and buckets: a secret rotated out of
 	// today's bundle may still work.
-	if _, err := endpoints.SaveIntel(r.o.Dir, r.o.InScope, nil); err != nil {
+	if _, err := endpoints.SaveIntelFromScripts(r.o.Dir, scripts, r.o.InScope, nil); err != nil {
 		return err
+	}
+	scripts = nil
+	if r.store.Len() > 1000 {
+		endpoints.ClearMemCache()
 	}
 	lines, _, err := classifyCtx(ctx, eps, r.cur, r.store.Entry)
 	if err != nil {

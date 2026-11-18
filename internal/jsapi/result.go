@@ -150,26 +150,61 @@ func sortedKeys(m map[string]bool) []string {
 	return out
 }
 
+func isValidHTTPHeaderName(s string) bool {
+	if len(s) == 0 || len(s) > 128 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
+			continue
+		}
+		switch c {
+		case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func isSafeHTTPHeaderValue(s string) bool {
+	if len(s) == 0 || len(s) > 4096 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '\r' || c == '\n' || c == 0 || (c < 0x20 && c != '\t') || c == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
 // clientHeaders reads the headers put aside in pass 1, with their values,
 // once each.
 func (x *extractor) clientHeaders() []Header {
 	var out []Header
 	seen := map[string]bool{}
 	for _, h := range x.headers {
-		if h.name == "" {
+		name := strings.TrimSpace(h.name)
+		if !isValidHTTPHeaderName(name) {
 			continue
 		}
 		var q []string
 		x.lits = x.lits[:0]
-		v := x.eval(h.value, &q, 0)[0]
-		if strings.EqualFold(h.name, "Authorization") && (v == "Basic {}" || v == "Basic {}:{}") && x.isGenericBasicAuth(h.value) {
+		v := strings.TrimSpace(x.eval(h.value, &q, 0)[0])
+		if !isSafeHTTPHeaderValue(v) {
 			continue
 		}
-		if seen[h.name+"\x00"+v] {
+		if strings.EqualFold(name, "Authorization") && (v == "Basic {}" || v == "Basic {}:{}") && x.isGenericBasicAuth(h.value) {
 			continue
 		}
-		seen[h.name+"\x00"+v] = true
-		hd := Header{Name: h.name, Value: v}
+		if seen[name+"\x00"+v] {
+			continue
+		}
+		seen[name+"\x00"+v] = true
+		hd := Header{Name: name, Value: v}
 		if l, ok := h.value.(*js.LiteralExpr); ok && len(l.Data) > 2 {
 			if i := bytes.Index(x.src, l.Data); i >= 0 {
 				hd.Line, _ = x.lineCol(i)
