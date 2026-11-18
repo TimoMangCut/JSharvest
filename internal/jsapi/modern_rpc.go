@@ -87,6 +87,9 @@ func scanTRPCSetup(ast *js.AST, x *extractor) (map[*js.Var]bool, string, bool) {
 	vars := map[*js.Var]bool{}
 	base := ""
 	explicit := bytes.Contains(x.src, []byte("TRPC")) || bytes.Contains(x.src, []byte("httpBatch"))
+	if !explicit && !bytes.Contains(x.src, []byte("httpLink")) {
+		return vars, "/api/trpc", false
+	}
 	js.Walk(walker(func(n js.INode) {
 		switch t := n.(type) {
 		case *js.VarDecl:

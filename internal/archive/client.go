@@ -63,6 +63,7 @@ type Client struct {
 	Tries   int
 	mu      sync.Mutex
 	refused int
+	blocked bool
 }
 
 // NewClientSafe is the client of the archive services (Wayback, OTX, Common
@@ -130,11 +131,46 @@ func (c *Client) GetIndexWith(ctx context.Context, b *Budget, rawURL string, max
 	return c.getWithOpts(ctx, b, rawURL, max, h, true)
 }
 
+func (c *Client) recordConnTrouble() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.blocked {
+		return true
+	}
+	c.refused += 2
+	if c.refused >= 10 {
+		c.blocked = true
+		return true
+	}
+	return false
+}
+
+func (c *Client) isBlocked() bool {
+	c.mu.Lock()
+	b := c.blocked
+	c.mu.Unlock()
+	return b
+}
+
+func (c *Client) decayRefused() {
+	c.mu.Lock()
+	if !c.blocked && c.refused > 0 {
+		c.refused--
+	}
+	c.mu.Unlock()
+}
+
 func (c *Client) getWithOpts(ctx context.Context, b *Budget, rawURL string, maxBytes int64, h http.Header, gzipOK bool) (*Answer, error) {
 	var last error
 	for try := 0; try < c.Tries; try++ {
+		if c.isBlocked() {
+			return nil, ErrBlocked
+		}
 		if err := b.wait(ctx); err != nil {
 			return nil, err
+		}
+		if c.isBlocked() {
+			return nil, ErrBlocked
 		}
 		req, err := http.NewRequestWithContext(ctx, "GET", rawURL, nil)
 		if err != nil {
@@ -159,11 +195,7 @@ func (c *Client) getWithOpts(ctx context.Context, b *Budget, rawURL string, maxB
 				return nil, err // refused by what we are, not a trouble that passes
 			}
 			if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET) {
-				c.mu.Lock()
-				c.refused++
-				blocked := c.refused >= 5
-				c.mu.Unlock()
-				if blocked {
+				if c.recordConnTrouble() {
 					return nil, ErrBlocked
 				}
 			}
@@ -172,13 +204,21 @@ func (c *Client) getWithOpts(ctx context.Context, b *Budget, rawURL string, maxB
 			}
 			continue
 		}
-		c.mu.Lock()
-		c.refused = 0
-		c.mu.Unlock()
 		body, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
 		resp.Body.Close()
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			last = err
+			if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET) {
+				if c.recordConnTrouble() {
+					return nil, ErrBlocked
+				}
+			}
+			if err := sleep(ctx, adaptiveBackoff(c.Wait, try)); err != nil {
+				return nil, err
+			}
 			continue
 		}
 		if gzipOK && int64(len(body)) <= maxBytes {
@@ -198,6 +238,7 @@ func (c *Client) getWithOpts(ctx context.Context, b *Budget, rawURL string, maxB
 			}
 			continue
 		}
+		c.decayRefused()
 		if int64(len(body)) > maxBytes {
 			return a, fmt.Errorf("%s: over %d bytes", rawURL, maxBytes)
 		}

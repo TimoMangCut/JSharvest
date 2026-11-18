@@ -520,7 +520,7 @@ func runCrawl(args []string) error {
 			if *archiveFallback || *archiveAfter {
 				run := func(ctx context.Context) any {
 					args := []string{"-o", *out, "-target", t.Hostname(), "-scope", *scopeMode, "-sources", archiveSources,
-						"-concurrency", fmt.Sprint(max(*tabs*4, 16)), "-live-rate", fmt.Sprint(max(*httpRate, 10)), "-mem-cache-mb", fmt.Sprint(*memCacheMB)}
+						"-concurrency", fmt.Sprint(max(*tabs*4, 8)), "-live-rate", fmt.Sprint(max(*httpRate, 5)), "-mem-cache-mb", fmt.Sprint(*memCacheMB)}
 					if *proxy != "" {
 						args = append(args, "-proxy", *proxy)
 					} else {

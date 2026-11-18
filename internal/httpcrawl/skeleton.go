@@ -263,8 +263,20 @@ func (sc *skeletonController) observe(cr *crawler, pageURL string, status int, a
 		sc.seenLinks[origin] = map[string]bool{}
 	}
 	for _, l := range links {
-		lk, _ := sc.skeletonKey(l.URL, true)
 		if l.How == frontier.Form {
+			u, err := url.Parse(l.URL)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+				continue
+			}
+			inScope := (cr != nil && cr.o.InScope != nil && cr.o.InScope(u.Hostname())) ||
+				((cr == nil || cr.o.InScope == nil) && originOf(l.URL) == origin)
+			if !inScope {
+				continue
+			}
+			lk, _ := sc.skeletonKey(l.URL, true)
+			if lk == "" {
+				continue
+			}
 			fk := l.Method + " " + lk
 			if !sc.seenForms[origin][fk] {
 				sc.seenForms[origin][fk] = true
@@ -272,7 +284,11 @@ func (sc *skeletonController) observe(cr *crawler, pageURL string, status int, a
 			}
 			continue
 		}
-		if l.Visit && lk != "" && !sc.seenLinks[origin][lk] {
+		if !l.Visit {
+			continue
+		}
+		lk, _ := sc.skeletonKey(l.URL, true)
+		if lk != "" && !sc.seenLinks[origin][lk] {
 			sc.seenLinks[origin][lk] = true
 			gained = true
 		}
@@ -296,6 +312,31 @@ func (sc *skeletonController) observe(cr *crawler, pageURL string, status int, a
 		}
 	}
 	return gained
+}
+
+// recordAsyncFindings deterministically records route and API-origin skeletons
+// discovered by external <script src> bundles after drain() finishes at level commit.
+func (sc *skeletonController) recordAsyncFindings(pageURL string, fs []found, origins []string) {
+	if sc == nil || (len(fs) == 0 && len(origins) == 0) {
+		return
+	}
+	origin := originOf(pageURL)
+	if origin == "" {
+		return
+	}
+	if sc.seenLinks[origin] == nil {
+		sc.seenLinks[origin] = map[string]bool{}
+	}
+	for _, x := range fs {
+		if lk, _ := sc.skeletonKey(x.f.URL, false); lk != "" {
+			sc.seenLinks[origin]["js:"+lk] = true
+		}
+	}
+	for _, o := range origins {
+		if o != "" {
+			sc.seenLinks[origin]["orig:"+o] = true
+		}
+	}
 }
 
 func inlineSemanticSig(cr *crawler, sc *skeletonController, code []byte, pageURL string) ([32]byte, bool) {

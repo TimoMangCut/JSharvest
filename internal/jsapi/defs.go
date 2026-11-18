@@ -23,7 +23,8 @@ type step struct {
 	op   byte           // 's' starts the chain, '+' appends (+=), '=' builds on the variable's value
 	// keep: the step is made under a condition the declaration is not,
 	// so the value before it stays possible.
-	keep bool
+	keep   bool
+	uncond bool // assigned unconditionally at the same function scope as declaration
 	// forks are the branches (of an if, a ?:, a switch) the step is in:
 	// a step in another branch of one the step before it is in builds on
 	// what that one built on, not on it.
@@ -166,12 +167,14 @@ func (v *defsVisitor) Enter(n js.INode) js.IVisitor {
 				}
 			}
 			if vr, ok := b.Binding.(*js.Var); ok {
-				x.defs[vr] = append(x.defs[vr], b.Default)
-				x.declDepth[vr] = v.cond
+				r := root(vr)
+				x.defs[r] = append(x.defs[r], b.Default)
+				x.declDepth[r] = v.cond
+				x.declFnDepth[r] = v.fnDepth
 				if b.Default != nil {
-					x.chains[vr] = append(x.chains[vr], chain{{expr: b.Default, op: 's'}})
+					x.chains[r] = append(x.chains[r], chain{{expr: b.Default, op: 's', uncond: true}})
 					if ce, ok := unwrapEnumGroup(b.Default).(*js.CallExpr); ok {
-						x.registerEnumIIFE(ce, root(vr))
+						x.registerEnumIIFE(ce, r)
 					}
 				}
 			}
@@ -202,6 +205,21 @@ func (v *defsVisitor) Enter(n js.INode) js.IVisitor {
 		if n.Name != nil {
 			vr := root(n.Name)
 			x.defs[vr] = append(x.defs[vr], n)
+		}
+		if x.hasVueRenderHint {
+			fnName := ""
+			if n.Name != nil {
+				fnName = string(n.Name.Data)
+			}
+			x.indexVueRenderFn(n.Params, &n.Body, fnName)
+		}
+	case *js.ArrowFunc:
+		if x.hasVueRenderHint {
+			x.indexVueRenderFn(n.Params, &n.Body, "")
+		}
+	case *js.MethodDecl:
+		if x.hasVueRenderHint && !n.Get && !n.Set {
+			x.indexVueRenderFn(n.Params, &n.Body, propName(&n.Name.PropertyName))
 		}
 	case *js.CallExpr:
 		x.registerEnumIIFE(n, nil)
@@ -257,15 +275,16 @@ func (v *defsVisitor) Enter(n js.INode) js.IVisitor {
 			}
 			x.defs[vr] = append(x.defs[vr], n.Y, nil)
 			keep := v.cond > x.declDepth[vr]
+			uncond := !keep && v.fnDepth == x.declFnDepth[vr]
 			switch {
 			case n.Op == js.AddEqToken:
 				x.extend(vr, step{expr: n.Y, node: n, op: '+', keep: keep, forks: v.here()})
 			case n.Op == js.EqToken && refers(n.Y, vr):
 				x.extend(vr, step{expr: n.Y, node: n, op: '=', keep: keep, forks: v.here()})
 			case n.Op == js.EqToken:
-				x.chains[vr] = append(x.chains[vr], chain{{expr: n.Y, node: n, op: 's'}})
+				x.chains[vr] = append(x.chains[vr], chain{{expr: n.Y, node: n, op: 's', keep: keep, uncond: uncond}})
 			default:
-				x.chains[vr] = append(x.chains[vr], chain{{node: n, op: 's'}})
+				x.chains[vr] = append(x.chains[vr], chain{{node: n, op: 's', keep: keep}})
 			}
 		case *js.DotExpr:
 			if n.Op != js.EqToken {
@@ -339,6 +358,31 @@ func (v *defsVisitor) Enter(n js.INode) js.IVisitor {
 			// A Vue component's data(): what this.<name> starts as.
 			if o := returnedObject(n.Value); o != nil {
 				x.dataObjs = append(x.dataObjs, o)
+			}
+		case name == "computed":
+			// Vue component computed getters: computed: { PERMISSION() { return o.a } }.
+			if co, ok := ungroup(n.Value).(*js.ObjectExpr); ok && len(co.List) <= 64 {
+				for i := range co.List {
+					cp := &co.List[i]
+					if cp.Spread || cp.Value == nil {
+						continue
+					}
+					cname := propKey(cp)
+					if cname == "" {
+						continue
+					}
+					val := singleReturnExpr(cp.Value)
+					if val == nil {
+						if goObj, isObj := ungroup(cp.Value).(*js.ObjectExpr); isObj {
+							if g := objectValue(goObj, "get"); g != nil {
+								val = singleReturnExpr(g)
+							}
+						}
+					}
+					if val != nil && !emptyValue(val) {
+						x.thisProps[cname] = append(x.thisProps[cname], val)
+					}
+				}
 			}
 		}
 	case *js.ClassDecl:
@@ -477,8 +521,9 @@ func headersObj(e js.IExpr) bool {
 }
 
 // returnedObject is the object literal a function returns: data() {
-// return {…} }, data: () => ({…}).
+// return {…} }, data: () => ({…}), or Terser's data: (function(){ return {…} }).
 func returnedObject(e js.IExpr) *js.ObjectExpr {
+	e = ungroup(e)
 	var body *js.BlockStmt
 	switch f := e.(type) {
 	case *js.FuncDecl:
@@ -507,12 +552,17 @@ func returnedObject(e js.IExpr) *js.ObjectExpr {
 	return nil
 }
 
+func isPrototypeExpr(e js.IExpr) bool {
+	d, ok := ungroup(e).(*js.DotExpr)
+	return ok && propName(d.Y) == "prototype"
+}
+
 // settle reads, once every variable's assignments are known, what pass 1
-// put aside: the values of this.<name>, and the baseURLs that are no
-// literal.
+// put aside: the values of this.<name> (including X.prototype.<name>), and
+// the baseURLs that are no literal.
 func (x *extractor) settle() {
 	for _, p := range x.props {
-		if p.name != "" && x.isThis(p.obj) && !emptyValue(p.value) {
+		if p.name != "" && (x.isThis(p.obj) || isPrototypeExpr(p.obj)) && !emptyValue(p.value) {
 			x.thisProps[p.name] = append(x.thisProps[p.name], p.value)
 		}
 	}
@@ -688,19 +738,64 @@ func emptyValue(e js.IExpr) bool {
 	return false
 }
 
-// isThis reports whether an expression is this, or a variable set to it
-// (var e = this).
+// isThis reports whether an expression is this, a variable set to it
+// (var e = this), or a compiled Vue 2/3 render-context parameter (_ctx, _vm).
 func (x *extractor) isThis(e js.IExpr) bool {
-	switch n := e.(type) {
+	switch n := ungroup(e).(type) {
 	case *js.LiteralExpr:
 		return n.TokenType == js.ThisToken
 	case *js.Var:
-		if l, ok := x.constant(n).(*js.LiteralExpr); ok && l.TokenType == js.ThisToken {
+		rv := root(n)
+		if x.renderCtxVars[rv] {
+			return true
+		}
+		if l, ok := ungroup(x.constOrSingleExpr(rv)).(*js.LiteralExpr); ok && l.TokenType == js.ThisToken {
 			return true
 		}
 		return loweredThis(n)
 	}
 	return false
+}
+
+func (x *extractor) indexVueRenderFn(params js.Params, body *js.BlockStmt, fnName string) {
+	if body == nil || len(params.List) == 0 || len(params.List) > 6 {
+		return
+	}
+	p0, ok := params.List[0].Binding.(*js.Var)
+	if !ok || p0 == nil {
+		return
+	}
+	r0 := root(p0)
+	if fnName == "_sfc_render" || string(p0.Data) == "_ctx" {
+		x.renderCtxVars[r0] = true
+		if len(params.List) >= 4 {
+			if p3, ok3 := params.List[3].Binding.(*js.Var); ok3 && p3 != nil {
+				x.renderCtxVars[root(p3)] = true
+			}
+		}
+		return
+	}
+	hasCreate, hasC, hasHelper := false, false, false
+	js.Walk(wpBodyVisitor{fn: func(n js.INode) {
+		if hasCreate || (hasC && hasHelper) {
+			return
+		}
+		d, isDot := n.(*js.DotExpr)
+		if !isDot || !isRootVar(d.X, r0) {
+			return
+		}
+		switch propName(d.Y) {
+		case "$createElement", "_self":
+			hasCreate = true
+		case "_c":
+			hasC = true
+		case "_v", "_s", "_e", "_l", "$can", "$cannot":
+			hasHelper = true
+		}
+	}}, body)
+	if hasCreate || (hasC && hasHelper) {
+		x.renderCtxVars[r0] = true
+	}
 }
 
 // loweredThisRe is the name esbuild gives the this an arrow function it
@@ -743,6 +838,22 @@ func (x *extractor) constant(v *js.Var) js.IExpr {
 		return nil
 	}
 	return d[0]
+}
+
+// constOrSingleExpr returns constant(v) or the single unconditional top-scope
+// initializer of a hoisted variable (`var r; r = {...}`).
+func (x *extractor) constOrSingleExpr(v *js.Var) js.IExpr {
+	if v == nil {
+		return nil
+	}
+	rv := root(v)
+	if c := x.constant(rv); c != nil {
+		return c
+	}
+	if cs := x.chains[rv]; len(cs) == 1 && len(cs[0]) == 1 && cs[0][0].op == 's' && cs[0][0].uncond && cs[0][0].expr != nil {
+		return cs[0][0].expr
+	}
+	return nil
 }
 
 // --- evaluating URL expressions ---

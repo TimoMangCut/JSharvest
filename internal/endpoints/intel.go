@@ -140,7 +140,8 @@ func BuildIntel(scripts []Script, inScope func(host string) bool) Intel {
 	keys := map[[2]string]*IntelHeader{}
 	cloud := map[string]*IntelURL{}
 	routes := map[string]*IntelRoute{}
-	for _, s := range scripts {
+	linkedConsts := resolveScriptAuthzConsts(scripts)
+	for idx, s := range scripts {
 		if isTrackerScript(s) {
 			continue
 		}
@@ -182,6 +183,7 @@ func BuildIntel(scripts []Script, inScope func(host string) bool) Intel {
 				iu.Sources = append(iu.Sources, Source{SHA256: s.SHA256, Script: script, Kind: "string"})
 			}
 		}
+		extra := linkedConsts[idx]
 		for _, re := range s.RouteEntries {
 			if re.Path == "" {
 				continue
@@ -203,11 +205,21 @@ func BuildIntel(scripts []Script, inScope func(host string) bool) Intel {
 					ir.AuthRequired = &v
 				}
 			}
-			if len(re.Roles) > 0 {
-				ir.Roles = uniq(append(ir.Roles, re.Roles...))
+			roles := re.Roles
+			perms := re.Permissions
+			if extra != nil {
+				if xr := extra.routeRoles[re.Path]; len(xr) > 0 {
+					roles = append(slices.Clone(roles), xr...)
+				}
+				if xp := extra.routePerms[re.Path]; len(xp) > 0 {
+					perms = append(slices.Clone(perms), xp...)
+				}
 			}
-			if len(re.Permissions) > 0 {
-				ir.Permissions = uniq(append(ir.Permissions, re.Permissions...))
+			if len(roles) > 0 {
+				ir.Roles = uniq(append(ir.Roles, roles...))
+			}
+			if len(perms) > 0 {
+				ir.Permissions = uniq(append(ir.Permissions, perms...))
 			}
 			if len(ir.Sources) < maxSources {
 				ir.Sources = append(ir.Sources, Source{SHA256: s.SHA256, Script: script, Line: re.Line, Kind: "route"})

@@ -1650,6 +1650,9 @@ func (cr *crawler) pages(ctx context.Context) {
 				cr.q.Add(l, f.it.Depth+1, f.from)
 			}
 			fs, origins := f.b.sorted()
+			if cr.skel != nil {
+				cr.skel.recordAsyncFindings(f.from, fs, origins)
+			}
 			for _, x := range fs {
 				cr.addWith(x.f, x.depth, x.from, f.b.spa)
 			}

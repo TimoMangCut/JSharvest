@@ -1095,12 +1095,18 @@ func (x *extractor) reactiveArg(e js.IExpr) (js.IExpr, bool) {
 }
 
 func singleReturnExpr(e js.IExpr) js.IExpr {
+	e = ungroup(e)
 	var params js.Params
 	var body *js.BlockStmt
 	switch f := e.(type) {
 	case *js.ArrowFunc:
 		params, body = f.Params, &f.Body
 	case *js.FuncDecl:
+		params, body = f.Params, &f.Body
+	case *js.MethodDecl:
+		if f.Set {
+			return nil
+		}
 		params, body = f.Params, &f.Body
 	default:
 		return nil
@@ -1174,6 +1180,23 @@ func (x *extractor) jsonParsedObject(ce *js.CallExpr) (*js.ObjectExpr, bool) {
 	return obj, true
 }
 
+func unwrapFrozenObject(ce *js.CallExpr) (*js.ObjectExpr, bool) {
+	if ce == nil || len(ce.Args.List) != 1 || ce.Args.List[0].Rest {
+		return nil, false
+	}
+	d, ok := ungroup(ce.X).(*js.DotExpr)
+	if !ok || globalName(d.X) != "Object" {
+		return nil, false
+	}
+	switch propName(d.Y) {
+	case "freeze", "seal":
+		if obj, isObj := ungroup(ce.Args.List[0].Value).(*js.ObjectExpr); isObj {
+			return obj, true
+		}
+	}
+	return nil, false
+}
+
 // objectN is object, through at most 16 parameters bound to one another
 // (helpers passing {body: n} on, or calling each other back).
 func (x *extractor) objectN(e js.IExpr, depth int) (*js.ObjectExpr, bool) {
@@ -1181,6 +1204,9 @@ func (x *extractor) objectN(e js.IExpr, depth int) (*js.ObjectExpr, bool) {
 	case *js.ObjectExpr:
 		return n, true
 	case *js.CallExpr:
+		if obj, ok := unwrapFrozenObject(n); ok {
+			return obj, true
+		}
 		if obj, ok := x.jsonParsedObject(n); ok {
 			return obj, true
 		}
@@ -1194,19 +1220,22 @@ func (x *extractor) objectN(e js.IExpr, depth int) (*js.ObjectExpr, bool) {
 			}
 			return x.objectN(a, depth+1)
 		}
-		if c := x.constant(n); c != nil {
+		if c := x.constOrSingleExpr(n); c != nil {
 			switch cv := ungroup(c).(type) {
 			case *js.ObjectExpr:
 				return cv, true
 			case *js.CallExpr:
+				if obj, ok := unwrapFrozenObject(cv); ok {
+					return obj, true
+				}
 				if obj, ok := x.jsonParsedObject(cv); ok {
 					return obj, true
 				}
 				if obj, ok := x.wpDefaultObject(cv, depth); ok {
 					return obj, true
 				}
-			case *js.DotExpr:
-				if depth < 16 {
+			case *js.Var, *js.DotExpr:
+				if depth < 16 && cv != js.IExpr(n) {
 					return x.objectN(cv, depth+1)
 				}
 			}
@@ -1233,6 +1262,9 @@ func (x *extractor) objectN(e js.IExpr, depth int) (*js.ObjectExpr, bool) {
 				if f := x.thisFieldExpr(n.Y); f != nil {
 					return x.objectN(f, depth+1)
 				}
+				if obj := x.thisPropObject(propName(n.Y), depth+1); obj != nil {
+					return obj, true
+				}
 			}
 			if propName(n.Y) == "value" {
 				if arg, ok := x.reactiveArg(n.X); ok {
@@ -1247,6 +1279,34 @@ func (x *extractor) objectN(e js.IExpr, depth int) (*js.ObjectExpr, bool) {
 		}
 	}
 	return nil, false
+}
+
+func (x *extractor) thisPropObject(name string, depth int) *js.ObjectExpr {
+	if name == "" || depth >= 16 {
+		return nil
+	}
+	if x.thisObjDone[name] {
+		return x.thisObjCache[name]
+	}
+	vs := x.thisProps[name]
+	if len(vs) == 0 || len(vs) > 64 {
+		x.thisObjDone[name] = true
+		return nil
+	}
+	// Mark done before recursion so cyclic self-references cannot loop.
+	x.thisObjDone[name] = true
+	obj0, ok := x.objectN(vs[0], depth+1)
+	if !ok || obj0 == nil {
+		return nil
+	}
+	for _, v := range vs[1:] {
+		obji, oki := x.objectN(v, depth+1)
+		if !oki || obji != obj0 {
+			return nil
+		}
+	}
+	x.thisObjCache[name] = obj0
+	return obj0
 }
 
 func unwrapEnumGroup(e js.IExpr) js.IExpr {
@@ -1343,7 +1403,7 @@ func (x *extractor) enumVar(e js.IExpr, depth int) *js.Var {
 	if depth >= 8 || e == nil {
 		return nil
 	}
-	switch n := e.(type) {
+	switch n := ungroup(e).(type) {
 	case *js.Var:
 		v := root(n)
 		if x.enumProps[v] != nil {
@@ -1352,12 +1412,46 @@ func (x *extractor) enumVar(e js.IExpr, depth int) *js.Var {
 		if a, ok := x.args[v]; ok && a != nil && a != js.IExpr(n) {
 			return x.enumVar(a, depth+1)
 		}
+		if c := x.constOrSingleExpr(v); c != nil && c != js.IExpr(n) {
+			return x.enumVar(c, depth+1)
+		}
 	case *js.DotExpr:
 		if m, ok := x.memberN(n, depth+1); ok {
 			return x.enumVar(m, depth+1)
 		}
+		if x.isThis(n.X) {
+			if ev := x.thisPropEnum(propName(n.Y), depth+1); ev != nil {
+				return ev
+			}
+		}
 	}
 	return nil
+}
+
+func (x *extractor) thisPropEnum(name string, depth int) *js.Var {
+	if name == "" || depth >= 8 {
+		return nil
+	}
+	if x.thisEnumDone[name] {
+		return x.thisEnumCache[name]
+	}
+	vs := x.thisProps[name]
+	if len(vs) == 0 || len(vs) > 64 {
+		x.thisEnumDone[name] = true
+		return nil
+	}
+	x.thisEnumDone[name] = true
+	ev0 := x.enumVar(vs[0], depth+1)
+	if ev0 == nil {
+		return nil
+	}
+	for _, v := range vs[1:] {
+		if x.enumVar(v, depth+1) != ev0 {
+			return nil
+		}
+	}
+	x.thisEnumCache[name] = ev0
+	return ev0
 }
 
 // member is the value of obj.prop when obj is a constant object literal or

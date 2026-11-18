@@ -25,9 +25,10 @@ type RouteEntry struct {
 }
 
 type routeMeta struct {
-	authReq *bool
-	roles   []string
-	perms   []string
+	authReq    *bool
+	roles      []string
+	perms      []string
+	unresolved []UnresolvedRoutePerm
 }
 
 var routerStructuralKeys = map[string]bool{
@@ -434,7 +435,7 @@ func (x *extractor) walkRouteObject(obj *js.ObjectExpr, parentPath string, inher
 	// wrapper layouts that have neither `path` nor `index: true`, and skipping
 	// bare root catch-all `/*`).
 	if (hasPath || isIndex) && curPath != "/*" && !strings.HasSuffix(curPath, "/*") {
-		if curPath != "/" || redir != "" || eff.authReq != nil || len(eff.roles) > 0 || len(eff.perms) > 0 {
+		if curPath != "/" || redir != "" || eff.authReq != nil || len(eff.roles) > 0 || len(eff.perms) > 0 || len(eff.unresolved) > 0 {
 			x.recordRouteEntry(RouteEntry{
 				Path:         curPath,
 				Redirect:     redir,
@@ -443,6 +444,10 @@ func (x *extractor) walkRouteObject(obj *js.ObjectExpr, parentPath string, inher
 				Permissions:  eff.perms,
 				Line:         line,
 			})
+			for _, u := range eff.unresolved {
+				u.Path = curPath
+				x.addUnresolvedRoutePerm(u)
+			}
 		} else if looksLikePath(curPath, weak) {
 			x.routes[curPath] = true
 		}
@@ -647,9 +652,13 @@ func (x *extractor) readMetaObject(mo *js.ObjectExpr, m *routeMeta) {
 				m.authReq = &f
 			}
 		case "roles", "role", "authority", "authorities", "allowedRoles", "requiredRoles":
-			m.roles = append(m.roles, x.metaStrings(p.Value)...)
+			rs := x.metaStrings(p.Value)
+			m.roles = append(m.roles, rs...)
+			m.unresolved = append(m.unresolved, x.metaUnresolvedRoles(p.Value)...)
 		case "permissions", "permission", "perms", "perm", "privilege", "privileges":
-			m.perms = append(m.perms, x.metaPermValues(p.Value, 0)...)
+			ps, up := x.metaPermValuesWithRefs(p.Value, 0)
+			m.perms = append(m.perms, ps...)
+			m.unresolved = append(m.unresolved, up...)
 		}
 	}
 }
@@ -666,11 +675,36 @@ func mergeRouteMeta(parent, own routeMeta) routeMeta {
 	if own.authReq != nil && !*own.authReq {
 		out.roles = uniq(slices.Clone(own.roles))
 		out.perms = uniq(slices.Clone(own.perms))
+		out.unresolved = slices.Clone(own.unresolved)
 		return out
 	}
 	out.roles = uniq(append(slices.Clone(parent.roles), own.roles...))
 	out.perms = uniq(append(slices.Clone(parent.perms), own.perms...))
+	out.unresolved = append(slices.Clone(parent.unresolved), own.unresolved...)
 	return out
+}
+
+func (x *extractor) metaUnresolvedRoles(e js.IExpr) []UnresolvedRoutePerm {
+	if e == nil {
+		return nil
+	}
+	e = unwrapEnumGroup(e)
+	if arr, ok := e.(*js.ArrayExpr); ok {
+		var out []UnresolvedRoutePerm
+		for _, el := range arr.List {
+			if !el.Spread && el.Value != nil {
+				out = append(out, x.metaUnresolvedRoles(el.Value)...)
+			}
+		}
+		return out
+	}
+	if vals := x.metaStrings(e); len(vals) > 0 {
+		return nil
+	}
+	if ref, ok := x.extractConstRef(e); ok {
+		return []UnresolvedRoutePerm{{IsRole: true, Action: ref}}
+	}
+	return nil
 }
 
 func (x *extractor) resolveMetaAuthz(e js.IExpr, allowArray bool) ([]string, bool) {
@@ -692,30 +726,48 @@ func (x *extractor) metaAuthzTokens(e js.IExpr) []string {
 }
 
 func (x *extractor) metaPermValues(e js.IExpr, depth int) []string {
+	ps, _ := x.metaPermValuesWithRefs(e, depth)
+	return ps
+}
+
+func (x *extractor) metaPermValuesWithRefs(e js.IExpr, depth int) ([]string, []UnresolvedRoutePerm) {
 	if e == nil || depth > 4 {
-		return nil
+		return nil, nil
 	}
 	e = unwrapEnumGroup(e)
 	if arr, ok := e.(*js.ArrayExpr); ok {
 		var out []string
+		var uout []UnresolvedRoutePerm
 		for _, el := range arr.List {
 			if !el.Spread && el.Value != nil {
-				out = append(out, x.metaPermValues(el.Value, depth+1)...)
+				ps, us := x.metaPermValuesWithRefs(el.Value, depth+1)
+				out = append(out, ps...)
+				uout = append(uout, us...)
 			}
 		}
-		return out
+		return out, uout
 	}
 	if po, ok := x.object(e); ok {
 		return x.extractMetaPermObject(po, depth, map[js.INode]bool{})
 	}
-	return x.metaAuthzTokens(e)
+	toks := x.metaAuthzTokens(e)
+	if len(toks) > 0 {
+		return toks, nil
+	}
+	if ref, ok := x.extractConstRef(e); ok {
+		return nil, []UnresolvedRoutePerm{{Action: ref}}
+	}
+	return nil, nil
 }
 
-func (x *extractor) extractMetaPermObject(po *js.ObjectExpr, depth int, visiting map[js.INode]bool) []string {
+func (x *extractor) extractMetaPermObject(po *js.ObjectExpr, depth int, visiting map[js.INode]bool) ([]string, []UnresolvedRoutePerm) {
 	var actions, subjects, nested, named []string
-	x.collectMetaPermFields(po, depth, visiting, &actions, &subjects, &nested, &named)
+	var actRefs, subjRefs, namedRefs []*ConstRef
+	var nestedUnres []UnresolvedRoutePerm
+	x.collectMetaPermFields(po, depth, visiting, &actions, &subjects, &nested, &named, &actRefs, &subjRefs, &namedRefs, &nestedUnres)
 
 	var out []string
+	var uout []UnresolvedRoutePerm
 	switch {
 	case len(actions) > 0 && len(subjects) > 0:
 		for _, a := range uniq(actions) {
@@ -732,29 +784,79 @@ func (x *extractor) extractMetaPermObject(po *js.ObjectExpr, depth int, visiting
 				break
 			}
 		}
+	case (len(actions) > 0 || len(actRefs) > 0) && (len(subjects) > 0 || len(subjRefs) > 0):
+		for _, ar := range actRefs {
+			for _, sr := range subjRefs {
+				uout = append(uout, UnresolvedRoutePerm{Action: ar, Subject: sr})
+			}
+			for _, s := range uniq(subjects) {
+				uout = append(uout, UnresolvedRoutePerm{Action: ar, SubjectLit: s})
+			}
+		}
+		for _, a := range uniq(actions) {
+			for _, sr := range subjRefs {
+				uout = append(uout, UnresolvedRoutePerm{ActionLit: a, Subject: sr})
+			}
+		}
 	case len(actions) > 0:
 		out = append(out, actions...)
 	case len(subjects) > 0:
 		out = append(out, subjects...)
+	case len(actRefs) > 0:
+		for _, ar := range actRefs {
+			uout = append(uout, UnresolvedRoutePerm{Action: ar})
+		}
+	case len(subjRefs) > 0:
+		for _, sr := range subjRefs {
+			uout = append(uout, UnresolvedRoutePerm{Subject: sr})
+		}
 	}
 	out = append(out, nested...)
-	if len(out) == 0 {
+	uout = append(uout, nestedUnres...)
+	if len(out) == 0 && len(uout) == 0 {
 		out = append(out, named...)
+		for _, nr := range namedRefs {
+			uout = append(uout, UnresolvedRoutePerm{Action: nr})
+		}
 	}
-	return out
+	return out, uout
 }
 
-func (x *extractor) collectMetaPermFields(po *js.ObjectExpr, depth int, visiting map[js.INode]bool, actions, subjects, nested, named *[]string) {
+func (x *extractor) collectMetaPermFields(
+	po *js.ObjectExpr,
+	depth int,
+	visiting map[js.INode]bool,
+	actions, subjects, nested, named *[]string,
+	actRefs, subjRefs, namedRefs *[]*ConstRef,
+	nestedUnres *[]UnresolvedRoutePerm,
+) {
 	if po == nil || depth > 4 || visiting[po] {
 		return
 	}
 	visiting[po] = true
 	defer delete(visiting, po)
 
+	collectRefs := func(val js.IExpr, dst *[]*ConstRef) {
+		val = unwrapEnumGroup(val)
+		if arr, ok := val.(*js.ArrayExpr); ok {
+			for _, el := range arr.List {
+				if !el.Spread && el.Value != nil {
+					if r, rok := x.extractConstRef(el.Value); rok {
+						*dst = append(*dst, r)
+					}
+				}
+			}
+			return
+		}
+		if r, rok := x.extractConstRef(val); rok {
+			*dst = append(*dst, r)
+		}
+	}
+
 	for _, p := range po.List {
 		if p.Spread {
 			if so, ok := x.object(p.Value); ok {
-				x.collectMetaPermFields(so, depth+1, visiting, actions, subjects, nested, named)
+				x.collectMetaPermFields(so, depth+1, visiting, actions, subjects, nested, named, actRefs, subjRefs, namedRefs, nestedUnres)
 			}
 			continue
 		}
@@ -763,14 +865,28 @@ func (x *extractor) collectMetaPermFields(po *js.ObjectExpr, depth int, visiting
 		}
 		switch propName(p.Name) {
 		case "action", "actions", "act", "I", "do":
-			*actions = append(*actions, x.metaAuthzTokens(p.Value)...)
+			toks := x.metaAuthzTokens(p.Value)
+			if len(toks) > 0 {
+				*actions = append(*actions, toks...)
+			} else {
+				collectRefs(p.Value, actRefs)
+			}
 		case "object", "objects", "subject", "subjects", "resource", "resources", "entity", "entities", "target", "a", "this", "on":
-			*subjects = append(*subjects, x.metaAuthzTokens(p.Value)...)
+			toks := x.metaAuthzTokens(p.Value)
+			if len(toks) > 0 {
+				*subjects = append(*subjects, toks...)
+			} else {
+				collectRefs(p.Value, subjRefs)
+			}
 		case "permissions", "permission", "perms", "perm", "privilege", "privileges":
-			*nested = append(*nested, x.metaPermValues(p.Value, depth+1)...)
+			ps, us := x.metaPermValuesWithRefs(p.Value, depth+1)
+			*nested = append(*nested, ps...)
+			*nestedUnres = append(*nestedUnres, us...)
 		case "code", "name", "key":
-			if vals, ok := x.resolveMetaAuthz(p.Value, false); ok {
+			if vals, ok := x.resolveMetaAuthz(p.Value, false); ok && len(vals) > 0 {
 				*named = append(*named, vals...)
+			} else {
+				collectRefs(p.Value, namedRefs)
 			}
 		}
 	}

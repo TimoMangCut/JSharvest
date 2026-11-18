@@ -29,19 +29,28 @@ func (r *runner) prefetchWorker(ctx context.Context, ch <-chan *group) {
 		if ctx.Err() != nil {
 			return
 		}
-		if r.isDone(g.key) || r.isDone("pre:"+g.key) {
+		if r.isDone(g.key) || r.isDone("pre:"+g.key) || r.isDone("dead:"+g.key) {
 			continue
 		}
 		if g.digest != "" && ((r.cur != nil && r.cur.sha1[g.digest]) || r.store.BySHA1(g.digest) != "") {
 			continue
 		}
 		meta := &store.ArchiveSeen{First: g.first, Last: g.last, Captures: g.captures}
-		bodies, ferr := r.fetchOne(ctx, g, meta)
+		bodies, archBody, ferr := r.fetchOne(ctx, g, meta)
+		for _, b := range bodies {
+			_ = r.chunks(g, b)
+		}
+		if errors.Is(ferr, errNotArchived) {
+			r.sum(func(s *Summary) { s.NotArchived++ })
+			r.markDone("dead:" + g.key)
+			continue
+		}
 		if ferr != nil {
 			continue
 		}
-		for _, b := range bodies {
-			_ = r.chunks(g, b)
+		if len(archBody) == 0 {
+			r.markDone("dead:" + g.key)
+			continue
 		}
 		r.markDone("pre:" + g.key)
 	}
@@ -51,13 +60,17 @@ func (r *runner) prepareGroup(g *group) (needNetwork bool) {
 	if r.isDone(g.key) {
 		return false
 	}
+	if r.isDone("dead:" + g.key) {
+		r.markDone(g.key)
+		return false
+	}
 	u, err := url.Parse(g.latest.URL)
 	if err == nil && !r.o.Vendor && vendorRe.MatchString(path.Base(u.Path)) {
 		r.sum(func(s *Summary) { s.Skipped["vendor library"]++ })
 		return false
 	}
 	meta := &store.ArchiveSeen{First: g.first, Last: g.last, Captures: g.captures}
-	if g.digest != "" && r.cur.sha1[g.digest] {
+	if g.digest != "" && r.cur != nil && r.cur.sha1[g.digest] {
 		r.sum(func(s *Summary) { s.Known++ })
 		r.markDone(g.key)
 		return false
@@ -135,43 +148,16 @@ func (r *runner) fetch(ctx context.Context) error {
 	var qMu sync.Mutex
 	cond := sync.NewCond(&qMu)
 	claimed := map[string]bool{}
-	var flatQueue []*group
 	drr := newDRRQueue()
-	useFlat := r.o.MaxFiles > 0
 	for _, g := range initial {
 		if !claimed[g.key] {
 			claimed[g.key] = true
-			if useFlat {
-				flatQueue = append(flatQueue, g)
-			} else {
-				drr.push(g)
-			}
-		}
-	}
-	qLen := func() int {
-		if useFlat {
-			return len(flatQueue)
-		}
-		return drr.len()
-	}
-	qPop := func() (*group, bool) {
-		if useFlat {
-			if len(flatQueue) == 0 {
-				return nil, false
-			}
-			g := flatQueue[0]
-			flatQueue = flatQueue[1:]
-			return g, true
-		}
-		return drr.pop()
-	}
-	qPush := func(g *group) {
-		if useFlat {
-			flatQueue = append(flatQueue, g)
-		} else {
 			drr.push(g)
 		}
 	}
+	qLen := drr.len
+	qPop := drr.pop
+	qPush := drr.push
 
 	active := 0
 	n := 0
@@ -224,13 +210,14 @@ func (r *runner) fetch(ctx context.Context) error {
 
 				meta := &store.ArchiveSeen{First: g.first, Last: g.last, Captures: g.captures}
 				var bodies [][]byte
+				var archBody []byte
 				var ferr error
 				isScript := true
 				if kind := assetKind(g.latest); kind == "map" || kind == "manifest" {
 					isScript = false
 					bodies, ferr = r.fetchAsset(fctx, g, meta, kind)
 				} else {
-					bodies, ferr = r.fetchOne(fctx, g, meta)
+					bodies, archBody, ferr = r.fetchOne(fctx, g, meta)
 				}
 
 				var discovered []*group
@@ -247,7 +234,7 @@ func (r *runner) fetch(ctx context.Context) error {
 				}
 
 				if isScript {
-					zoom, pruned := fc.recordFetched(r, g, bodies, ferr == nil || errors.Is(ferr, errNotArchived))
+					zoom, pruned := fc.recordFetched(r, g, archBody, ferr)
 					if pruned > 0 {
 						r.sum(func(s *Summary) { s.Skipped["family unchanged"] += pruned })
 					}
@@ -453,9 +440,10 @@ func notArchived(a *Answer, g *group, c Capture) bool {
 var errNotArchived = errors.New("not archived")
 
 // fetchOne gets one content: from its old URL on the live server when that
-// still serves it, else (or also) from the Wayback. It returns the bodies it
-// kept, for the chunks they name.
-func (r *runner) fetchOne(ctx context.Context, g *group, meta *store.ArchiveSeen) ([][]byte, error) {
+// still serves it, else (or also) from the Wayback. It returns all kept bodies
+// (live + historical, for chunk discovery) alongside archBody (strictly the
+// verified historical script of g, nil when unavailable or non-JS).
+func (r *runner) fetchOne(ctx context.Context, g *group, meta *store.ArchiveSeen) ([][]byte, []byte, error) {
 	var kept [][]byte
 	c := g.latest
 	var alive *bool
@@ -465,11 +453,11 @@ func (r *runner) fetchOne(ctx context.Context, g *group, meta *store.ArchiveSeen
 		alive, live, liveURL = r.liveCheck(ctx, c.URL)
 	}
 	liveSame := alive != nil && *alive && g.digest != "" && store.SHA1B32(live) == g.digest
-	if alive != nil && *alive && g.digest == "" && r.cur.sha1[store.SHA1B32(live)] {
+	if alive != nil && *alive && g.digest == "" && r.cur != nil && r.cur.sha1[store.SHA1B32(live)] {
 		// A URL without a digest (urlscan, OTX) that serves today's script:
 		// the crawls hold it; no history of it.
 		r.sum(func(s *Summary) { s.HeldAfter++ })
-		return nil, nil
+		return nil, nil, nil
 	}
 	if alive != nil && *alive {
 		r.sum(func(s *Summary) { s.Alive++ })
@@ -488,30 +476,30 @@ func (r *runner) fetchOne(ctx context.Context, g *group, meta *store.ArchiveSeen
 			s.LiveSame++
 			s.Fetched++
 		})
-		return kept, nil
+		return kept, live, nil
 	}
 	a, err := r.memento(ctx, g, c)
 	if errors.Is(err, ErrBlocked) || ctx.Err() != nil {
-		return kept, err
+		return kept, nil, err
 	}
 	if (err != nil || a.Status != 200) && g.warc.WARC != nil && r.o.CC != nil {
 		// The Wayback has no copy, Common Crawl's WARC file has (MAX-01).
 		if body, ok := r.fromWARC(ctx, g, meta, alive); ok {
 			endpoints.ExtractCached(r.o.Dir, body, g.warc.URL)
-			return append(kept, body), nil
+			return append(kept, body), body, nil
 		}
 	}
 	if err != nil {
-		return kept, err
+		return kept, nil, err
 	}
 	if notArchived(a, g, c) {
 		// A URL a page, a script, OTX or urlscan named, without a digest:
 		// the Wayback need not have it (alive, it is kept from the live
 		// server).
-		return kept, errNotArchived
+		return kept, nil, errNotArchived
 	}
 	if a.Status != 200 {
-		return kept, fmt.Errorf("memento: %d", a.Status)
+		return kept, nil, fmt.Errorf("memento: %d", a.Status)
 	}
 	tags := []string{"archive"}
 	if g.digest != "" && store.SHA1B32(a.Body) != g.digest {
@@ -524,24 +512,24 @@ func (r *runner) fetchOne(ctx context.Context, g *group, meta *store.ArchiveSeen
 	if err != nil {
 		body, tags = a.Body, append(tags, "content-coded")
 	}
-	if g.digest == "" && r.cur.sha1[store.SHA1B32(body)] {
+	if g.digest == "" && r.cur != nil && r.cur.sha1[store.SHA1B32(body)] {
 		r.sum(func(s *Summary) { s.HeldAfter++ }) // today's script, archived under a URL listed without a digest
-		return kept, nil
+		return kept, nil, nil
 	}
 	if notScriptBody(a.Header.Get("Content-Type"), body) {
 		r.sum(func(s *Summary) { s.NotJS++ }) // an archived error page
-		return kept, nil
+		return kept, nil, nil
 	}
 	if c.Source == fromHTML || c.Source == fromResolve {
 		tags = append(tags, c.Source)
 	}
 	if _, err := r.store.Add(store.Record{Body: body, URL: c.URL, Kind: "file", Via: "archive", Source: "wayback", MIME: a.Header.Get("Content-Type"),
 		Tags: tags, Alive: alive, Archive: meta}); err != nil {
-		return kept, err
+		return kept, nil, err
 	}
 	endpoints.ExtractCached(r.o.Dir, body, c.URL)
 	r.sum(func(s *Summary) { s.Fetched++ })
-	return append(kept, body), nil
+	return append(kept, body), body, nil
 }
 
 // liveCheck asks the target for an old script's URL, as a browser would

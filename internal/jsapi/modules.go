@@ -368,6 +368,8 @@ func (x *extractor) scanESModules(ast *js.AST) {
 					if ex, ok := x.exported(s.Decl); ok {
 						ex.Module, ex.Name = "", "default"
 						x.exports = append(x.exports, ex)
+					} else {
+						x.esExports["default"] = s.Decl
 					}
 					continue
 				}
@@ -391,6 +393,7 @@ func (x *extractor) scanESModules(ast *js.AST) {
 								x.exports = append(x.exports, ex)
 							} else {
 								x.noteBuilder(string(vr.Data), "", root(vr))
+								x.esExports[string(vr.Data)] = b.Default
 							}
 						}
 					}
@@ -416,6 +419,7 @@ func (x *extractor) scanESModules(ast *js.AST) {
 						x.exports = append(x.exports, ex)
 					} else {
 						x.noteBuilder(expName, local, v)
+						x.esExports[expName] = v
 					}
 				}
 			}
@@ -487,6 +491,8 @@ func (x *extractor) exportsOf(id string, arr *js.ArrayExpr) {
 		if ex, ok := x.exported(arr.List[j].Value); ok {
 			ex.Module, ex.Name = id, name
 			x.exports = append(x.exports, ex)
+		} else if ge := wpGetterExpr(arr.List[j].Value); ge != nil {
+			x.turbopackConst[[2]string{id, name}] = ge
 		}
 		i = j
 	}
@@ -499,8 +505,9 @@ func (x *extractor) exportsOf(id string, arr *js.ArrayExpr) {
 func (x *extractor) exported(fn js.IExpr) (Export, bool) {
 	savedDyn := x.dynBase
 	defer func() { x.dynBase = savedDyn }()
+	fn = ungroup(fn)
 	if v, ok := fn.(*js.Var); ok {
-		fn = x.constant(v)
+		fn = ungroup(x.constOrSingleExpr(v))
 	}
 	var params js.Params
 	var body *js.BlockStmt
@@ -1032,7 +1039,7 @@ func (x *extractor) factoryMethod(factory js.IExpr, name string) (method, bool) 
 			}
 			var mp js.Params
 			var mb *js.BlockStmt
-			switch f := p.Value.(type) {
+			switch f := ungroup(p.Value).(type) {
 			case *js.FuncDecl:
 				mp, mb = f.Params, &f.Body
 			case *js.ArrowFunc:
@@ -1224,11 +1231,17 @@ func hasWPFactoryMarker(modVar, expVar, reqVar *js.Var, body *js.BlockStmt) bool
 		}
 		switch s := n.(type) {
 		case *js.CallExpr:
+			as := args(&s.Args)
+			if modVar != nil && expVar != nil && reqVar != nil && isRootVar(s.X, reqVar) && len(as) == 1 {
+				if _, ok := wpModKey(as[0]); ok {
+					found = true
+					return
+				}
+			}
 			d, isDot := s.X.(*js.DotExpr)
 			if !isDot {
 				return
 			}
-			as := args(&s.Args)
 			switch propName(d.Y) {
 			case "d":
 				if reqVar != nil && expVar != nil && isRootVar(d.X, reqVar) && len(as) >= 2 && isRootVar(as[0], expVar) {
@@ -1236,6 +1249,10 @@ func hasWPFactoryMarker(modVar, expVar, reqVar *js.Var, body *js.BlockStmt) bool
 				}
 			case "r":
 				if reqVar != nil && expVar != nil && isRootVar(d.X, reqVar) && len(as) == 1 && isRootVar(as[0], expVar) {
+					found = true
+				}
+			case "n", "e", "t":
+				if reqVar != nil && isRootVar(d.X, reqVar) && len(as) >= 1 && len(as) <= 2 {
 					found = true
 				}
 			case "defineProperty":
@@ -1463,7 +1480,7 @@ func (x *extractor) wpRequireModID(e js.IExpr, depth int) (string, bool) {
 			}
 		}
 	case *js.Var:
-		if c := x.constant(n); c != nil {
+		if c := x.constOrSingleExpr(n); c != nil {
 			return x.wpRequireModID(c, depth+1)
 		}
 		if cs := x.chains[root(n)]; len(cs) == 1 && len(cs[0]) == 1 && cs[0][0].op == 's' && cs[0][0].expr != nil {

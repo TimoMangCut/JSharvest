@@ -1151,7 +1151,7 @@ func (v *nestFinder) Exit(n js.INode) {
 
 // fnParts is a function literal's parameters and body.
 func fnParts(fn js.IExpr) (js.Params, *js.BlockStmt, bool) {
-	switch f := fn.(type) {
+	switch f := ungroup(fn).(type) {
 	case *js.ArrowFunc:
 		return f.Params, &f.Body, true
 	case *js.FuncDecl:
@@ -1277,11 +1277,11 @@ func (x *extractor) returned(f *js.Var, body *js.BlockStmt) {
 // methodFn is the function a property's value is: a function, or a
 // module namespace's getter of one (() => sE).
 func (x *extractor) methodFn(e js.IExpr) js.IExpr {
-	switch f := e.(type) {
+	switch f := ungroup(e).(type) {
 	case *js.ArrowFunc:
 		if len(f.Params.List) == 0 && f.Params.Rest == nil {
 			if rets := returnsOf(&f.Body); len(rets) == 1 {
-				if rv, ok := rets[0].(*js.Var); ok {
+				if rv, ok := ungroup(rets[0]).(*js.Var); ok {
 					if _, _, _, isFn := x.fnOf(rv); isFn {
 						return root(rv)
 					}

@@ -279,7 +279,7 @@ func ExtractCached(dir string, src []byte, hint string) jsapi.Result {
 	}
 	res = extractJS(src, hint, nil)
 	memPutResult(sum, res)
-	if len(res.Exports) > 0 {
+	if len(res.Builders) > 0 || len(res.Exports) > 0 {
 		CacheScriptBody(sum, src)
 	}
 	if os.MkdirAll(cacheDir, 0o700) == nil {

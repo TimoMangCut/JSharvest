@@ -142,7 +142,7 @@ type Report struct {
 func Run(ctx context.Context, o Options) (*Report, error) {
 	rep := &Report{Target: o.Target, Role: o.Role, DryRun: o.Sender.DryRun(), AllowWrite: o.AllowWrite, Started: time.Now().UTC(),
 		Verdicts: map[string]int{}, Tiers: map[string]int{}, Confidence: map[string]int{}}
-	v := &verifier{o: o, rep: rep, canaries: map[string]*Canary{}, htmlShells: map[string][]Sig{}, perOrigin: map[string]int{}, gates: map[string]*gate{}, parents: map[string]int{}, hostPrefixes: map[string]int{}, hostMu: map[string]*sync.Mutex{}}
+	v := &verifier{o: o, rep: rep, canaries: map[string]*Canary{}, htmlShells: map[string][]Sig{}, shellHosts: map[string]map[string]bool{}, perOrigin: map[string]int{}, gates: map[string]*gate{}, parents: map[string]int{}, hostPrefixes: map[string]int{}, hostMu: map[string]*sync.Mutex{}}
 	// The hosts: those of the drafts in scope, nothing else.
 	hosts := map[string]bool{}
 	for _, d := range o.Drafts {
@@ -268,8 +268,9 @@ func mapsKeys[V any](m map[string]V) func(func(string) bool) {
 type verifier struct {
 	o          Options
 	rep        *Report
-	canaries   map[string]*Canary // origin+prefix
-	htmlShells map[string][]Sig   // host -> 2xx HTML shells observed on canaries
+	canaries   map[string]*Canary        // origin+prefix
+	htmlShells map[string][]Sig          // host (or "*") -> 2xx HTML shells observed on canaries
+	shellHosts map[string]map[string]bool // Shell hash -> distinct canary hosts
 	perOrigin  map[string]int
 	gates      map[string]*gate // host
 	parents    map[string]int   // origin: 1-segment parent canaries past maxPrefixes
@@ -635,10 +636,16 @@ func (v *verifier) judge(ctx context.Context, r *Result, d Draft, sig Sig, body 
 			}
 			if subOrigin, subPrefix := subCanaryPrefix(target, c.Prefix); subPrefix != "" {
 				sc := v.subCanary(ctx, d, subOrigin, subPrefix)
-				if sc != nil && sc.Answer != nil && Same(sig, *sc.Answer) {
-					r.Prefix = sc.Prefix
-					r.Verdict, r.Reason = DeadOrFP, "answers as any path under "+subPrefix+" does (the sub-canary)"
-					break
+				if sc != nil && sc.Answer != nil {
+					scMatch := Same(sig, *sc.Answer)
+					if strings.Contains(sig.Type, "html") && (sig.Shell != "" || sc.Answer.Shell != "") {
+						scMatch = sameHTMLShell(*sc.Answer, sig)
+					}
+					if scMatch {
+						r.Prefix = sc.Prefix
+						r.Verdict, r.Reason = DeadOrFP, "answers as any path under "+subPrefix+" does (the sub-canary)"
+						break
+					}
 				}
 			}
 		}
@@ -818,24 +825,39 @@ func (v *verifier) canaryAnswer(c *Canary, ans replay.Answer, err error) *Canary
 	case ans.Err != "":
 		c.Err = ans.Err
 	case ans.Block != nil:
-		// A vendor's page is no baseline of the prefix's router.
+		// A vendor's page is no baseline of the prefix's router, though if it is
+		// a 2xx HTML WAF template we record its exact Shell across the RDN.
 		c.Err = "blocked: " + ans.Block.String()
+		if ans.Status >= 200 && ans.Status < 300 {
+			s := SigOf(ans.Status, ans.Header, ans.Body)
+			if s.Shell != "" && strings.Contains(s.Type, "html") {
+				v.recordHTMLShell(hostOf(c.URL), s, true)
+			}
+		}
 	default:
 		s := SigOf(ans.Status, ans.Header, ans.Body)
 		c.Answer = &s
 		if s.Status >= 200 && s.Status < 300 && s.Shell != "" && strings.Contains(s.Type, "html") {
-			v.recordHTMLShell(hostOf(c.URL), s)
+			v.recordHTMLShell(hostOf(c.URL), s, false)
 		}
 	}
 	return c
 }
 
-func (v *verifier) recordHTMLShell(host string, s Sig) {
+func sameHTMLShell(ex, s Sig) bool {
+	if ex.Status != s.Status || !strings.Contains(s.Type, "html") || s.Shell == "" || ex.Shell != s.Shell {
+		return false
+	}
+	lo, hi := min(ex.Words, s.Words), max(ex.Words, s.Words)
+	return hi == 0 || float64(hi-lo) <= 0.25*float64(hi) || (hi <= 45 && hi-lo <= 15)
+}
+
+func (v *verifier) recordHTMLShell(host string, s Sig, isWAF bool) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	add := func(key string) {
 		for _, ex := range v.htmlShells[key] {
-			if Same(ex, s) {
+			if sameHTMLShell(ex, s) {
 				return
 			}
 		}
@@ -843,10 +865,14 @@ func (v *verifier) recordHTMLShell(host string, s Sig) {
 	}
 	if host != "" {
 		add(host)
+		if v.shellHosts[s.Shell] == nil {
+			v.shellHosts[s.Shell] = map[string]bool{}
+		}
+		v.shellHosts[s.Shell][host] = true
 	}
-	// Short (<40 words) gateway/WAF HTML reject pages (e.g. corporate reverse
-	// proxy templates) are shared across RDN hosts in the same run.
-	if s.Words > 0 && s.Words <= 40 {
+	// Promote to RDN-wide "*" only when confirmed by WAF detection or observed
+	// across >= 2 distinct canary hosts in the same run.
+	if isWAF || len(v.shellHosts[s.Shell]) >= 2 {
 		add("*")
 	}
 }
@@ -855,12 +881,12 @@ func (v *verifier) matchesKnownHTMLShell(host string, s Sig) bool {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	for _, ex := range v.htmlShells[host] {
-		if Same(ex, s) {
+		if sameHTMLShell(ex, s) {
 			return true
 		}
 	}
 	for _, ex := range v.htmlShells["*"] {
-		if Same(ex, s) {
+		if sameHTMLShell(ex, s) {
 			return true
 		}
 	}

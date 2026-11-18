@@ -133,7 +133,9 @@ var (
 func shell(html string) string {
 	var parts []string
 	if m := titleRe.FindStringSubmatch(html); m != nil {
-		parts = append(parts, strings.TrimSpace(m[1]))
+		if t := strings.TrimSpace(m[1]); t != "" {
+			parts = append(parts, t)
+		}
 	}
 	for _, m := range scriptRe.FindAllStringSubmatch(html, 50) {
 		parts = append(parts, m[1])

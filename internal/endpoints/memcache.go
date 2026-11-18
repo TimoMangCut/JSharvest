@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -14,11 +15,13 @@ import (
 )
 
 // memCache holds extracted jsapi.Result structs and script bodies in memory
-// up to a configurable byte budget so crawl and archive pipelines avoid
-// re-reading and re-unmarshaling thousands of small files from disk.
+// across two independent bounded pools (65% AST Result pool, 35% Script Body pool)
+// so crawl and archive pipelines avoid re-reading thousands of files from disk
+// without raw bodies ever starving AST cache entries.
 type memCache struct {
-	budgetBytes int64
-	usedBytes   atomic.Int64
+	budgetBytes   int64
+	resUsedBytes  atomic.Int64
+	bodyUsedBytes atomic.Int64
 
 	resShards  [16]resShard
 	bodyShards [16]bodyShard
@@ -74,7 +77,8 @@ func ClearMemCache() {
 		s.m = nil
 		s.mu.Unlock()
 	}
-	globalMem.usedBytes.Store(0)
+	globalMem.resUsedBytes.Store(0)
+	globalMem.bodyUsedBytes.Store(0)
 }
 
 func shardIdx(sha string) int {
@@ -100,6 +104,10 @@ func estimateResultBytes(r jsapi.Result) int64 {
 	n += int64(len(r.Bases)+len(r.Routes)+len(r.Paths)+len(r.Operations)+len(r.Cloud)) * 64
 	n += int64(len(r.PropBases)+len(r.Settings)+len(r.ClientHeaders)+len(r.Keys)+len(r.Exports)+len(r.Imports)+len(r.Builders)+len(r.Deferred)) * 96
 	n += int64(len(r.GraphQLDocs)+len(r.RouteEntries)) * 192
+	n += int64(len(r.UnresolvedRoutePerms)+len(r.UnresolvedAuthzRules)) * 128
+	for _, ce := range r.ConstExports {
+		n += 128 + int64(len(ce.Values))*64
+	}
 	return n
 }
 
@@ -117,13 +125,39 @@ func memGetResult(sha string) (jsapi.Result, bool) {
 	return cr.res, true
 }
 
+func evictHalfResShardLocked(s *resShard) int64 {
+	if len(s.m) == 0 {
+		return 0
+	}
+	var freed int64
+	count := 0
+	target := max(1, len(s.m)/2)
+	for k, v := range s.m {
+		delete(s.m, k)
+		freed += v.cost
+		count++
+		if count >= target {
+			break
+		}
+	}
+	return freed
+}
+
 func memPutResult(sha string, res jsapi.Result) {
 	budget := atomic.LoadInt64(&globalMem.budgetBytes)
 	if budget <= 0 || res.Version != jsapi.Version {
 		return
 	}
+	resBudget := (budget * 65) / 100
+	if resBudget <= 0 {
+		resBudget = budget
+	}
 	cost := estimateResultBytes(res)
-	s := &globalMem.resShards[shardIdx(sha)]
+	if cost > resBudget {
+		return
+	}
+	idx := shardIdx(sha)
+	s := &globalMem.resShards[idx]
 	s.mu.Lock()
 	if s.m == nil {
 		s.m = map[string]cachedRes{}
@@ -131,30 +165,43 @@ func memPutResult(sha string, res jsapi.Result) {
 	if old, ok := s.m[sha]; ok {
 		s.m[sha] = cachedRes{res: res, cost: cost}
 		s.mu.Unlock()
-		globalMem.usedBytes.Add(cost - old.cost)
+		globalMem.resUsedBytes.Add(cost - old.cost)
 		return
 	}
-	// Reserve up to 75% of budget for Result structs, 25% for raw bodies;
-	// if full, evict half the shard to keep insertion O(1) amortized.
-	if globalMem.usedBytes.Load()+cost > budget {
-		var freed int64
-		count := 0
-		target := max(1, len(s.m)/2)
-		for k, v := range s.m {
-			delete(s.m, k)
-			freed += v.cost
-			count++
-			if count >= target {
-				break
-			}
-		}
-		if freed > 0 {
-			globalMem.usedBytes.Add(-freed)
+	if globalMem.resUsedBytes.Load()+cost > resBudget {
+		if freed := evictHalfResShardLocked(s); freed > 0 {
+			globalMem.resUsedBytes.Add(-freed)
 		}
 	}
-	if globalMem.usedBytes.Load()+cost <= budget {
+	if globalMem.resUsedBytes.Load()+cost <= resBudget {
 		s.m[sha] = cachedRes{res: res, cost: cost}
-		globalMem.usedBytes.Add(cost)
+		globalMem.resUsedBytes.Add(cost)
+		s.mu.Unlock()
+		return
+	}
+	s.mu.Unlock()
+
+	// Fallback ring eviction across sibling shards (locking one shard at a time).
+	for step := 1; step < 16 && globalMem.resUsedBytes.Load()+cost > resBudget; step++ {
+		other := &globalMem.resShards[(idx+step)&15]
+		other.mu.Lock()
+		freed := evictHalfResShardLocked(other)
+		other.mu.Unlock()
+		if freed > 0 {
+			globalMem.resUsedBytes.Add(-freed)
+		}
+	}
+
+	s.mu.Lock()
+	if s.m == nil {
+		s.m = map[string]cachedRes{}
+	}
+	if old, ok := s.m[sha]; ok {
+		s.m[sha] = cachedRes{res: res, cost: cost}
+		globalMem.resUsedBytes.Add(cost - old.cost)
+	} else if globalMem.resUsedBytes.Load()+cost <= resBudget {
+		s.m[sha] = cachedRes{res: res, cost: cost}
+		globalMem.resUsedBytes.Add(cost)
 	}
 	s.mu.Unlock()
 }
@@ -170,37 +217,127 @@ func memGetBody(sha string) ([]byte, bool) {
 	return b, ok
 }
 
-// CacheScriptBody stores a script body in the bounded RAM cache (if enabled and
-// only when the script exports/imports symbols needed for deferred linking or is modest in size).
+func evictHalfBodyShardLocked(s *bodyShard) int64 {
+	if len(s.m) == 0 {
+		return 0
+	}
+	var freed int64
+	count := 0
+	target := max(1, len(s.m)/2)
+	for k, v := range s.m {
+		delete(s.m, k)
+		freed += int64(len(v))
+		count++
+		if count >= target {
+			break
+		}
+	}
+	return freed
+}
+
+// CacheScriptBody stores a script body in the bounded 35% body pool (with per-shard
+// and cross-shard ring eviction so raw bodies never starve AST Result caching).
 func CacheScriptBody(sha string, body []byte) {
 	budget := atomic.LoadInt64(&globalMem.budgetBytes)
 	if budget <= 0 || len(body) == 0 || int64(len(body)) > 2<<20 {
 		return
 	}
-	// Cap raw bodies at 40% of total budget so Result structs always fit.
-	bodyCap := (budget * 2) / 5
-	if globalMem.usedBytes.Load()+int64(len(body)) > budget || int64(len(body)) > bodyCap {
+	resBudget := (budget * 65) / 100
+	bodyBudget := budget - resBudget
+	cost := int64(len(body))
+	if bodyBudget <= 0 || cost > bodyBudget {
 		return
 	}
-	s := &globalMem.bodyShards[shardIdx(sha)]
+	idx := shardIdx(sha)
+	s := &globalMem.bodyShards[idx]
 	s.mu.Lock()
 	if s.m == nil {
 		s.m = map[string][]byte{}
 	}
-	if _, exists := s.m[sha]; !exists {
+	if _, exists := s.m[sha]; exists {
+		s.mu.Unlock()
+		return
+	}
+	if globalMem.bodyUsedBytes.Load()+cost > bodyBudget {
+		if freed := evictHalfBodyShardLocked(s); freed > 0 {
+			globalMem.bodyUsedBytes.Add(-freed)
+		}
+	}
+	if globalMem.bodyUsedBytes.Load()+cost <= bodyBudget {
 		cp := make([]byte, len(body))
 		copy(cp, body)
 		s.m[sha] = cp
-		globalMem.usedBytes.Add(int64(len(cp)))
+		globalMem.bodyUsedBytes.Add(cost)
+		s.mu.Unlock()
+		return
+	}
+	s.mu.Unlock()
+
+	for step := 1; step < 16 && globalMem.bodyUsedBytes.Load()+cost > bodyBudget; step++ {
+		other := &globalMem.bodyShards[(idx+step)&15]
+		other.mu.Lock()
+		freed := evictHalfBodyShardLocked(other)
+		other.mu.Unlock()
+		if freed > 0 {
+			globalMem.bodyUsedBytes.Add(-freed)
+		}
+	}
+
+	s.mu.Lock()
+	if s.m == nil {
+		s.m = map[string][]byte{}
+	}
+	if _, exists := s.m[sha]; !exists && globalMem.bodyUsedBytes.Load()+cost <= bodyBudget {
+		cp := make([]byte, len(body))
+		copy(cp, body)
+		s.m[sha] = cp
+		globalMem.bodyUsedBytes.Add(cost)
 	}
 	s.mu.Unlock()
 }
 
+// LoadOrExtractSig returns the SemanticAPISig of an already-stored script
+// identified by its SHA-256 hex digest in dir (checking MemCache, then
+// <dir>/static/<sha256>.json, then <dir>/js/<sha256>.js) without network I/O.
+func LoadOrExtractSig(dir, sha256Hex, hint string) ([32]byte, bool) {
+	if sha256Hex == "" {
+		return [32]byte{}, false
+	}
+	if res, ok := memGetResult(sha256Hex); ok {
+		sig, _ := SemanticAPISig(res)
+		return sig, true
+	}
+	if dir == "" {
+		return [32]byte{}, false
+	}
+	cache := filepath.Join(dir, CacheDir, sha256Hex+".json")
+	var res jsapi.Result
+	if b, err := os.ReadFile(cache); err == nil && json.Unmarshal(b, &res) == nil && res.Version == jsapi.Version {
+		memPutResult(sha256Hex, res)
+		sig, _ := SemanticAPISig(res)
+		return sig, true
+	}
+	src, ok := memGetBody(sha256Hex)
+	if !ok {
+		var err error
+		src, err = os.ReadFile(filepath.Join(dir, "js", sha256Hex+".js"))
+		if err != nil || len(src) == 0 {
+			return [32]byte{}, false
+		}
+	}
+	res = ExtractCached(dir, src, hint)
+	if strings.HasPrefix(res.Error, "not analysed:") {
+		return [32]byte{}, false
+	}
+	sig, _ := SemanticAPISig(res)
+	return sig, true
+}
+
 // SemanticAPISig returns a deterministic 32-byte semantic signature of all
 // API-relevant artifacts extracted from a script (endpoints, bases, headers,
-// settings/keys, GraphQL operations/docs, WebSocket URLs, exports, and authz).
+// settings/keys, GraphQL operations/docs, exports, route guards, and authz).
 // Pure UI/CSS/i18n/minifier rebuilds produce the exact same signature, whereas
-// adding, removing, or modifying even a single API endpoint changes it.
+// adding, removing, or modifying even a single API endpoint or RBAC rule changes it.
 func SemanticAPISig(r jsapi.Result) (sig [32]byte, empty bool) {
 	var parts []string
 	for _, e := range r.Endpoints {
@@ -233,6 +370,17 @@ func SemanticAPISig(r jsapi.Result) (sig [32]byte, empty bool) {
 	for _, gd := range r.GraphQLDocs {
 		parts = append(parts, "gqldoc:"+gd.Kind+"|"+gd.Name)
 	}
+	for _, re := range r.RouteEntries {
+		auth := ""
+		if re.AuthRequired != nil {
+			if *re.AuthRequired {
+				auth = "1"
+			} else {
+				auth = "0"
+			}
+		}
+		parts = append(parts, "rt:"+re.Path+"|"+re.Redirect+"|"+auth+"|"+strings.Join(re.Roles, ",")+"|"+strings.Join(re.Permissions, ","))
+	}
 	if len(r.Exports) > 0 {
 		if b, err := json.Marshal(r.Exports); err == nil {
 			parts = append(parts, "ex:"+string(b))
@@ -256,6 +404,21 @@ func SemanticAPISig(r jsapi.Result) (sig [32]byte, empty bool) {
 	if r.ClientAuthz != nil {
 		if b, err := json.Marshal(r.ClientAuthz); err == nil {
 			parts = append(parts, "az:"+string(b))
+		}
+	}
+	if len(r.ConstExports) > 0 {
+		if b, err := json.Marshal(r.ConstExports); err == nil {
+			parts = append(parts, "ce:"+string(b))
+		}
+	}
+	if len(r.UnresolvedRoutePerms) > 0 {
+		if b, err := json.Marshal(r.UnresolvedRoutePerms); err == nil {
+			parts = append(parts, "urp:"+string(b))
+		}
+	}
+	if len(r.UnresolvedAuthzRules) > 0 {
+		if b, err := json.Marshal(r.UnresolvedAuthzRules); err == nil {
+			parts = append(parts, "uar:"+string(b))
 		}
 	}
 	if len(parts) == 0 {

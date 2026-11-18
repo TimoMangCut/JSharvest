@@ -178,12 +178,21 @@ func (b *ClientAuthzBuilder) Build() *ClientAuthz {
 // MergeClientAuthz aggregates ClientAuthz across all non-tracker scripts.
 func MergeClientAuthz(scripts []Script) *ClientAuthz {
 	var b ClientAuthzBuilder
-	for _, s := range scripts {
+	linked := resolveScriptAuthzConsts(scripts)
+	for idx, s := range scripts {
 		if isAuthzTrackerScript(s) {
 			continue
 		}
 		b.AddJSAuthz(s.ClientAuthz)
-		mergeScriptRoutes(&b, s)
+		extra := linked[idx]
+		if extra != nil && (len(extra.roles) > 0 || len(extra.perms) > 0 || len(extra.rules) > 0) {
+			b.AddJSAuthz(&jsapi.ClientAuthz{
+				Roles:       extra.roles,
+				Permissions: extra.perms,
+				Rules:       extra.rules,
+			})
+		}
+		mergeScriptRoutesWithExtra(&b, s, extra)
 	}
 	return b.Build()
 }
@@ -191,8 +200,22 @@ func MergeClientAuthz(scripts []Script) *ClientAuthz {
 // mergeScriptRoutes connects SPA router metadata (Section 2.2 RouteEntries)
 // into ClientAuthzBuilder.
 func mergeScriptRoutes(b *ClientAuthzBuilder, s Script) {
+	mergeScriptRoutesWithExtra(b, s, nil)
+}
+
+func mergeScriptRoutesWithExtra(b *ClientAuthzBuilder, s Script, extra *resolvedScriptAuthz) {
 	for _, re := range s.RouteEntries {
-		b.AddRoute(re.Path, re.AuthRequired, re.Roles, re.Permissions)
+		roles := re.Roles
+		perms := re.Permissions
+		if extra != nil {
+			if xr := extra.routeRoles[re.Path]; len(xr) > 0 {
+				roles = append(append([]string(nil), roles...), xr...)
+			}
+			if xp := extra.routePerms[re.Path]; len(xp) > 0 {
+				perms = append(append([]string(nil), perms...), xp...)
+			}
+		}
+		b.AddRoute(re.Path, re.AuthRequired, roles, perms)
 	}
 }
 

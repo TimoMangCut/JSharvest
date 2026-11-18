@@ -99,13 +99,19 @@ func (e *engine) specProbeFetch(ctx context.Context, c *crawl, targetURL string,
 	if e.harvest != nil {
 		curPage = e.harvest.Page()
 	}
-	inBrowser := (curPage != "" && sameOrigin(targetURL, curPage)) ||
-		(e.cfg.Browser.Attach != "" && e.cfg.Browser.Proxy == "")
+	sameOrig := curPage != "" && sameOrigin(targetURL, curPage)
+	inBrowser := sameOrig || (e.cfg.Browser.Attach != "" && e.cfg.Browser.Proxy == "" && len(hdrMap) == 0)
 	if inBrowser {
+		var res fetchResult
+		var err error
 		if len(hdrMap) > 0 {
-			return e.pageFetchHeaders(targetURL, hdrMap)
+			res, err = e.pageFetchHeaders(targetURL, hdrMap)
+		} else {
+			res, err = e.pageFetch(targetURL, true)
 		}
-		return e.pageFetch(targetURL, true)
+		if sameOrig || (err == nil && res.Status > 0) {
+			return res, err
+		}
 	}
 	return c.directSpecFetch(ctx, e, targetURL, hdrMap)
 }

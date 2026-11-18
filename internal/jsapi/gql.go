@@ -36,7 +36,8 @@ var (
 func hasGQLDocHint(src []byte) bool {
 	return bytes.Contains(src, []byte("gql")) ||
 		bytes.Contains(src, []byte("graphql")) ||
-		bytes.Contains(src, []byte("Document"))
+		((bytes.Contains(src, []byte(`"Document"`)) || bytes.Contains(src, []byte(`'Document'`))) &&
+			bytes.Contains(src, []byte("loc")))
 }
 
 func extractGraphQLDocs(ast *js.AST, x *extractor) []GraphQLDoc {

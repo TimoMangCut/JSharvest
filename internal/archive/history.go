@@ -20,10 +20,17 @@ import (
 	"github.com/TimoMangCut/JSharvest/internal/store"
 )
 
+type curScript struct {
+	dir    string
+	sha256 string
+	url    string
+}
+
 // current is what the crawls of the target hold: the scripts' digests,
 // their endpoint catalogs, and where their scripts are.
 type current struct {
 	sha1     map[string]bool
+	bySHA1   map[string]curScript
 	catalogs [][]endpoints.Endpoint
 	jsDirs   []string
 	roles    []string // host/role, for the notes
@@ -32,7 +39,7 @@ type current struct {
 // loadCurrent reads every crawl directory of the target's hosts in scope:
 // <root>/<host>/<role>, but the archive's own.
 func loadCurrent(root string, inScope func(string) bool) *current {
-	c := &current{sha1: map[string]bool{}}
+	c := &current{sha1: map[string]bool{}, bySHA1: map[string]curScript{}}
 	hosts, _ := os.ReadDir(root)
 	for _, h := range hosts {
 		if !h.IsDir() || !inScope(hostOnly(h.Name())) {
@@ -53,6 +60,15 @@ func loadCurrent(root string, inScope func(string) bool) *current {
 				var e store.Entry
 				if json.Unmarshal(b, &e) == nil && e.SHA1B32 != "" {
 					c.sha1[e.SHA1B32] = true
+					if e.SHA256 != "" {
+						if _, exists := c.bySHA1[e.SHA1B32]; !exists {
+							u := ""
+							if len(e.URLs) > 0 {
+								u = e.URLs[0]
+							}
+							c.bySHA1[e.SHA1B32] = curScript{dir: dir, sha256: e.SHA256, url: u}
+						}
+					}
 				}
 			})
 			var cat []endpoints.Endpoint

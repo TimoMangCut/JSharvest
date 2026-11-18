@@ -151,6 +151,9 @@ func (out *Result) mergeSpan(r Result) {
 	out.DocDev = append(out.DocDev, r.DocDev...)
 	out.Factories = append(out.Factories, r.Factories...)
 	out.GraphQLDocs = append(out.GraphQLDocs, r.GraphQLDocs...)
+	out.ConstExports = append(out.ConstExports, r.ConstExports...)
+	out.UnresolvedRoutePerms = append(out.UnresolvedRoutePerms, r.UnresolvedRoutePerms...)
+	out.UnresolvedAuthzRules = append(out.UnresolvedAuthzRules, r.UnresolvedAuthzRules...)
 	if r.ClientAuthz != nil {
 		if out.ClientAuthz == nil {
 			out.ClientAuthz = &ClientAuthz{}

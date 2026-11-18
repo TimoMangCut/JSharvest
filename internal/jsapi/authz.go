@@ -1,6 +1,7 @@
 package jsapi
 
 import (
+	"bytes"
 	"regexp"
 	"sort"
 	"strings"
@@ -40,10 +41,48 @@ var schemaOrUIKeys = map[string]bool{
 	"title": true, "label": true,
 }
 
+var authzHintTokens = [][]byte{
+	[]byte(".can"), []byte("$can"), []byte("cannot"), []byte("(can"),
+	[]byte(`["can"]`), []byte(`['can']`), []byte("Can"), []byte("Ability"),
+	[]byte("role"), []byte("Role"), []byte("ROLE"),
+	[]byte("perm"), []byte("Perm"), []byte("PERM"),
+	[]byte("authorit"), []byte("Authorit"), []byte("AUTHORIT"),
+	[]byte("Auth"), []byte("AUTH"), []byte("Scope"), []byte("Privilege"),
+}
+
+func hasAuthzHint(src []byte, hasCanVar bool) bool {
+	if hasCanVar {
+		return true
+	}
+	for _, tok := range authzHintTokens {
+		if bytes.Contains(src, tok) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasAuthzPass1Hint(src []byte) bool {
+	return bytes.Contains(src, []byte("Can")) ||
+		bytes.Contains(src, []byte("Ability")) ||
+		bytes.Contains(src, []byte("(can"))
+}
+
 func extractClientAuthz(ast *js.AST, x *extractor) *ClientAuthz {
 	if ast == nil || x == nil {
 		return nil
 	}
+	canVars := map[*js.Var]bool{}
+	canCompVars := map[*js.Var]bool{}
+	for v, prop := range x.propOf {
+		if (prop == "can" || prop == "cannot") && isAbilityDestructSource(x.destructFrom[v]) {
+			canVars[v] = true
+		}
+	}
+	if !hasAuthzHint(x.src, len(canVars) > 0) {
+		return nil
+	}
+
 	savedNoMark := x.noMarkUsed
 	savedLits := len(x.lits)
 	savedBudget := x.callBudget
@@ -54,32 +93,26 @@ func extractClientAuthz(ast *js.AST, x *extractor) *ClientAuthz {
 		x.callBudget = savedBudget
 	}()
 
-	canVars := map[*js.Var]bool{}
-	canCompVars := map[*js.Var]bool{}
-	for v, prop := range x.propOf {
-		if (prop == "can" || prop == "cannot") && isAbilityDestructSource(x.destructFrom[v]) {
-			canVars[v] = true
-		}
-	}
-
 	// Pass 1: index CASL callback builder variables (`defineAbility((can, cannot) => ...)`),
-	// and `<Can>` component variables (`createContextualCan`, `_resolveComponent("Can")`).
-	js.Walk(walker(func(n js.INode) {
-		switch t := n.(type) {
-		case *js.VarDecl:
-			for _, b := range t.List {
-				vr, ok := b.Binding.(*js.Var)
-				if !ok || b.Default == nil {
-					continue
+	// and `<Can>` component variables (`createContextualCan`, `resolveComponent("Can")`).
+	if hasAuthzPass1Hint(x.src) {
+		js.Walk(walker(func(n js.INode) {
+			switch t := n.(type) {
+			case *js.VarDecl:
+				for _, b := range t.List {
+					vr, ok := b.Binding.(*js.Var)
+					if !ok || b.Default == nil {
+						continue
+					}
+					if isCanCompInit(b.Default) {
+						canCompVars[root(vr)] = true
+					}
 				}
-				if isCanCompInit(b.Default) {
-					canCompVars[root(vr)] = true
-				}
+			case *js.CallExpr:
+				markCASLBuilderParams(t, canVars)
 			}
-		case *js.CallExpr:
-			markCASLBuilderParams(t, canVars)
-		}
-	}), ast)
+		}), ast)
+	}
 
 	roles := map[string]bool{}
 	perms := map[string]bool{}
@@ -237,6 +270,21 @@ func extractCallAuthz(
 			if len(args) >= 1 && len(args) <= 3 && !args[0].Rest {
 				actions, okA := resolveAuthzStrings(x, args[0].Value, true)
 				if !okA {
+					if ar, rok := x.extractConstRef(args[0].Value); rok {
+						if len(args) >= 2 && !args[1].Rest {
+							if subjects, okS := resolveAuthzStrings(x, args[1].Value, true); okS {
+								for _, s := range subjects {
+									x.addUnresolvedAuthzRule(UnresolvedAuthzRule{Kind: "rule", Action: ar, SubjectLit: s})
+								}
+							} else if sr, srok := x.extractConstRef(args[1].Value); srok {
+								x.addUnresolvedAuthzRule(UnresolvedAuthzRule{Kind: "rule", Action: ar, Subject: sr})
+							} else if !isLiteralNonString(args[1].Value) {
+								x.addUnresolvedAuthzRule(UnresolvedAuthzRule{Kind: "rule", Action: ar})
+							}
+						} else {
+							x.addUnresolvedAuthzRule(UnresolvedAuthzRule{Kind: "rule", Action: ar})
+						}
+					}
 					return
 				}
 				if len(args) == 1 {
@@ -257,6 +305,10 @@ func extractCallAuthz(
 							addRule(a, s)
 						}
 					}
+				} else if sr, srok := x.extractConstRef(args[1].Value); srok {
+					for _, a := range actions {
+						x.addUnresolvedAuthzRule(UnresolvedAuthzRule{Kind: "rule", ActionLit: a, Subject: sr})
+					}
 				} else if !isLiteralNonString(args[1].Value) {
 					for _, a := range actions {
 						addRule(a, "")
@@ -271,6 +323,8 @@ func extractCallAuthz(
 						for _, a := range actions {
 							addRule(a, "")
 						}
+					} else if ar, rok := x.extractConstRef(args[0].Value); rok {
+						x.addUnresolvedAuthzRule(UnresolvedAuthzRule{Kind: "rule", Action: ar})
 					}
 				}
 				return
@@ -284,6 +338,25 @@ func extractCallAuthz(
 							addRule(a, s)
 						}
 					}
+				} else {
+					var ar, sr *ConstRef
+					if !okA {
+						ar, _ = x.extractConstRef(args[0].Value)
+					}
+					if !okS {
+						sr, _ = x.extractConstRef(args[1].Value)
+					}
+					if ar != nil && sr != nil {
+						x.addUnresolvedAuthzRule(UnresolvedAuthzRule{Kind: "rule", Action: ar, Subject: sr})
+					} else if ar != nil && okS {
+						for _, s := range subjects {
+							x.addUnresolvedAuthzRule(UnresolvedAuthzRule{Kind: "rule", Action: ar, SubjectLit: s})
+						}
+					} else if okA && sr != nil {
+						for _, a := range actions {
+							x.addUnresolvedAuthzRule(UnresolvedAuthzRule{Kind: "rule", ActionLit: a, Subject: sr})
+						}
+					}
 				}
 			}
 			return
@@ -293,12 +366,19 @@ func extractCallAuthz(
 	// 4. Source B: Explicit permission / role guard calls (`hasPermission`, `hasAnyRole`, `checkAuthority`...).
 	if name != "" && guardCallRe.MatchString(name) {
 		isRole := strings.Contains(name, "Role")
+		kind := "perm"
+		if isRole {
+			kind = "role"
+		}
 		for _, a := range args {
 			if a.Rest {
 				continue
 			}
 			vals, ok := resolveAuthzStrings(x, a.Value, true)
 			if !ok {
+				if ref, rok := x.extractConstRef(a.Value); rok {
+					x.addUnresolvedAuthzRule(UnresolvedAuthzRule{Kind: kind, Action: ref})
+				}
 				continue
 			}
 			for _, v := range vals {
@@ -696,7 +776,7 @@ func resolveAuthzStrings(x *extractor, e js.IExpr, allowArray bool) ([]string, b
 	switch t := e.(type) {
 	case *js.DotExpr:
 		if vr, ok := unwrapEnumGroup(t.X).(*js.Var); ok {
-			if obj := unwrapDictObject(x.constant(vr)); obj != nil {
+			if obj := unwrapDictObject(x.constOrSingleExpr(vr)); obj != nil {
 				if v := objectValue(obj, propName(t.Y)); v != nil {
 					return resolveAuthzStrings(x, v, false)
 				}
@@ -705,7 +785,7 @@ func resolveAuthzStrings(x *extractor, e js.IExpr, allowArray bool) ([]string, b
 	case *js.IndexExpr:
 		if vr, ok := unwrapEnumGroup(t.X).(*js.Var); ok {
 			if key, ok := literalString(t.Y); ok {
-				if obj := unwrapDictObject(x.constant(vr)); obj != nil {
+				if obj := unwrapDictObject(x.constOrSingleExpr(vr)); obj != nil {
 					if v := objectValue(obj, key); v != nil {
 						return resolveAuthzStrings(x, v, false)
 					}
@@ -730,7 +810,7 @@ func resolveArrayExpr(x *extractor, e js.IExpr) *js.ArrayExpr {
 		return arr
 	}
 	if vr, ok := e.(*js.Var); ok {
-		if arr, ok := unwrapEnumGroup(x.constant(vr)).(*js.ArrayExpr); ok {
+		if arr, ok := unwrapEnumGroup(x.constOrSingleExpr(vr)).(*js.ArrayExpr); ok {
 			return arr
 		}
 	}

@@ -120,6 +120,8 @@ func (x *extractor) result() Result {
 		}
 	}
 	sort.Strings(r.Operations)
+	r.ConstExports = x.collectConstExports()
+	r.UnresolvedRoutePerms = x.unresolvedRoutePerms
 	return r
 }
 

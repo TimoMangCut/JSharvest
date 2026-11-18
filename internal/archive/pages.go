@@ -92,6 +92,9 @@ func pagePick(caps []Capture, max int) []Capture {
 // HTML pages in RAM (replacing the multi-hundred-MB html.jsonl temp file and
 // 2 GB pagePick memory spike). r.mu is held.
 func (r *runner) takeHTMLLocked(c Capture) {
+	if r.o.MaxHTML <= 0 {
+		return
+	}
 	if r.htmlPool == nil {
 		r.htmlPool = map[string]Capture{}
 	}
@@ -130,6 +133,9 @@ func (r *runner) poolSliceLocked() []Capture {
 }
 
 func (r *runner) snapshotHTMLTopLocked() []Capture {
+	if r.o.MaxHTML <= 0 {
+		return nil
+	}
 	if len(r.htmlPool) == 0 {
 		return r.st.HTMLTop
 	}

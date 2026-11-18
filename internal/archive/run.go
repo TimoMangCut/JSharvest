@@ -151,9 +151,10 @@ type runner struct {
 	hasWorst  bool
 
 	// Streaming shard -> memento prefetch state during sharded Wayback listing.
-	prefetchCh   chan *group
-	prefetchSeen map[string]bool
-	prefetchFam  map[string]int
+	prefetchCh    chan *group
+	prefetchSeen  map[string]bool
+	prefetchFam   map[string]int
+	prefetchFirst map[string]time.Time
 
 	// namedURLs are the scripts old pages and fetched scripts named, filed
 	// once.
@@ -177,7 +178,7 @@ func (r *runner) workers() int {
 	if r.o.Workers > 0 {
 		return r.o.Workers
 	}
-	return 16
+	return 8
 }
 
 func (r *runner) sum(fn func(*Summary)) {

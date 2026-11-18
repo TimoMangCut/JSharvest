@@ -175,6 +175,7 @@ func (r *runner) listWaybackSharded(ctx context.Context, numPages int) error {
 			r.prefetchCh = prefetchCh
 			r.prefetchSeen = map[string]bool{}
 			r.prefetchFam = map[string]int{}
+			r.prefetchFirst = map[string]time.Time{}
 			r.mu.Unlock()
 			prefetchWorkers := min(max(r.workers()/2, 4), 8)
 			for range prefetchWorkers {
@@ -597,7 +598,7 @@ func (r *runner) maybePrefetchLocked(c Capture, u *url.URL, kind string) {
 	if !r.o.Vendor && vendorRe.MatchString(path.Base(u.Path)) {
 		return
 	}
-	if r.done[c.Digest] || r.done["pre:"+c.Digest] || r.prefetchSeen[c.Digest] {
+	if r.done[c.Digest] || r.done["pre:"+c.Digest] || r.done["dead:"+c.Digest] || r.prefetchSeen[c.Digest] {
 		return
 	}
 	if r.cur != nil && r.cur.sha1[c.Digest] {
@@ -610,8 +611,15 @@ func (r *runner) maybePrefetchLocked(c Capture, u *url.URL, kind string) {
 	if g := (&group{latest: c}); familyOfGroup(g) != "" {
 		fam = familyOfGroup(g)
 	}
-	if r.prefetchFam[fam] >= 2 {
+	cnt := r.prefetchFam[fam]
+	if cnt >= 2 {
 		return
+	}
+	if cnt == 1 {
+		first := r.prefetchFirst[fam]
+		if c.Time.IsZero() || first.IsZero() || c.Time.Sub(first).Abs() < 60*24*time.Hour {
+			return
+		}
 	}
 	g := &group{
 		key:      c.Digest,
@@ -626,7 +634,10 @@ func (r *runner) maybePrefetchLocked(c Capture, u *url.URL, kind string) {
 	select {
 	case r.prefetchCh <- g:
 		r.prefetchSeen[c.Digest] = true
-		r.prefetchFam[fam]++
+		r.prefetchFam[fam] = cnt + 1
+		if cnt == 0 && !c.Time.IsZero() {
+			r.prefetchFirst[fam] = c.Time
+		}
 	default:
 	}
 }
