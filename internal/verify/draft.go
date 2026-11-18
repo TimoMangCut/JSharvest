@@ -152,15 +152,25 @@ func isValidDraftToken(s string) bool {
 	return true
 }
 
+func hasHTTPControlByte(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < 0x20 && c != '\t') || c == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
 func cleanHTTPField(s string) string {
-	if !strings.ContainsAny(s, "\r\n\x00") {
+	if !hasHTTPControlByte(s) {
 		return s
 	}
 	var b strings.Builder
 	b.Grow(len(s))
 	for i := 0; i < len(s); i++ {
 		c := s[i]
-		if c == '\r' || c == '\n' || c == 0 {
+		if (c < 0x20 && c != '\t') || c == 0x7f {
 			continue
 		}
 		b.WriteByte(c)
@@ -195,7 +205,7 @@ func (d Draft) raw(target string, bare bool) ([]byte, error) {
 			continue
 		}
 		val := strings.TrimSpace(cleanHTTPField(h[1]))
-		if strings.ContainsAny(h[1], "\r\n\x00") && val == "" {
+		if hasHTTPControlByte(h[1]) && val == "" {
 			continue
 		}
 		b.WriteString(name + ": " + val + "\r\n")

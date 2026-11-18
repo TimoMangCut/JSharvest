@@ -200,11 +200,9 @@ func analyzeDir(dir string, workers int, skip map[string]bool, slim bool) ([]Scr
 	}
 	hasMem := atomic.LoadInt64(&globalMem.budgetBytes) > 0
 	if workers <= 0 {
-		if hasMem {
-			workers = max(1, runtime.GOMAXPROCS(0))
-		} else {
-			workers = max(1, runtime.GOMAXPROCS(0)/2)
-		}
+		// Small chunks run across all logical CPUs while heavySem (2 when !hasMem)
+		// independently bounds concurrent multi-MB AST allocations.
+		workers = max(1, runtime.GOMAXPROCS(0))
 	}
 	shas := make([]string, 0, len(index))
 	for sha := range index {
@@ -2726,6 +2724,14 @@ func Catalog(dir string, inScope func(host string) bool, analyze bool) ([]Endpoi
 // CatalogWithStats builds the catalog and also returns static script analysis
 // statistics (including bundle/source parse fallbacks).
 func CatalogWithStats(dir string, inScope func(host string) bool, analyze bool) ([]Endpoint, AnalyzeStats, error) {
+	eps, _, stats, err := CatalogScriptsWithStats(dir, inScope, analyze)
+	return eps, stats, err
+}
+
+// CatalogScriptsWithStats builds the catalog and returns the loaded slim Script
+// slice alongside statistics so callers that also write intel.json can pass
+// scripts straight to SaveIntelFromScripts without re-reading static/*.json.
+func CatalogScriptsWithStats(dir string, inScope func(host string) bool, analyze bool) ([]Endpoint, []Script, AnalyzeStats, error) {
 	var scripts []Script
 	var err error
 	if analyze {
@@ -2734,14 +2740,14 @@ func CatalogWithStats(dir string, inScope func(host string) bool, analyze bool) 
 		scripts, err = loadDir(dir, true)
 	}
 	if err != nil {
-		return nil, AnalyzeStats{}, err
+		return nil, nil, AnalyzeStats{}, err
 	}
 	stats := SummarizeScripts(scripts)
 	d := results.Open(dir)
 	if err := d.Refresh(); err != nil {
-		return nil, stats, err
+		return nil, scripts, stats, err
 	}
-	return Assemble(dir, scripts, Requests(d), inScope), stats, nil
+	return Assemble(dir, scripts, Requests(d), inScope), scripts, stats, nil
 }
 
 // Assemble builds a directory's catalog out of its analysed scripts and

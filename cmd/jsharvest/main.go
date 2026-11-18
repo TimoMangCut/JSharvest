@@ -833,7 +833,7 @@ func runEndpoints(args []string) error {
 		return err
 	}
 	defer unlock()
-	eps, st, err := endpoints.CatalogWithStats(dir, in, true)
+	eps, scripts, st, err := endpoints.CatalogScriptsWithStats(dir, in, true)
 	if err != nil {
 		return err
 	}
@@ -847,8 +847,10 @@ func runEndpoints(args []string) error {
 	if err := endpoints.Write(dir, eps); err != nil {
 		return err
 	}
-	if intel, err := endpoints.SaveIntel(dir, in, nil); err != nil {
-		return err
+	intel, ierr := endpoints.SaveIntelFromScripts(dir, scripts, in, nil)
+	scripts = nil
+	if ierr != nil {
+		return ierr
 	} else if len(intel.Headers) > 0 || len(intel.Cloud) > 0 || len(intel.Bases) > 0 {
 		fmt.Fprintf(os.Stderr, "%s: client headers [%s], bases [%s], %d cloud URL(s)\n", filepath.Join(dir, endpoints.IntelFile),
 			strings.Join(intel.Names(), " "), strings.Join(intel.Bases, " "), len(intel.Cloud))

@@ -1447,7 +1447,7 @@ func (e *engine) writeEndpoints() {
 	started := time.Now()
 	e.dir.mu.Lock()
 	defer e.dir.mu.Unlock()
-	eps, st, err := endpoints.CatalogWithStats(e.st.Dir(), e.cfg.InScope, true)
+	eps, scripts, st, err := endpoints.CatalogScriptsWithStats(e.st.Dir(), e.cfg.InScope, true)
 	if err == nil {
 		if r := e.redactor; r != nil {
 			for i := range eps {
@@ -1486,7 +1486,8 @@ func (e *engine) writeEndpoints() {
 	if r := e.redactor; r != nil {
 		redact = func(name, value string) string { return r.Headers(map[string]string{name: value})[name] }
 	}
-	in, err := endpoints.SaveIntel(e.st.Dir(), e.cfg.InScope, redact)
+	in, err := endpoints.SaveIntelFromScripts(e.st.Dir(), scripts, e.cfg.InScope, redact)
+	scripts = nil
 	if err != nil {
 		e.warn("intel: " + err.Error())
 	} else if len(in.Headers) > 0 || len(in.Cloud) > 0 {

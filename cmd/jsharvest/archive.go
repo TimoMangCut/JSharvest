@@ -118,16 +118,42 @@ func archiveRun(ctx context.Context, args []string) (*archive.Summary, error) {
 		scale = s
 	}
 	gap := func(d time.Duration) time.Duration { return time.Duration(float64(d) * scale) }
+	parseServiceURL := func(envName, raw string) (*url.URL, error) {
+		u, perr := url.Parse(raw)
+		if perr != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return nil, fmt.Errorf("archive: bad %s URL %q", envName, raw)
+		}
+		return u, nil
+	}
+	wbBase := env("JSHARVEST_WAYBACK_URL", "https://web.archive.org")
+	wb, err := parseServiceURL("JSHARVEST_WAYBACK_URL", wbBase)
+	if err != nil {
+		return nil, err
+	}
+	otxBase := env("JSHARVEST_OTX_URL", "https://otx.alienvault.com")
+	if _, err := parseServiceURL("JSHARVEST_OTX_URL", otxBase); err != nil {
+		return nil, err
+	}
+	ccIndexURL := env("JSHARVEST_CC_INDEX_URL", "https://index.commoncrawl.org")
+	ccIdxU, err := parseServiceURL("JSHARVEST_CC_INDEX_URL", ccIndexURL)
+	if err != nil {
+		return nil, err
+	}
+	ccDataURL := env("JSHARVEST_CC_DATA_URL", "https://data.commoncrawl.org")
+	ccDataU, err := parseServiceURL("JSHARVEST_CC_DATA_URL", ccDataURL)
+	if err != nil {
+		return nil, err
+	}
+	usBase := env("JSHARVEST_URLSCAN_URL", "https://urlscan.io")
+	if _, err := parseServiceURL("JSHARVEST_URLSCAN_URL", usBase); err != nil {
+		return nil, err
+	}
 	// The services' URLs the user (or a gate) declared are allowed whatever
 	// their address; nothing else is.
-	services := []string{env("JSHARVEST_WAYBACK_URL", "https://web.archive.org"), env("JSHARVEST_OTX_URL", "https://otx.alienvault.com"),
-		env("JSHARVEST_CC_INDEX_URL", "https://index.commoncrawl.org"), env("JSHARVEST_CC_DATA_URL", "https://data.commoncrawl.org"),
-		env("JSHARVEST_URLSCAN_URL", "https://urlscan.io")}
+	services := []string{wbBase, otxBase, ccIndexURL, ccDataURL, usBase}
 	// Separate Client per archive service — and separate Wayback CDX vs Memento
 	// clients — so connection-reset circuit breakers are strictly isolated per
 	// upstream cluster.
-	wbBase := env("JSHARVEST_WAYBACK_URL", "https://web.archive.org")
-	wb, _ := url.Parse(wbBase)
 	wbIndexClient := archive.NewClientSafe(proxyURL, hostRuleSet, services)
 	wbIndexClient.Wait = gap(60 * time.Second)
 	wbIndexClient.HTTP.CheckRedirect = func(req *http.Request, via []*http.Request) error {
@@ -167,14 +193,10 @@ func archiveRun(ctx context.Context, args []string) (*archive.Summary, error) {
 	otxClient := archive.NewClientSafe(proxyURL, hostRuleSet, services)
 	otxClient.Wait = gap(60 * time.Second)
 	otxClient.HTTP.CheckRedirect = func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }
-	o.OTX = &archive.OTX{Base: env("JSHARVEST_OTX_URL", "https://otx.alienvault.com"), Client: otxClient, Budget: &archive.Budget{Gap: gap(time.Second)}}
+	o.OTX = &archive.OTX{Base: otxBase, Client: otxClient, Budget: &archive.Budget{Gap: gap(time.Second)}}
 
 	// Common Crawl's index answers 504 when busy: two fast tries across
 	// parallel collections so dead collections fail fast (MAX-01).
-	ccIndexURL := env("JSHARVEST_CC_INDEX_URL", "https://index.commoncrawl.org")
-	ccDataURL := env("JSHARVEST_CC_DATA_URL", "https://data.commoncrawl.org")
-	ccIdxU, _ := url.Parse(ccIndexURL)
-	ccDataU, _ := url.Parse(ccDataURL)
 	ccClient := archive.NewClientSafe(proxyURL, hostRuleSet, services)
 	ccClient.Tries, ccClient.Wait = 2, gap(6*time.Second)
 	ccClient.HTTP.CheckRedirect = func(req *http.Request, via []*http.Request) error {
@@ -190,7 +212,7 @@ func archiveRun(ctx context.Context, args []string) (*archive.Summary, error) {
 	usClient := archive.NewClientSafe(proxyURL, hostRuleSet, services)
 	usClient.Wait = gap(60 * time.Second)
 	usClient.HTTP.CheckRedirect = func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }
-	o.URLScan = &archive.URLScan{Base: env("JSHARVEST_URLSCAN_URL", "https://urlscan.io"), Key: os.Getenv("URLSCAN_API_KEY"), Client: usClient,
+	o.URLScan = &archive.URLScan{Base: usBase, Key: os.Getenv("URLSCAN_API_KEY"), Client: usClient,
 		Budget: &archive.Budget{Gap: gap(2 * time.Second)}, Pages: 10, Results: 10}
 
 	if *scopeMode == "rdn" {

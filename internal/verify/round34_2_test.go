@@ -16,6 +16,7 @@ func TestDraftRawSanitizesCRLFAndInvalidHeaderNames(t *testing.T) {
 			{"X-Tenant", "acme\r\nX-Evil: injected"},
 			{"Bad Header\r\nName", "boom"},
 			{"X-Clean", "ok-value"},
+			{"X-Ctrl", "v1\x07\x1b\x7fv2"},
 		},
 		Body: []byte(`{"id":1}`),
 	}
@@ -34,7 +35,7 @@ func TestDraftRawSanitizesCRLFAndInvalidHeaderNames(t *testing.T) {
 	if req.Header.Get("X-Evil") != "" {
 		t.Fatalf("injected X-Evil header parsed into request!")
 	}
-	if req.Header.Get("X-Clean") != "ok-value" || req.Header.Get("X-Tenant") != "acmeX-Evil: injected" {
+	if req.Header.Get("X-Clean") != "ok-value" || req.Header.Get("X-Tenant") != "acmeX-Evil: injected" || req.Header.Get("X-Ctrl") != "v1v2" {
 		t.Fatalf("unexpected headers after sanitization: %+v", req.Header)
 	}
 }

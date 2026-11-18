@@ -318,7 +318,10 @@ func runFrontier(ctx context.Context, cfg Config, tab context.Context, g *guard.
 // order the pages were taken: the queue sees what it sees with one tab, so
 // the pages visited and those listed are the same with N
 // (docs/gd5-parallel-design.md 8.3, 8.14).
-const cdpDynamicWindow = 12
+const (
+	cdpDynamicWindow = 12
+	maxCDPDeferred   = 50000
+)
 
 type deferredFound struct {
 	f     frontier.Found
@@ -382,6 +385,7 @@ type crawl struct {
 	deferredBySkel map[string][]deferredFound
 	deferredKeys   []string
 	deferredSeen   map[string]bool
+	totalDeferred  int
 }
 
 func isFrontierSpecURL(raw string) bool {
@@ -515,11 +519,16 @@ func (c *crawl) admitFoundLocked(f frontier.Found, depth int, from string) bool 
 			}
 			if c.queuedBySkel[skelKey] >= cdpDynamicWindow {
 				if norm, ok := frontier.Normalize(f.URL); ok && !c.deferredSeen[norm] {
+					if c.totalDeferred >= maxCDPDeferred {
+						c.q.ListAs(f, from, frontier.Limit)
+						return false
+					}
 					c.deferredSeen[norm] = true
 					if len(c.deferredBySkel[skelKey]) == 0 {
 						c.deferredKeys = append(c.deferredKeys, skelKey)
 					}
 					c.deferredBySkel[skelKey] = append(c.deferredBySkel[skelKey], deferredFound{f: f, depth: depth, from: from})
+					c.totalDeferred++
 				}
 				return false
 			}
@@ -549,6 +558,9 @@ func (c *crawl) flushDeferredLocked() {
 				if norm, ok := frontier.Normalize(df.f.URL); ok {
 					delete(c.deferredSeen, norm)
 				}
+				if c.totalDeferred > 0 {
+					c.totalDeferred--
+				}
 				c.q.ListAs(df.f, df.from, frontier.TemplateSaturated)
 			}
 			delete(c.deferredBySkel, k)
@@ -559,6 +571,9 @@ func (c *crawl) flushDeferredLocked() {
 			list = list[1:]
 			if norm, ok := frontier.Normalize(df.f.URL); ok {
 				delete(c.deferredSeen, norm)
+			}
+			if c.totalDeferred > 0 {
+				c.totalDeferred--
 			}
 			if c.q.Add(df.f, df.depth, df.from) == "" {
 				c.queuedBySkel[k]++
@@ -602,6 +617,7 @@ func (c *crawl) finalizeDeferredLocked() int {
 	c.deferredBySkel = map[string][]deferredFound{}
 	c.deferredKeys = nil
 	c.deferredSeen = map[string]bool{}
+	c.totalDeferred = 0
 	return extraQueued
 }
 
