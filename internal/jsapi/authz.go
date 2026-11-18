@@ -783,7 +783,11 @@ func isLiteralNonString(e js.IExpr) bool {
 }
 
 func resolveAuthzStrings(x *extractor, e js.IExpr, allowArray bool) ([]string, bool) {
-	if e == nil {
+	return resolveAuthzStringsAt(x, e, allowArray, 0)
+}
+
+func resolveAuthzStringsAt(x *extractor, e js.IExpr, allowArray bool, depth int) ([]string, bool) {
+	if e == nil || depth > 6 {
 		return nil, false
 	}
 	e = unwrapEnumGroup(e)
@@ -803,7 +807,7 @@ func resolveAuthzStrings(x *extractor, e js.IExpr, allowArray bool) ([]string, b
 				if elem.Spread || elem.Value == nil {
 					return nil, false
 				}
-				vals, ok := resolveAuthzStrings(x, elem.Value, false)
+				vals, ok := resolveAuthzStringsAt(x, elem.Value, false, depth+1)
 				if !ok {
 					return nil, false
 				}
@@ -815,7 +819,7 @@ func resolveAuthzStrings(x *extractor, e js.IExpr, allowArray bool) ([]string, b
 	// CASL `subject("Order", item)` / `an("Order", item)` instance subject helper.
 	if ce, ok := e.(*js.CallExpr); ok && len(ce.Args.List) == 2 && !ce.Args.List[0].Rest {
 		if _, cname := splitCallee(unwrapCalleeExpr(ce.X)); cname == "subject" || cname == "an" {
-			return resolveAuthzStrings(x, ce.Args.List[0].Value, false)
+			return resolveAuthzStringsAt(x, ce.Args.List[0].Value, false, depth+1)
 		}
 	}
 	// Member lookup on an `Object.freeze({...})` constant dictionary (`ACTIONS.APPROVE`).
@@ -823,8 +827,8 @@ func resolveAuthzStrings(x *extractor, e js.IExpr, allowArray bool) ([]string, b
 	case *js.DotExpr:
 		if vr, ok := unwrapEnumGroup(t.X).(*js.Var); ok {
 			if obj := unwrapDictObject(x.constOrSingleExpr(vr)); obj != nil {
-				if v := objectValue(obj, propName(t.Y)); v != nil {
-					return resolveAuthzStrings(x, v, false)
+				if v := objectValue(obj, propName(t.Y)); v != nil && v != e {
+					return resolveAuthzStringsAt(x, v, false, depth+1)
 				}
 			}
 		}
@@ -832,8 +836,8 @@ func resolveAuthzStrings(x *extractor, e js.IExpr, allowArray bool) ([]string, b
 		if vr, ok := unwrapEnumGroup(t.X).(*js.Var); ok {
 			if key, ok := literalString(t.Y); ok {
 				if obj := unwrapDictObject(x.constOrSingleExpr(vr)); obj != nil {
-					if v := objectValue(obj, key); v != nil {
-						return resolveAuthzStrings(x, v, false)
+					if v := objectValue(obj, key); v != nil && v != e {
+						return resolveAuthzStringsAt(x, v, false, depth+1)
 					}
 				}
 			}

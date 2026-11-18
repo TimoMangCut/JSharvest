@@ -950,8 +950,15 @@ func slashSegmentWithVar(e js.IExpr, target *js.Var) bool {
 }
 
 func (x *extractor) isNullishOrEmptyArg(e js.IExpr) bool {
+	return x.isNullishOrEmptyArgAt(e, 0)
+}
+
+func (x *extractor) isNullishOrEmptyArgAt(e js.IExpr, depth int) bool {
 	if e == nil {
 		return true
+	}
+	if depth > 6 {
+		return false
 	}
 	switch u := unwrapEnumGroup(e).(type) {
 	case *js.LiteralExpr:
@@ -962,16 +969,19 @@ func (x *extractor) isNullishOrEmptyArg(e js.IExpr) bool {
 		if string(u.Data) == "undefined" {
 			return true
 		}
-		if x.omitted[root(u)] {
+		rv := root(u)
+		if x.omitted[rv] {
 			return true
 		}
-		if c := x.constant(u); c != nil && c != u {
-			return x.isNullishOrEmptyArg(c)
+		if rv.Decl != js.ArgumentDecl {
+			if c := x.constant(rv); c != nil && c != u && c != rv {
+				return x.isNullishOrEmptyArgAt(c, depth+1)
+			}
 		}
 	case *js.UnaryExpr:
 		return u.Op == js.VoidToken
 	case *js.CondExpr:
-		return x.isNullishOrEmptyArg(u.X) || x.isNullishOrEmptyArg(u.Y)
+		return x.isNullishOrEmptyArgAt(u.X, depth+1) || x.isNullishOrEmptyArgAt(u.Y, depth+1)
 	}
 	return false
 }
