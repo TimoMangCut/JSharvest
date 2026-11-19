@@ -69,5 +69,7 @@ Tài liệu nhập ngữ cảnh nhanh cho session mới (~5 KB). Đọc cùng [C
 
 ## 4. Lộ trình Dài hạn (chưa thực hiện, chỉ mở khi có nhu cầu thực tế)
 
+0. **Tồn đọng nhỏ sau Đợt 37.1** (`T1` `verified_base` sau re-judge, `T2` candidate chưa thử và thống kê base đầu cơ, `T3` mở rộng `testlint`): dấu hiệu khi vướng, cách xử lý và test ở [plan-37.1.md](plan-37.1.md), mục "Tồn đọng nhỏ".
+
 1. **Tách dần module nội bộ theo thay đổi tính năng:** thu gọn dần sự phụ thuộc `x.cursor` trong `internal/jsapi` và cấu trúc `Config` trong `internal/engine` theo từng tính năng chạm tới (không đại phẫu tách rời).
 2. **Tùy chọn Stealth nâng cao:** `-stealth` với `uTLS` + HTTP/2 fingerprint chuẩn Chrome / Isolated World hooks nếu gặp WAF kiểm tra JA4/H2 frame ở pha HTTP pre-auth.

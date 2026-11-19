@@ -400,3 +400,40 @@ Mọi mục A–G đã làm, chưa commit. Phần lệch so với đặc tả, k
 | D | `SourceMap.OwnRefs` và `SourceRef{Path, SHA256}` nằm trong `httpcrawl` (không trong `sourcemap`); `put` của engine trả key để phát hiện sighting hụt | Giữ gói `sourcemap` thuần |
 
 Test mới: `httpcrawl/round37_1_test.go` (5), `engine/round37_1_test.go` (1), `archive/round37_1_test.go` (1), `archive/hosts371_test.go` (1), `verify/round37_1_test.go` (4), `cmd/jsharvest/round37_1_test.go` (2), `testlint` (1). Ba test đã được kiểm ngược bằng mutation (đảo thứ tự công bố map; tắt re-judge; tắt nhả gate): đều fail khi mã sai.
+
+---
+
+## Tồn đọng nhỏ sau `4cf1475` (ghi nhận, chưa sửa)
+
+Theo review sau commit, đã kiểm lại với mã. Không cái nào là blocker. Mỗi mục ghi: **dấu hiệu khi vướng**, **cách xử lý**, **test**.
+
+### T1. `rejudgeShells` không xoá `VerifiedBase`
+
+- **Hiện trạng:** `one()` gán `res.VerifiedBase = candBase` cho kết quả `Alive` của candidate đầu cơ ([verify.go:546–548](../internal/verify/verify.go)). `rejudgeShells` hạ verdict và xoá `VerifiedMethod` nhưng không xoá `VerifiedBase`.
+- **Dấu hiệu khi vướng:** `verify.json` có kết quả `dead_or_fp`/`client_route` mà vẫn mang `verified_base`. Tiêu thụ nào tin `verified_base` mà không xét verdict (ví dụ `export -drafts` chọn base, hay MCP liệt kê base đã xác nhận) sẽ nhận một base sai.
+- **Xử lý:** trong `rejudgeShells`, khi hạ verdict thì xoá luôn `r.VerifiedBase = ""`. Rà mọi chỗ đọc `VerifiedBase` (`grep -rn VerifiedBase internal cmd`), bảo đảm tất cả đều đi kèm điều kiện verdict.
+- **Test:** draft nhiều candidate, base 1 trả 2xx-HTML là shell chỉ học được về sau (shell `*` từ 2 host chậm, như `TestRound371RejudgeWithEveryCanaryKnown`). Kỳ vọng sau re-judge: verdict `dead_or_fp` và `verified_base` rỗng.
+
+### T2. Re-judge không thử lại candidate sau, và không sửa thống kê base đầu cơ
+
+- **Hiện trạng:** trong `one()`, candidate đầu tiên trả `Alive` thì `return` ngay ([verify.go:549–551](../internal/verify/verify.go)); `noteSpecBase(candBase, …, Alive)` đã ghi vào `specBases` ([verify.go:543](../internal/verify/verify.go)). Nếu re-judge hạ kết quả đó:
+  - (a) candidate 2 không được thử;
+  - (b) `specBases` vẫn coi base 1 là sống, có thể làm lệch việc cắt tỉa base đầu cơ (`specBasePruneAfter`, round36) cho các draft khác trong cùng run.
+- **Phạm vi:** hiếm. `rootCanary` đã chạy ngay trong `judge` cho cùng origin, nên chỉ xảy ra khi shell được học **từ host khác** (`*`) sau thời điểm probe.
+- **Dấu hiệu khi vướng:** draft có `candidates` ra `dead_or_fp` với lý do có hậu tố `(judged again with every canary known)`, trong khi một base khác của cùng draft thật ra sống (biết được nhờ chạy lại verify).
+- **Xử lý (theo thứ tự ưu tiên, chỉ làm khi gặp thực tế):**
+  1. **Ghi nhận rõ:** thêm vào `Result` danh sách candidate chưa thử (`untried_candidates`), để người dùng và `export` biết.
+  2. **Thử lại có giới hạn:** sau `rejudgeShells`, với mỗi draft bị hạ mà còn candidate chưa thử, chạy lại `one()` **chỉ trên các candidate còn lại** (bỏ candidate đã hạ). Lúc này shell đã đủ, nên phán quyết tất định. Chi phí là thêm request đúng bằng số candidate còn lại của các draft bị hạ (thường bằng 0), tuân theo `-rate`, `-max`, gate và `BlockedHosts`.
+  3. **Sửa thống kê:** khi hạ, gọi bản đảo của `noteSpecBase` (trừ một lượt sống của base đó) trước khi chạy lại bước 2, để việc cắt tỉa của lượt thử lại dựa trên số liệu đúng.
+- **Test:** draft 2 candidate; base 1 trả shell `*` học muộn; base 2 là route thật. Kỳ vọng sau xử lý: verdict `verified_alive` với `verified_base` = base 2, và `Sent` tăng đúng 1 probe (cộng canary của base 2 nếu chưa có).
+
+### T3. `internal/testlint` tin `RLock()` và chưa bắt ghi vào phần tử map/slice
+
+- **Hiện trạng:** `callsLock` coi `RLock` như khoá ghi ([handler_race_test.go:110](../internal/testlint/handler_race_test.go)). `capturedWrites` chỉ xét `*ast.Ident`, không xét `m[k] = v`, `s[i] = v`, `x.f = v`, `delete(m, k)`, `append` vào trường.
+- **Dấu hiệu khi vướng:** một test chỉ fail với `-race` (hoặc chập chờn) trong khi lint vẫn pass, và handler của nó ghi vào map/slice/trường struct bị capture.
+- **Xử lý (mở rộng lint, giữ không có false positive):**
+  1. Chỉ tin `Lock()`, không tin `RLock()`, cho phép ghi.
+  2. Xét thêm LHS dạng `IndexExpr`/`SelectorExpr` có gốc là identifier bị capture; xét thêm lời gọi `delete(<captured>, …)`.
+  3. Bỏ qua kiểu đồng bộ sẵn (`sync.Map`, `atomic.*`, `chan` gửi/nhận), vì phép ghi qua method của chúng không phải `AssignStmt`.
+  4. Chạy lint mới trên toàn repo, sửa các chỗ nó báo trong cùng commit (như E).
+- **Test:** thêm `internal/testlint/testdata` với 4 file mẫu: map ghi không khoá (phải báo), map ghi trong `Lock` (không báo), `RLock` rồi ghi (phải báo), `atomic.Add` (không báo). Lint đọc thư mục mẫu bằng một test con riêng, không quét chung với repo.
