@@ -277,6 +277,7 @@ func SaveIntelFromScripts(dir string, scripts []Script, inScope func(host string
 	in := BuildIntel(scripts, inScope)
 	in.Bases = enrichIntelBases(dir, scripts, in.Bases, inScope)
 	in.ServerHints, in.SecurityNotes, in.AuthFlows = infraAll(dir, inScope)
+	in.Routes = mergeAuthFlowRoutes(in.Routes, in.AuthFlows, inScope)
 	if redact != nil {
 		for i := range in.Headers {
 			in.Headers[i].Value = redact(in.Headers[i].Name, in.Headers[i].Value)
@@ -306,6 +307,44 @@ func SaveIntelFromScripts(dir string, scripts []Script, inScope func(host string
 		return in, err
 	}
 	return in, nil
+}
+
+func mergeAuthFlowRoutes(routes []IntelRoute, flows []AuthFlow, inScope func(host string) bool) []IntelRoute {
+	if len(flows) == 0 {
+		return routes
+	}
+	seen := make(map[string]bool, len(routes))
+	for _, r := range routes {
+		seen[r.Path] = true
+	}
+	added := false
+	for _, f := range flows {
+		ru, err := url.Parse(strings.TrimSpace(f.RedirectURI))
+		if err != nil || (ru.Scheme != "http" && ru.Scheme != "https") || ru.Host == "" {
+			continue
+		}
+		if inScope != nil && !inScope(ru.Hostname()) {
+			continue
+		}
+		p := ru.Path
+		if p == "" {
+			p = "/"
+		}
+		if seen[p] {
+			continue
+		}
+		seen[p] = true
+		var srcs []Source
+		if f.SourceURL != "" {
+			srcs = []Source{{Script: f.SourceURL, Kind: "auth_flow"}}
+		}
+		routes = append(routes, IntelRoute{Path: p, Sources: srcs})
+		added = true
+	}
+	if added {
+		sort.Slice(routes, func(i, j int) bool { return routes[i].Path < routes[j].Path })
+	}
+	return routes
 }
 
 // Names lists the headers' names, once each.

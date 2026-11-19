@@ -101,11 +101,19 @@ func CrawlHostsWithUA(root, targetHostPrefix, roleDir string, inScope func(strin
 
 	scanDir := func(dir string, matchTarget, matchRole bool) {
 		var in struct {
-			Bases []string `json:"bases"`
+			Bases     []string `json:"bases"`
+			AuthFlows []struct {
+				RedirectURI string `json:"redirect_uri"`
+			} `json:"auth_flows"`
 		}
 		if b, err := os.ReadFile(filepath.Join(dir, "intel.json")); err == nil && json.Unmarshal(b, &in) == nil {
 			for _, base := range in.Bases {
 				if u, err := url.Parse(base); err == nil && (u.Scheme == "https" || u.Scheme == "http") && u.Host != "" && inScope(u.Hostname()) {
+					hosts[u.Host] = true
+				}
+			}
+			for _, af := range in.AuthFlows {
+				if u, err := url.Parse(af.RedirectURI); err == nil && (u.Scheme == "https" || u.Scheme == "http") && u.Host != "" && inScope(u.Hostname()) {
 					hosts[u.Host] = true
 				}
 			}

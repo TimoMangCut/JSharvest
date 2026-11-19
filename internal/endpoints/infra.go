@@ -53,11 +53,6 @@ func Infra(dir string, inScope func(host string) bool) ([]ServerHint, []Security
 }
 
 func infraAll(dir string, inScope func(host string) bool) ([]ServerHint, []SecurityNote, []AuthFlow) {
-	f, err := os.Open(filepath.Join(dir, "requests.jsonl"))
-	if err != nil {
-		return nil, nil, nil
-	}
-	defer f.Close()
 	hints := map[string]*ServerHint{}
 	notes := map[string]*SecurityNote{}
 	var flows []AuthFlow
@@ -82,64 +77,104 @@ func infraAll(dir string, inScope func(host string) bool) ([]ServerHint, []Secur
 			n.Origins = append(n.Origins, origin)
 		}
 	}
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 1<<20), 64<<20)
-	for sc.Scan() {
-		var e struct {
-			URL      string            `json:"url"`
-			Headers  map[string]string `json:"headers"`
-			Response *struct {
-				Status   int               `json:"status"`
+
+	if f, err := os.Open(filepath.Join(dir, "requests.jsonl")); err == nil {
+		sc := bufio.NewScanner(f)
+		sc.Buffer(make([]byte, 1<<20), 64<<20)
+		for sc.Scan() {
+			var e struct {
+				URL      string            `json:"url"`
 				Headers  map[string]string `json:"headers"`
-				Body     string            `json:"body"`
-				Base64   bool              `json:"body_base64"`
-				TLSChain bool              `json:"tls_incomplete_chain"`
-			} `json:"response"`
-		}
-		if json.Unmarshal(sc.Bytes(), &e) != nil || e.Response == nil || e.Response.Status == 0 {
-			continue
-		}
-		u, err := url.Parse(e.URL)
-		if err != nil || u.Host == "" || inScope != nil && !inScope(u.Hostname()) {
-			continue
-		}
-		origin := strings.ToLower(u.Scheme + "://" + u.Host)
-		h := e.Response.Headers
-		if v := strings.TrimSpace(h["server"]); v != "" && len(v) < 80 {
-			hint(v, origin, "server: "+v)
-		}
-		if v := strings.TrimSpace(h["x-powered-by"]); v != "" && len(v) < 80 {
-			hint(v, origin, "x-powered-by: "+v)
-		}
-		if !e.Response.Base64 && e.Response.Status >= 400 {
-			switch b := e.Response.Body; {
-			case nestErrorRe.MatchString(b):
-				hint("NestJS", origin, "error body "+clip(b, 120))
-			case expressHTMLRe.MatchString(b):
-				hint("Express", origin, "error page "+clip(expressHTMLRe.FindString(b), 120))
+				Response *struct {
+					Status   int               `json:"status"`
+					Headers  map[string]string `json:"headers"`
+					Body     string            `json:"body"`
+					Base64   bool              `json:"body_base64"`
+					TLSChain bool              `json:"tls_incomplete_chain"`
+				} `json:"response"`
+			}
+			if json.Unmarshal(sc.Bytes(), &e) != nil || e.Response == nil || e.Response.Status == 0 {
+				continue
+			}
+			u, err := url.Parse(e.URL)
+			if err != nil || u.Host == "" || inScope != nil && !inScope(u.Hostname()) {
+				continue
+			}
+			origin := strings.ToLower(u.Scheme + "://" + u.Host)
+			h := e.Response.Headers
+			if v := strings.TrimSpace(h["server"]); v != "" && len(v) < 80 {
+				hint(v, origin, "server: "+v)
+			}
+			if v := strings.TrimSpace(h["x-powered-by"]); v != "" && len(v) < 80 {
+				hint(v, origin, "x-powered-by: "+v)
+			}
+			inferFrameworkHints(h, origin, hint)
+			if !e.Response.Base64 && e.Response.Status >= 400 {
+				switch b := e.Response.Body; {
+				case nestErrorRe.MatchString(b):
+					hint("NestJS", origin, "error body "+clip(b, 120))
+				case expressHTMLRe.MatchString(b):
+					hint("Express", origin, "error page "+clip(expressHTMLRe.FindString(b), 120))
+				}
+			}
+			acao, acac := strings.TrimSpace(h["access-control-allow-origin"]), strings.EqualFold(strings.TrimSpace(h["access-control-allow-credentials"]), "true")
+			switch {
+			case acao == "*" && acac:
+				note("cors_wildcard_with_credentials", origin, e.URL)
+			case acac && acao != "" && acao != "null" && !strings.EqualFold(acao, origin) && strings.EqualFold(acao, e.Headers["origin"]):
+				note("cors_credentials_for_origin", origin, e.URL)
+			}
+			if e.Response.TLSChain {
+				note("tls_incomplete_chain", origin, e.URL)
+			}
+			if e.Response.Status >= 200 && e.Response.Status < 400 {
+				var body []byte
+				if !e.Response.Base64 {
+					body = []byte(e.Response.Body)
+				}
+				fs, fn := ExtractAuthFlows(e.URL, e.Response.Status, h, body)
+				flows = append(flows, fs...)
+				for _, k := range fn {
+					note(k, origin, e.URL)
+				}
 			}
 		}
-		acao, acac := strings.TrimSpace(h["access-control-allow-origin"]), strings.EqualFold(strings.TrimSpace(h["access-control-allow-credentials"]), "true")
-		switch {
-		case acao == "*" && acac:
-			note("cors_wildcard_with_credentials", origin, e.URL)
-		case acac && acao != "" && acao != "null" && !strings.EqualFold(acao, origin) && strings.EqualFold(acao, e.Headers["origin"]):
-			note("cors_credentials_for_origin", origin, e.URL)
-		}
-		if e.Response.TLSChain {
-			note("tls_incomplete_chain", origin, e.URL)
-		}
-		if e.Response.Status >= 200 && e.Response.Status < 400 {
-			var body []byte
-			if !e.Response.Base64 {
-				body = []byte(e.Response.Body)
+		_ = f.Close()
+	}
+
+	// Scan pages.jsonl for HTML <a href> / <form action> / redirect OAuth2/OIDC
+	// authorization URLs discovered on in-scope pages (requests.jsonl omits HTML bodies).
+	if pf, err := os.Open(filepath.Join(dir, "pages.jsonl")); err == nil {
+		sc := bufio.NewScanner(pf)
+		sc.Buffer(make([]byte, 256<<10), 16<<20)
+		for sc.Scan() {
+			var p struct {
+				URL  string `json:"url"`
+				From string `json:"from"`
 			}
-			fs, fn := ExtractAuthFlows(e.URL, e.Response.Status, h, body)
+			if json.Unmarshal(sc.Bytes(), &p) != nil || p.URL == "" {
+				continue
+			}
+			srcURL := p.From
+			if srcURL == "" {
+				srcURL = p.URL
+			}
+			su, err := url.Parse(srcURL)
+			if err != nil || su.Host == "" || (inScope != nil && !inScope(su.Hostname())) {
+				continue
+			}
+			origin := strings.ToLower(su.Scheme + "://" + su.Host)
+			fs, fn := ExtractAuthFlows(srcURL, 200, nil, []byte(p.URL))
 			flows = append(flows, fs...)
 			for _, k := range fn {
-				note(k, origin, e.URL)
+				note(k, origin, srcURL)
 			}
 		}
+		_ = pf.Close()
+	}
+
+	if len(hints) == 0 && len(notes) == 0 && len(flows) == 0 {
+		return nil, nil, nil
 	}
 	var hs []ServerHint
 	for _, h := range hints {
@@ -154,6 +189,49 @@ func infraAll(dir string, inScope func(host string) bool) ([]ServerHint, []Secur
 	}
 	slices.SortFunc(ns, func(a, b SecurityNote) int { return strings.Compare(a.Kind, b.Kind) })
 	return hs, ns, dedupAuthFlows(flows)
+}
+
+// inferFrameworkHints passively identifies backend frameworks from response
+// header names and Set-Cookie names (never reading or storing cookie values).
+func inferFrameworkHints(headers map[string]string, origin string, hint func(name, origin, evidence string)) {
+	for k, v := range headers {
+		lk := strings.ToLower(strings.TrimSpace(k))
+		switch lk {
+		case "x-drupal-cache", "x-drupal-dynamic-cache":
+			if cv := strings.TrimSpace(v); cv != "" && len(cv) < 60 {
+				hint("Drupal", origin, lk+": "+cv)
+			}
+		case "x-aspnet-version", "x-aspnetmvc-version":
+			if cv := strings.TrimSpace(v); cv != "" && len(cv) < 60 {
+				hint("ASP.NET", origin, lk+": "+cv)
+			}
+		case "set-cookie":
+			for _, line := range strings.Split(v, "\n") {
+				name, _, ok := strings.Cut(line, "=")
+				if !ok {
+					continue
+				}
+				name = strings.TrimSpace(name)
+				lname := strings.ToLower(name)
+				switch {
+				case lname == "laravel_session":
+					hint("Laravel", origin, "cookie: "+name)
+				case lname == "asp.net_sessionid" || strings.HasPrefix(lname, ".aspnetcore."):
+					hint("ASP.NET", origin, "cookie: "+name)
+				case lname == "jsessionid":
+					hint("Java Servlet", origin, "cookie: "+name)
+				case lname == "phpsessid":
+					hint("PHP", origin, "cookie: "+name)
+				case lname == "_rails_session":
+					hint("Ruby on Rails", origin, "cookie: "+name)
+				case lname == "connect.sid":
+					hint("Express", origin, "cookie: "+name)
+				case lname == "ci_session":
+					hint("CodeIgniter", origin, "cookie: "+name)
+				}
+			}
+		}
+	}
 }
 
 func clip(s string, n int) string {
