@@ -49,7 +49,15 @@ type Options struct {
 	Vendor  bool // fetch vendor libraries too
 	MaxBody int
 	Workers int // concurrent listing/fetch workers (0: default 8)
-	Wayback *Wayback
+	// ListOnly runs Stage 1 index listing only (no live checks, no memento
+	// prefetch, no ExtraHosts, no pages/fetch/history) concurrently with crawl.
+	ListOnly bool
+	// Stage2 resumes immediately after an in-process Stage 1 listing in the
+	// same crawl: skips re-running Wayback/CC shard budgets and runs only
+	// delta ExtraHosts listing plus pages/fetch/history.
+	Stage2          bool
+	DisablePrefetch bool
+	Wayback         *Wayback
 	OTX     *OTX
 	CC      *CommonCrawl
 	URLScan *URLScan
@@ -82,13 +90,16 @@ type Summary struct {
 	Failed     int `json:"failed"`
 	// Old pages: captures listed, pages read, the scripts they named, their
 	// inline code stored; and the chunks the fetched scripts named.
-	HTML        int            `json:"html_captures,omitempty"`
-	Pages       int            `json:"pages_read,omitempty"`
-	PageScripts int            `json:"page_scripts,omitempty"`
-	Inline      int            `json:"inline,omitempty"`
-	Resolved    int            `json:"resolved,omitempty"`
-	NotArchived int            `json:"not_archived,omitempty"` // a script named, not in the Wayback (alive or not)
-	Skipped     map[string]int `json:"skipped,omitempty"`
+	HTML               int            `json:"html_captures,omitempty"`
+	Pages              int            `json:"pages_read,omitempty"`
+	PageScripts        int            `json:"page_scripts,omitempty"`
+	Inline             int            `json:"inline,omitempty"`
+	Resolved           int            `json:"resolved,omitempty"`
+	NotArchived        int            `json:"not_archived,omitempty"` // a script named, not in the Wayback (alive or not)
+	WaybackShardsDone  int            `json:"wayback_shards_done,omitempty"`
+	WaybackShardsTotal int            `json:"wayback_shards_total,omitempty"`
+	WaybackListedPct   float64        `json:"wayback_listed_pct,omitempty"`
+	Skipped            map[string]int `json:"skipped,omitempty"`
 	Credential  []string       `json:"credential_urls,omitempty"` // archived URLs carrying a credential, masked
 	Historical  map[string]int `json:"historical,omitempty"`
 	Notes       []string       `json:"notes,omitempty"`
@@ -166,8 +177,9 @@ type runner struct {
 	store     *store.Store
 	cred      map[string]bool
 	cur       *current
-	// partial: the listing stopped at -max-pages, its place kept.
-	partial bool
+	// partial: the listing stopped at -max-pages or a throttled source, its place kept.
+	partial  bool
+	blockErr error
 	// lives are the live checks made, by kind and URL: a URL the archive
 	// holds in several versions is asked once.
 	livesMu       sync.Mutex
@@ -331,6 +343,34 @@ func Run(ctx context.Context, o Options) (*Summary, error) {
 		r.cred[c] = true
 	}
 
+	if o.ListOnly {
+		o.DisablePrefetch = true
+		o.Live = false
+		if !r.st.Listed {
+			err := r.list(ctx)
+			r.flushFiles()
+			r.mu.Lock()
+			if len(r.seenURLs) > 0 {
+				r.st.Summary.URLs = len(r.seenURLs)
+			} else {
+				r.st.Summary.URLs = distinctURLs(filepath.Join(o.Dir, "urls.jsonl"))
+			}
+			r.mu.Unlock()
+			r.seenURLs = nil
+			// Leave r.st.Listed false so Stage 2 still runs delta ExtraHosts
+			// queries on OTX/URLScan once the crawl's subdomains are known.
+			r.save()
+			if err == nil {
+				r.mu.Lock()
+				err = r.blockErr
+				r.mu.Unlock()
+			}
+			return &r.st.Summary, err
+		}
+		r.seenURLs = nil
+		return &r.st.Summary, nil
+	}
+
 	if r.store, err = store.Open(o.Dir, store.Options{MaxBody: o.MaxBody}); err != nil {
 		return nil, err
 	}
@@ -351,7 +391,9 @@ func Run(ctx context.Context, o Options) (*Summary, error) {
 			r.save()
 			return &r.st.Summary, err
 		}
-		r.st.Listed = !r.partial
+		r.mu.Lock()
+		r.st.Listed = !r.partial && r.blockErr == nil
+		r.mu.Unlock()
 		r.save()
 	}
 	// Release the listing URL dedup map once listing is done to free RAM for fetch/AST.
@@ -367,11 +409,40 @@ func Run(ctx context.Context, o Options) (*Summary, error) {
 	if ferr := r.store.Flush(); err == nil {
 		err = ferr
 	}
-	if err == nil {
+	r.mu.Lock()
+	hasBlock := r.blockErr != nil
+	r.mu.Unlock()
+	if err == nil && (r.store.Len() > 0 || !hasBlock) {
 		err = r.history(ctx)
 	}
 	r.save()
+	if err == nil {
+		r.mu.Lock()
+		err = r.blockErr
+		r.mu.Unlock()
+	}
 	return &r.st.Summary, err
+}
+
+func (r *runner) recordBlock(src string, err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.recordBlockLocked(src, err)
+}
+
+func (r *runner) recordBlockLocked(src string, err error) {
+	if r.blockErr == nil {
+		if src != "" && !strings.HasPrefix(err.Error(), src+": ") {
+			r.blockErr = fmt.Errorf("%s: %w", src, err)
+		} else {
+			r.blockErr = err
+		}
+	}
+	msg := err.Error()
+	if src != "" && !strings.HasPrefix(msg, src+": ") {
+		msg = src + ": " + msg
+	}
+	r.noteLocked(msg)
 }
 
 func (r *runner) note(s string) {

@@ -94,6 +94,10 @@ type Options struct {
 	// Extract optionally parses a script once and caches its jsapi.Result
 	// (e.g. endpoints.ExtractCached); nil uses an in-memory SHA256 cache.
 	Extract func(body []byte, urlHint string) jsapi.Result
+	// OnSeedReady fires once right after the seed page commits cleanly
+	// (no SeedError, not blocked by a bot challenge), allowing callers to
+	// launch non-target background tasks such as Stage 1 archive listing.
+	OnSeedReady func()
 }
 
 // Script is a script the crawl fetched, or inline code of a page.
@@ -118,6 +122,10 @@ type SourceMap struct {
 	URL       string
 	ScriptURL string
 	Body      []byte
+	Parsed    *sourcemap.Map
+	OwnFiles  []sourcemap.File
+	SourcesN  int
+	Reused    bool
 }
 
 // Page is one page the crawl visited, or found and did not.
@@ -266,6 +274,9 @@ type crawler struct {
 	skel         *skeletonController
 	extractMu    sync.Mutex
 	extracted    map[[32]byte]jsapi.Result
+	mapMu        sync.Mutex
+	mapCache     map[string]*mapDedupEntry
+	mapInflight  map[string]*mapDedupEntry
 }
 
 // originOf is a URL's scheme and host, lowercased.
@@ -1484,77 +1495,119 @@ func (cr *crawler) specProbePhase2(ctx context.Context, referer string) {
 	}
 
 	// (b) Service Sub-Prefix Doc Probe + D3 Auto-Brake.
+	// Group services by host so distinct hosts run concurrently while services
+	// sharing a host (and GatewayBase) run sequentially with exact D3 brake semantics.
 	type gateState struct {
 		lastSig    string
 		consec     int
 		hadOpenAPI bool
 		braked     bool
 	}
-	gates := map[string]*gateState{}
-
-	for _, svc := range plan.Services {
-		if cr.stop() != "" || ctx.Err() != nil || specBudgetExhausted(budgetPtr) {
-			return
-		}
-		if cr.specPolicy.Check(svc.PrefixURL+"/") != resolve.Allow || cr.specHostBlocked(svc.PrefixURL) {
-			continue
-		}
-		gs := gates[svc.GatewayBase]
-		if gs == nil {
-			gs = &gateState{}
-			gates[svc.GatewayBase] = gs
-		}
-		if gs.braked {
-			continue
-		}
-		hdrs := cr.specCtx.HeadersFor(svc.PrefixURL, cr.o.InScope)
-		for _, p := range frontier.ServiceDocPaths {
-			if cr.stop() != "" || cr.specHostBlocked(svc.PrefixURL) || ctx.Err() != nil || specBudgetExhausted(budgetPtr) || gs.braked {
-				break
+	probeHostServices := func(svcs []frontier.ServiceDocTarget) {
+		gates := map[string]*gateState{}
+		for _, svc := range svcs {
+			if cr.stop() != "" || ctx.Err() != nil || specBudgetExhausted(budgetPtr) {
+				return
 			}
-			targetURL := frontier.JoinSpecBase(svc.PrefixURL, p)
-			if ok, _ := cr.claim(targetURL); !ok {
+			if cr.specPolicy.Check(svc.PrefixURL+"/") != resolve.Allow || cr.specHostBlocked(svc.PrefixURL) {
 				continue
 			}
-			if !tryTakeSpecBudget(budgetPtr) {
-				break
+			gs := gates[svc.GatewayBase]
+			if gs == nil {
+				gs = &gateState{}
+				gates[svc.GatewayBase] = gs
 			}
-			a := cr.fetchWithHeaders(ctx, targetURL, referer, dataReq, "Other", hdrs)
-			cr.politeSpecAt(a, svc.PrefixURL, referer, true)
-			key := strings.TrimPrefix(targetURL, seedOrig)
-			if key == targetURL || key == "" {
-				key = targetURL
-			}
-			cr.count(func(st *Stats) { st.Probes[key] = a.Status })
-
-			if a.Err == nil && a.Status == 200 && !htmlLike(a.Body) && len(a.Body) > 0 && jsapi.IsOpenAPI(a.Body) {
-				cr.o.Script(Script{Body: a.Body, Kind: "file", URL: a.URL, Page: referer, Status: a.Status,
-					MIME: a.Header.Get("Content-Type"), Tags: []string{"openapi"}, Found: "spec-probe", From: referer})
-				cr.count(func(st *Stats) { st.OpenAPI++ })
-				cr.o.Log("%s: an API description (openapi)", a.URL)
-				gs.hadOpenAPI = true
-				gs.lastSig = ""
-				gs.consec = 0
+			if gs.braked {
 				continue
 			}
+			hdrs := cr.specCtx.HeadersFor(svc.PrefixURL, cr.o.InScope)
+			for _, p := range frontier.ServiceDocPaths {
+				if cr.stop() != "" || cr.specHostBlocked(svc.PrefixURL) || ctx.Err() != nil || specBudgetExhausted(budgetPtr) || gs.braked {
+					break
+				}
+				targetURL := frontier.JoinSpecBase(svc.PrefixURL, p)
+				if ok, _ := cr.claim(targetURL); !ok {
+					continue
+				}
+				if !tryTakeSpecBudget(budgetPtr) {
+					break
+				}
+				a := cr.fetchWithHeaders(ctx, targetURL, referer, dataReq, "Other", hdrs)
+				cr.politeSpecAt(a, svc.PrefixURL, referer, true)
+				key := strings.TrimPrefix(targetURL, seedOrig)
+				if key == targetURL || key == "" {
+					key = targetURL
+				}
+				cr.count(func(st *Stats) { st.Probes[key] = a.Status })
 
-			sig, isGate := cr.gateSignature(a)
-			if !isGate {
-				gs.lastSig = ""
-				gs.consec = 0
-				continue
+				if a.Err == nil && a.Status == 200 && !htmlLike(a.Body) && len(a.Body) > 0 && jsapi.IsOpenAPI(a.Body) {
+					cr.o.Script(Script{Body: a.Body, Kind: "file", URL: a.URL, Page: referer, Status: a.Status,
+						MIME: a.Header.Get("Content-Type"), Tags: []string{"openapi"}, Found: "spec-probe", From: referer})
+					cr.count(func(st *Stats) { st.OpenAPI++ })
+					cr.o.Log("%s: an API description (openapi)", a.URL)
+					gs.hadOpenAPI = true
+					gs.lastSig = ""
+					gs.consec = 0
+					continue
+				}
+
+				sig, isGate := cr.gateSignature(a)
+				if !isGate {
+					gs.lastSig = ""
+					gs.consec = 0
+					continue
+				}
+				if sig == gs.lastSig {
+					gs.consec++
+				} else {
+					gs.lastSig = sig
+					gs.consec = 1
+				}
+				if gs.consec >= 2 && (!gs.hadOpenAPI || a.Status != http.StatusNotFound) {
+					gs.braked = true
+					cr.o.Log("spec-probe auto-brake on %s after uniform gate (%s)", svc.GatewayBase, sig)
+					break
+				}
 			}
-			if sig == gs.lastSig {
-				gs.consec++
-			} else {
-				gs.lastSig = sig
-				gs.consec = 1
+		}
+	}
+
+	if len(plan.Services) > 0 {
+		byHost := map[string][]frontier.ServiceDocTarget{}
+		var hostOrder []string
+		for _, svc := range plan.Services {
+			hk := ""
+			if u, err := url.Parse(svc.PrefixURL); err == nil {
+				hk = strings.ToLower(u.Host)
 			}
-			if gs.consec >= 2 && (!gs.hadOpenAPI || a.Status != http.StatusNotFound) {
-				gs.braked = true
-				cr.o.Log("spec-probe auto-brake on %s after uniform gate (%s)", svc.GatewayBase, sig)
-				break
+			if _, exists := byHost[hk]; !exists {
+				hostOrder = append(hostOrder, hk)
 			}
+			byHost[hk] = append(byHost[hk], svc)
+		}
+		if len(hostOrder) <= 1 {
+			probeHostServices(plan.Services)
+		} else {
+			svcWorkers := min(max(cr.o.Workers, 4), min(8, len(hostOrder)))
+			sch := make(chan string, len(hostOrder))
+			for _, hk := range hostOrder {
+				sch <- hk
+			}
+			close(sch)
+			var swg sync.WaitGroup
+			for range svcWorkers {
+				swg.Add(1)
+				go func() {
+					defer swg.Done()
+					for hk := range sch {
+						if cr.stop() != "" || ctx.Err() != nil || specBudgetExhausted(budgetPtr) {
+							return
+						}
+						probeHostServices(byHost[hk])
+					}
+				}()
+			}
+			swg.Wait()
 		}
 	}
 }
@@ -1679,6 +1732,7 @@ type pageSlot struct {
 	it      frontier.Item
 	origin  string
 	skipped bool
+	freed   bool
 	done    chan struct{}
 	fp      fetchedPage
 }
@@ -1783,6 +1837,12 @@ func (cr *crawler) pages(ctx context.Context) {
 		if it, ok := cr.q.Next(); ok {
 			fp := cr.fetchPage(ctx, it, true)
 			commitFetched(fp, true)
+			cr.mu.Lock()
+			seedOK := cr.res.SeedError == "" && !cr.res.Blocked.Blocked && cr.stopped == ""
+			cr.mu.Unlock()
+			if seedOK && ctx.Err() == nil && o.OnSeedReady != nil {
+				o.OnSeedReady()
+			}
 		} else {
 			return
 		}
@@ -1792,6 +1852,21 @@ func (cr *crawler) pages(ctx context.Context) {
 	maxWin := max(pageWorkers*2, 8)
 	activeWorkers := 0
 	originInFlight := map[string]int{}
+	workerFreed := make(chan struct{}, maxWin+pageWorkers)
+
+	reclaimWorkers := func() {
+		for _, s := range win {
+			if s.skipped || s.freed {
+				continue
+			}
+			select {
+			case <-s.done:
+				s.freed = true
+				activeWorkers--
+			default:
+			}
+		}
+	}
 
 	canDispatch := func(nx frontier.Item) bool {
 		if activeWorkers >= pageWorkers || len(win) >= maxWin || ctx.Err() != nil || cr.stop() != "" {
@@ -1833,6 +1908,7 @@ func (cr *crawler) pages(ctx context.Context) {
 	}
 
 	for ctx.Err() == nil && cr.stop() == "" {
+		reclaimWorkers()
 		progressed := false
 		for len(win) > 0 && cr.stop() == "" && ctx.Err() == nil {
 			select {
@@ -1840,7 +1916,10 @@ func (cr *crawler) pages(ctx context.Context) {
 				slot := win[0]
 				win = win[1:]
 				if !slot.skipped {
-					activeWorkers--
+					if !slot.freed {
+						slot.freed = true
+						activeWorkers--
+					}
 					originInFlight[slot.origin]--
 				}
 				commitSlot(slot)
@@ -1850,6 +1929,7 @@ func (cr *crawler) pages(ctx context.Context) {
 			}
 		}
 	fill:
+		reclaimWorkers()
 		for ctx.Err() == nil && cr.stop() == "" {
 			nx, ok := cr.q.Peek()
 			if !ok {
@@ -1881,15 +1961,23 @@ func (cr *crawler) pages(ctx context.Context) {
 			originInFlight[orig]++
 			win = append(win, slot)
 			go func(s *pageSlot) {
-				defer close(s.done)
 				s.fp = cr.fetchPage(ctx, s.it, false)
+				close(s.done)
+				select {
+				case workerFreed <- struct{}{}:
+				default:
+				}
 			}(slot)
 		}
 		if progressed {
 			continue
 		}
 		if len(win) > 0 {
-			<-win[0].done
+			select {
+			case <-win[0].done:
+			case <-workerFreed:
+			case <-ctx.Done():
+			}
 			continue
 		}
 		if len(level) > 0 {

@@ -242,7 +242,7 @@ func (r *runner) fetch(ctx context.Context) error {
 					}
 				}
 
-				if isScript {
+				if isScript && !errors.Is(ferr, ErrBlocked) && ctx.Err() == nil {
 					zoom, pruned := fc.recordFetched(r, g, archBody, ferr)
 					if pruned > 0 {
 						r.sum(func(s *Summary) { s.Skipped["family unchanged"] += pruned })
@@ -254,8 +254,13 @@ func (r *runner) fetch(ctx context.Context) error {
 				case errors.Is(ferr, errNotArchived):
 					r.sum(func(s *Summary) { s.NotArchived++ })
 					r.markDone(g.key)
+				case errors.Is(ferr, ErrBlocked) && ctx.Err() == nil:
+					// Wayback Memento is blocked and no CC WARC fallback succeeded:
+					// leave g.key undone for the next run, record the block, and
+					// continue processing remaining items for live checks & CC WARC.
+					r.recordBlock("wayback", ferr)
 				case ferr != nil:
-					if errors.Is(ferr, ErrBlocked) || errors.Is(ferr, context.Canceled) || errors.Is(ferr, context.DeadlineExceeded) {
+					if ctx.Err() != nil || errors.Is(ferr, context.Canceled) || errors.Is(ferr, context.DeadlineExceeded) {
 						qMu.Lock()
 						if fatal == nil {
 							if ctx.Err() != nil {
@@ -346,8 +351,8 @@ func (r *runner) fetchAsset(ctx context.Context, g *group, meta *store.ArchiveSe
 	if body == nil {
 		a, err := r.memento(ctx, g, c)
 		switch {
-		case errors.Is(err, ErrBlocked) || ctx.Err() != nil:
-			return nil, err
+		case ctx.Err() != nil:
+			return nil, ctx.Err()
 		case err == nil && a.Status == 200:
 			if body, err = decode(a.Header.Get("Content-Encoding"), a.Body, r.o.MaxBody); err != nil {
 				body = a.Body
@@ -355,6 +360,9 @@ func (r *runner) fetchAsset(ctx context.Context, g *group, meta *store.ArchiveSe
 		case g.warc.WARC != nil && r.o.CC != nil:
 			rec, werr := r.o.CC.Fetch(ctx, g.warc.WARC, r.o.MaxBody)
 			if werr != nil || rec.Status != 200 {
+				if errors.Is(err, ErrBlocked) {
+					return nil, err
+				}
 				return nil, fmt.Errorf("%s: not in the Wayback, nor in its WARC file", c.URL)
 			}
 			body, src = rec.Body, "commoncrawl"
@@ -414,6 +422,12 @@ func probe(g *group, c Capture) bool {
 // listed, briefly for a URL only named, which it may never have had (its
 // answer then can be a 403, or none for minutes).
 func (r *runner) memento(ctx context.Context, g *group, c Capture) (*Answer, error) {
+	if r.o.Wayback == nil || r.o.Wayback.Client == nil {
+		return nil, errors.New("no wayback client")
+	}
+	if r.o.Wayback.Client.isBlocked() {
+		return nil, ErrBlocked
+	}
 	if !probe(g, c) {
 		return r.o.Wayback.Client.Get(ctx, r.o.Wayback.Files, r.o.Wayback.Memento(c), int64(r.o.MaxBody))
 	}
@@ -488,11 +502,11 @@ func (r *runner) fetchOne(ctx context.Context, g *group, meta *store.ArchiveSeen
 		return kept, live, nil
 	}
 	a, err := r.memento(ctx, g, c)
-	if errors.Is(err, ErrBlocked) || ctx.Err() != nil {
-		return kept, nil, err
+	if ctx.Err() != nil {
+		return kept, nil, ctx.Err()
 	}
 	if (err != nil || a.Status != 200) && g.warc.WARC != nil && r.o.CC != nil {
-		// The Wayback has no copy, Common Crawl's WARC file has (MAX-01).
+		// The Wayback has no copy (or is blocked), Common Crawl's WARC file has (MAX-01).
 		if body, ok := r.fromWARC(ctx, g, meta, alive); ok {
 			endpoints.ExtractCached(r.o.Dir, body, g.warc.URL)
 			return append(kept, body), body, nil

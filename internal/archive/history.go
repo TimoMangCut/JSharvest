@@ -251,18 +251,25 @@ func classifyCtx(ctx context.Context, archived []endpoints.Endpoint, cur *curren
 					return nil, 0, err
 				}
 				name := e.Name()
+				var b []byte
 				if len(name) == 67 && strings.HasSuffix(name, ".js") {
 					if seenFiles[name] {
 						continue
 					}
 					seenFiles[name] = true
+					if cb, ok := endpoints.GetCachedScriptBody(strings.TrimSuffix(name, ".js")); ok && len(cb) > 0 && len(cb) <= maxLiveJSReadBytes {
+						b = cb
+					}
 				}
-				if info, err := e.Info(); err == nil && (info.IsDir() || info.Size() > maxLiveJSReadBytes) {
-					continue
-				}
-				b, err := os.ReadFile(filepath.Join(d, name))
-				if err != nil || len(b) == 0 || len(b) > maxLiveJSReadBytes {
-					continue
+				if b == nil {
+					if info, err := e.Info(); err == nil && (info.IsDir() || info.Size() > maxLiveJSReadBytes) {
+						continue
+					}
+					var err error
+					b, err = os.ReadFile(filepath.Join(d, name))
+					if err != nil || len(b) == 0 || len(b) > maxLiveJSReadBytes {
+						continue
+					}
 				}
 				kept := pending[:0]
 				for _, cand := range pending {

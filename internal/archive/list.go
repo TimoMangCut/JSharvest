@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"path"
 	"regexp"
@@ -21,12 +22,12 @@ import (
 )
 
 // list lists every source at once (MAX-05): each is its own service, with
-// its own budget, and a slow one keeps no other waiting. What they share
-// (the state, the files) is r.mu's. A source down is noted and listed on by
-// the next run; an archive that refuses our connections, or a stop, ends
-// them all.
+// its own budget, and a slow or blocked one keeps no other waiting. What
+// they share (the state, the files) is r.mu's. Only parent cancellation
+// (SIGINT) ends them all; a blocked or failed source records its place so
+// pages/fetch/history still process everything collected so far.
 func (r *runner) list(ctx context.Context) error {
-	ctx, cancel := context.WithCancel(ctx)
+	lctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var wg sync.WaitGroup
 	var fatal error
@@ -47,20 +48,21 @@ func (r *runner) list(ctx context.Context) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			err := list(ctx)
+			err := list(lctx)
 			r.mu.Lock()
 			defer r.mu.Unlock()
 			switch {
 			case err == nil:
-			case errors.Is(err, ErrExcluded):
-				r.st.Summary.Notes = append(r.st.Summary.Notes, src+": "+err.Error())
-			case errors.Is(err, ErrBlocked) || ctx.Err() != nil:
-				// Refused, or stopped (SIGINT, or another source refused):
-				// the run stops, its places kept.
+			case ctx.Err() != nil:
 				if fatal == nil {
-					fatal = fmt.Errorf("%s: %w", src, err)
+					fatal = ctx.Err()
 				}
 				cancel()
+			case errors.Is(err, ErrExcluded):
+				r.noteLocked(src + ": " + err.Error())
+			case errors.Is(err, ErrBlocked):
+				r.recordBlockLocked(src, err)
+				r.partial = true
 			default:
 				// One source down is no reason to leave the others (ARC-05):
 				// its place is kept, and the next run lists it on.
@@ -87,6 +89,15 @@ func (r *runner) took(caps []Capture, move func()) {
 
 func (r *runner) listWayback(ctx context.Context) error {
 	if r.st.Wayback.Done {
+		return nil
+	}
+	if r.o.Stage2 {
+		r.mu.Lock()
+		r.partial = true
+		if r.st.Wayback.NumPages > 0 {
+			r.updateWaybackShardSummaryLocked(r.st.Wayback.NumPages)
+		}
+		r.mu.Unlock()
 		return nil
 	}
 	if r.o.Wayback.Sharded && r.st.Wayback.Resume == "" {
@@ -144,13 +155,64 @@ func (r *runner) listWayback(ctx context.Context) error {
 	return nil
 }
 
+func gcdInt(a, b int) int {
+	for b != 0 {
+		a, b = b, a%b
+	}
+	return a
+}
+
+// coprimeStrideOrder generates a deterministic permutation of 0..numPages-1
+// starting at 0 and stepping by an integer coprime to numPages near the golden
+// ratio (~0.618). When -max-pages or upstream rate limits stop a run early,
+// sampled shards disperse evenly across the SURT keyspace instead of clustering
+// inside a single URL prefix, while PagesDone tracks exact completion across runs.
+func coprimeStrideOrder(numPages int) []int {
+	if numPages <= 0 {
+		return nil
+	}
+	out := make([]int, numPages)
+	if numPages == 1 {
+		return out
+	}
+	stride := max(1, int(float64(numPages)*0.6180339887))
+	if stride >= numPages {
+		stride = 1
+	}
+	for gcdInt(stride, numPages) != 1 {
+		stride++
+		if stride >= numPages {
+			stride = 1
+		}
+	}
+	for i := 0; i < numPages; i++ {
+		out[i] = (i * stride) % numPages
+	}
+	return out
+}
+
+func (r *runner) updateWaybackShardSummaryLocked(numPages int) {
+	if numPages <= 0 {
+		return
+	}
+	done := len(r.st.Wayback.PagesDone)
+	if done > numPages {
+		done = numPages
+	}
+	r.st.Summary.WaybackShardsTotal = numPages
+	r.st.Summary.WaybackShardsDone = done
+	r.st.Summary.WaybackListedPct = math.Round(float64(done)*1000/float64(numPages)) / 10
+}
+
 func (r *runner) listWaybackSharded(ctx context.Context, numPages int) error {
 	var pending []int
+	order := coprimeStrideOrder(numPages)
 	r.mu.Lock()
 	if r.st.Wayback.PagesDone == nil {
 		r.st.Wayback.PagesDone = map[int]bool{}
 	}
-	for p := 0; p < numPages; p++ {
+	r.updateWaybackShardSummaryLocked(numPages)
+	for _, p := range order {
 		if r.st.Wayback.PagesDone[p] {
 			continue
 		}
@@ -167,9 +229,16 @@ func (r *runner) listWaybackSharded(ctx context.Context, numPages int) error {
 		sctx, cancel := context.WithCancel(ctx)
 		defer cancel()
 
+		if r.o.Wayback != nil && r.o.Wayback.Index != nil {
+			r.o.Wayback.Index.SetOnThrottle(func() {
+				r.prefetchHalted.Store(true)
+			})
+			defer r.o.Wayback.Index.SetOnThrottle(nil)
+		}
+
 		var prefetchWG sync.WaitGroup
 		var prefetchCh chan *group
-		if r.o.MaxFiles == 0 && r.store != nil && r.cur != nil {
+		if !r.o.DisablePrefetch && r.o.MaxFiles == 0 && r.store != nil && r.cur != nil {
 			prefetchCh = make(chan *group, 512)
 			r.mu.Lock()
 			r.prefetchCh = prefetchCh
@@ -226,13 +295,15 @@ func (r *runner) listWaybackSharded(ctx context.Context, numPages int) error {
 					}
 					r.took(caps, func() {
 						r.st.Wayback.PagesDone[p] = true
+						r.updateWaybackShardSummaryLocked(numPages)
 					})
 					r.mu.Lock()
 					n := r.st.Summary.Listed["wayback"]
 					doneCnt := len(r.st.Wayback.PagesDone)
+					pct := r.st.Summary.WaybackListedPct
 					r.mu.Unlock()
 					if doneCnt%10 == 0 || doneCnt == numPages {
-						r.o.Log("wayback: %d/%d shards (%d captures listed)", doneCnt, numPages, n)
+						r.o.Log("wayback: %d/%d shards (%.1f%%, %d captures listed)", doneCnt, numPages, pct, n)
 					}
 				}
 			}()
@@ -256,6 +327,7 @@ func (r *runner) listWaybackSharded(ctx context.Context, numPages int) error {
 	}
 
 	r.mu.Lock()
+	r.updateWaybackShardSummaryLocked(numPages)
 	if len(r.st.Wayback.PagesDone) >= numPages {
 		r.st.Wayback.Done = true
 		r.saveLocked()
@@ -374,6 +446,15 @@ func (r *runner) extra(ctx context.Context, src string, list func(ctx context.Co
 
 func (r *runner) listCC(ctx context.Context) error {
 	cc := &r.st.CC
+	if cc.Done {
+		return nil
+	}
+	if r.o.Stage2 {
+		r.mu.Lock()
+		r.partial = true
+		r.mu.Unlock()
+		return nil
+	}
 	if cc.Collections == nil {
 		cols, err := r.o.CC.Latest(ctx)
 		if err != nil {

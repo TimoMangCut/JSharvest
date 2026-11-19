@@ -250,6 +250,12 @@ func memPutResult(sha string, res jsapi.Result) {
 	s.mu.Unlock()
 }
 
+// GetCachedScriptBody returns a cached raw script body by SHA256 hex digest if
+// present in the in-memory body pool.
+func GetCachedScriptBody(sha string) ([]byte, bool) {
+	return memGetBody(sha)
+}
+
 func memGetBody(sha string) ([]byte, bool) {
 	if atomic.LoadInt64(&globalMem.budgetBytes) <= 0 {
 		return nil, false

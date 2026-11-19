@@ -230,10 +230,24 @@ func (r *runner) pages(ctx context.Context) error {
 			}
 			continue
 		}
+		if r.o.Wayback == nil || r.o.Wayback.Client == nil {
+			return nil
+		}
+		if r.o.Wayback.Client.isBlocked() {
+			r.recordBlock("wayback", ErrBlocked)
+			return nil
+		}
 		a, err := r.o.Wayback.Client.Get(ctx, r.o.Wayback.Files, r.o.Wayback.Memento(c), int64(r.o.MaxBody))
 		if err != nil {
-			if errors.Is(err, ErrBlocked) || ctx.Err() != nil {
-				return err
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if errors.Is(err, ErrBlocked) {
+				// Leave key undone so the next run retries this HTML memento, while
+				// allowing fetch() and history() to continue on live checks & CC WARC.
+				r.recordBlock("wayback", err)
+				r.o.Log("wayback HTML mementos paused (%v); continuing to script fetch", err)
+				return nil
 			}
 			r.sum(func(sm *Summary) { sm.Failed++ })
 			r.o.Log("page %s: %v", c.URL, err)

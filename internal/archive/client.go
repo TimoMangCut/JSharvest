@@ -30,16 +30,38 @@ var (
 )
 
 // Budget spaces one kind of request: an archive's index, its files.
+// When MaxGap > Gap, 429/503 responses adaptively widen the spacing (AIMD)
+// and share Retry-After/backoff cooldown across all workers on this Budget.
 type Budget struct {
-	Gap  time.Duration
-	mu   sync.Mutex
-	last time.Time
+	Gap        time.Duration
+	MaxGap     time.Duration
+	OnThrottle func()
+
+	mu            sync.Mutex
+	curGap        time.Duration
+	last          time.Time
+	cooldownUntil time.Time
 }
 
 func (b *Budget) wait(ctx context.Context) error {
+	if b == nil {
+		return nil
+	}
 	b.mu.Lock()
-	d := time.Until(b.last.Add(b.Gap))
-	b.last = time.Now().Add(max(d, 0))
+	gap := b.curGap
+	if gap <= 0 {
+		gap = b.Gap
+	}
+	now := time.Now()
+	target := b.last.Add(gap)
+	if b.cooldownUntil.After(target) {
+		target = b.cooldownUntil
+	}
+	if now.After(target) {
+		target = now
+	}
+	d := target.Sub(now)
+	b.last = target
 	b.mu.Unlock()
 	if d <= 0 {
 		return nil
@@ -50,6 +72,55 @@ func (b *Budget) wait(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func (b *Budget) noteThrottle(waitDur time.Duration) {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	if b.MaxGap > b.Gap {
+		cur := b.curGap
+		if cur <= 0 {
+			cur = b.Gap
+		}
+		if doubled := cur * 2; doubled > b.MaxGap {
+			b.curGap = b.MaxGap
+		} else if doubled > 0 {
+			b.curGap = doubled
+		}
+	}
+	if waitDur > 0 {
+		if until := time.Now().Add(waitDur); until.After(b.cooldownUntil) {
+			b.cooldownUntil = until
+		}
+	}
+	cb := b.OnThrottle
+	b.mu.Unlock()
+	if cb != nil {
+		cb()
+	}
+}
+
+func (b *Budget) SetOnThrottle(fn func()) {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	b.OnThrottle = fn
+	b.mu.Unlock()
+}
+
+func (b *Budget) noteSuccess() {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	if b.curGap > b.Gap {
+		step := max(b.Gap/8, time.Millisecond)
+		b.curGap = max(b.Gap, b.curGap-step)
+	}
+	b.mu.Unlock()
 }
 
 // Client gets from the archives, patiently: it waits when told to slow
@@ -246,12 +317,17 @@ func (c *Client) getWithOpts(ctx context.Context, b *Budget, rawURL string, maxB
 		switch resp.StatusCode {
 		case 429, 502, 503, 504:
 			last = fmt.Errorf("%s: %d", rawURL, resp.StatusCode)
-			if err := sleep(ctx, retryAfter(resp.Header, adaptiveBackoff(c.Wait, try))); err != nil {
+			waitDur := retryAfter(resp.Header, adaptiveBackoff(c.Wait, try))
+			if resp.StatusCode == 429 || resp.StatusCode == 503 {
+				b.noteThrottle(waitDur)
+			}
+			if err := sleep(ctx, waitDur); err != nil {
 				return nil, err
 			}
 			continue
 		}
 		c.decayRefused()
+		b.noteSuccess()
 		if int64(len(body)) > maxBytes {
 			return a, fmt.Errorf("%s: over %d bytes", rawURL, maxBytes)
 		}

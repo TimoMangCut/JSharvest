@@ -15,7 +15,10 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -203,6 +206,7 @@ func runCrawl(args []string) error {
 	sourceMapGuess := fs.Bool("sourcemap-guess", true, "with -sourcemaps, also ask <script>.map when nothing names a map: one more request a script, the app's only (not vendors.js, polyfills…); -sourcemap-guess=false to skip")
 	challengeWait := fs.Duration("challenge-wait", 6*time.Second, "with the cdp engine, how long a page that is a bot challenge is given to pass on its own and reload before it counts as blocked (0: no wait)")
 	archiveAfter := fs.Bool("archive", true, "with the http engine (anon, before a login): after the crawl, run jsharvest archive for the host: old pages and scripts in the Wayback, OTX and Common Crawl, each checked on the live server first (-archive=false: only when the first page is a challenge, see -archive-fallback)")
+	archiveMaxPages := fs.Int("archive-max-pages", 150, "with -archive, most Wayback CDX shards/pages listed in one crawl (0: unlimited; remaining shards resume on later runs)")
 	escalate := fs.Bool("escalate", true, "with -engine auto (the http engine before a login): the pages a bot challenge stops plain HTTP on go to Chrome, one run a challenged host, filed with this crawl (the run.json escalated field); -engine http never starts a browser")
 	archiveFallback := fs.Bool("archive-fallback", true, "with the http engine, when the first page is a bot challenge and no script was reached: run jsharvest archive for the host (old pages and scripts, live first)")
 	spaBoot := fs.Bool("spa-boot", false, "with -engine auto: when the http engine finds an SPA and sees no API call, open one guarded headless tab a SPA origin (3 at most, 8 s each) to capture the requests it sends when it boots")
@@ -529,26 +533,45 @@ func runCrawl(args []string) error {
 		for _, t := range targets {
 			c := cfg
 			c.Target = t
-			ho.Fallback, ho.Archive = nil, nil
+			ho.Fallback, ho.Archive, ho.ArchiveStage1 = nil, nil, nil
 			if *archiveFallback || *archiveAfter {
+				baseArgs := []string{"-o", *out, "-target", t.Hostname(), "-scope", *scopeMode, "-sources", archiveSources,
+					"-concurrency", fmt.Sprint(max(*tabs*4, 8)), "-live-rate", fmt.Sprint(max(*httpRate, 5)), "-mem-cache-mb", fmt.Sprint(*memCacheMB)}
+				if *archiveMaxPages > 0 {
+					baseArgs = append(baseArgs, "-max-pages", fmt.Sprint(*archiveMaxPages))
+				}
+				if *proxy != "" {
+					baseArgs = append(baseArgs, "-proxy", *proxy)
+				} else {
+					baseArgs = append(baseArgs, "-proxy", netsafe.ProxyNone)
+				}
+				if *hostRules != "" {
+					baseArgs = append(baseArgs, "-host-resolver-rules", *hostRules)
+				}
+				if *insecure {
+					baseArgs = append(baseArgs, "-insecure")
+				}
+				var stage1Done atomic.Bool
+				var stage1Mu sync.Mutex
+				var stage1BlockErr error
 				run := func(ctx context.Context) any {
-					args := []string{"-o", *out, "-target", t.Hostname(), "-scope", *scopeMode, "-sources", archiveSources,
-						"-concurrency", fmt.Sprint(max(*tabs*4, 8)), "-live-rate", fmt.Sprint(max(*httpRate, 5)), "-mem-cache-mb", fmt.Sprint(*memCacheMB)}
-					if *proxy != "" {
-						args = append(args, "-proxy", *proxy)
-					} else {
-						args = append(args, "-proxy", netsafe.ProxyNone)
+					runArgs := slices.Clone(baseArgs)
+					if stage1Done.Load() {
+						runArgs = append(runArgs, "-stage2")
 					}
-					if *hostRules != "" {
-						args = append(args, "-host-resolver-rules", *hostRules)
+					sum, err := archiveRun(ctx, runArgs)
+					stage1Mu.Lock()
+					if err == nil && stage1BlockErr != nil {
+						err = stage1BlockErr
 					}
-					if *insecure {
-						args = append(args, "-insecure")
-					}
-					sum, err := archiveRun(ctx, args)
+					stage1Mu.Unlock()
 					if err != nil {
 						slog.Warn("archive", "err", err)
-						return map[string]any{"archive": filepath.Join(*out, t.Hostname(), "archive"), "error": err.Error()}
+						res := map[string]any{"archive": filepath.Join(*out, t.Hostname(), "archive"), "error": err.Error()}
+						if sum != nil {
+							res["summary"] = sum
+						}
+						return res
 					}
 					return map[string]any{"archive": filepath.Join(*out, t.Hostname(), "archive"), "summary": sum}
 				}
@@ -557,6 +580,18 @@ func runCrawl(args []string) error {
 					// Once a host in a list: the archive is the host's.
 					archived[t.Hostname()] = true
 					ho.Archive = run
+					ho.ArchiveStage1 = func(sctx context.Context) error {
+						_, serr := archiveRun(sctx, append(slices.Clone(baseArgs), "-list-only"))
+						stage1Mu.Lock()
+						if errors.Is(serr, archive.ErrBlocked) {
+							stage1BlockErr = serr
+						}
+						if sctx.Err() == nil && (serr == nil || errors.Is(serr, archive.ErrBlocked)) {
+							stage1Done.Store(true)
+						}
+						stage1Mu.Unlock()
+						return serr
+					}
 				case *archiveFallback:
 					ho.Fallback = run
 				}

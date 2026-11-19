@@ -91,6 +91,10 @@ func newClient(o Options, jar http.CookieJar, allow func(u, first *url.URL, doc 
 	// -host-resolver-rules map is trusted; an internal target
 	// (!TargetPublic) may reach private addresses.
 	dialer := &netsafe.Dialer{HostRules: rules, AllowPrivate: o.AllowPrivate, Proxy: o.Proxy, Resolver: o.Resolver, Timeout: dialTimeout}
+	dialCtx := dialer.DialContext
+	if o.Proxy == nil && o.Resolver == nil {
+		dialCtx = newHostPortBreaker(dialCtx)
+	}
 	tr := &http.Transport{
 		Proxy:                 netsafe.ProxyFunc(o.Proxy, rules),
 		ForceAttemptHTTP2:     true,
@@ -98,7 +102,7 @@ func newClient(o Options, jar http.CookieJar, allow func(u, first *url.URL, doc 
 		IdleConnTimeout:       60 * time.Second,
 		TLSHandshakeTimeout:   tlsTimeout,
 		ResponseHeaderTimeout: hdrTimeout,
-		DialContext:           dialer.DialContext,
+		DialContext:           dialCtx,
 	}
 	if o.Proxy == nil {
 		tr.Proxy = nil

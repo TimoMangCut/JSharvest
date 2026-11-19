@@ -51,6 +51,10 @@ type HTTPOptions struct {
 	// with no script its result goes into run.json as fallback, otherwise
 	// as archive.
 	Archive func(ctx context.Context) any
+	// ArchiveStage1 optionally runs archive index listing concurrently with
+	// multi-page HTTP crawling once the seed page commits cleanly (0 target
+	// requests, no memento prefetch); RunHTTP joins it before Stage 2 Archive.
+	ArchiveStage1 func(ctx context.Context) error
 	// Escalate takes the pages the crawl met a challenge on to a browser
 	// (crawl -engine auto: Escalate in Chrome), after the crawl and its
 	// catalog, before the archives.
@@ -148,6 +152,13 @@ func RunHTTP(ctx context.Context, cfg Config, ho HTTPOptions) (Record, error) {
 		// an incomplete certificate chain is not completed (P2.3).
 		run.Warnings = append(run.Warnings, "aia disabled: a proxy is in use (-proxy): a server's incomplete certificate chain is not completed")
 	}
+	stage1Ctx, cancelStage1 := context.WithCancel(ctx)
+	var stage1WG sync.WaitGroup
+	var stage1Once sync.Once
+	defer func() {
+		cancelStage1()
+		stage1WG.Wait()
+	}()
 	o := httpcrawl.Options{
 		Proxy:  proxyURL,
 		Target: cfg.Target, InScope: cfg.InScope, PageScope: pageScope, Depth: cfg.Depth, MaxPages: cfg.MaxPages, Rate: ho.Rate, PageRate: ho.PageRate,
@@ -160,6 +171,17 @@ func RunHTTP(ctx context.Context, cfg Config, ho HTTPOptions) (Record, error) {
 		},
 		Extract: func(body []byte, urlHint string) jsapi.Result {
 			return endpoints.ExtractCached(st.Dir(), body, urlHint)
+		},
+		OnSeedReady: func() {
+			if ho.ArchiveStage1 != nil && ho.Archive != nil && cfg.Depth > 0 {
+				stage1Once.Do(func() {
+					stage1WG.Add(1)
+					go func() {
+						defer stage1WG.Done()
+						_ = ho.ArchiveStage1(stage1Ctx)
+					}()
+				})
+			}
 		},
 		Log: func(f string, a ...any) { slog.Debug(fmt.Sprintf(f, a...)) },
 		Script: func(s httpcrawl.Script) {
@@ -179,29 +201,42 @@ func RunHTTP(ctx context.Context, cfg Config, ho HTTPOptions) (Record, error) {
 			put(r, "script")
 		},
 		SourceMap: func(m httpcrawl.SourceMap) {
-			sm, err := sourcemap.Parse(m.Body)
-			if err != nil {
-				return
-			}
-			if os.MkdirAll(mapsDir, 0o700) == nil {
-				sum := sha256.Sum256(m.Body)
-				writeFileAtomic(filepath.Join(mapsDir, hex.EncodeToString(sum[:])+".map"), m.Body)
+			own := m.OwnFiles
+			sourcesN := m.SourcesN
+			if !m.Reused {
+				sm := m.Parsed
+				if sm == nil {
+					var err error
+					sm, err = sourcemap.Parse(m.Body)
+					if err != nil {
+						return
+					}
+				}
+				if len(m.Body) > 0 && os.MkdirAll(mapsDir, 0o700) == nil {
+					sum := sha256.Sum256(m.Body)
+					writeFileAtomic(filepath.Join(mapsDir, hex.EncodeToString(sum[:])+".map"), m.Body)
+				}
+				if sourcesN == 0 && own == nil {
+					sourcesN = len(sm.Sources)
+					for _, f := range sm.FilesFor(m.ScriptURL) {
+						if !f.Vendor {
+							own = append(own, f)
+						}
+					}
+				}
 			}
 			where := m.URL
 			if where == "" {
 				where = m.ScriptURL + "#inline-map"
 			}
 			n := 0
-			for _, f := range sm.FilesFor(m.ScriptURL) {
-				if f.Vendor {
-					continue // a dependency's: noise for the target's endpoints
-				}
+			for _, f := range own {
 				n++
 				put(store.Record{Body: []byte(f.Content), URL: where + "#" + f.Path, Kind: "source", Via: "sourcemap", Target: "http",
 					Page: m.ScriptURL, Tags: []string{"sourcemap", "source:" + f.Path}, Source: "live",
 					Initiator: &store.Initiator{Type: "sourcemap", URL: m.ScriptURL}}, "source")
 			}
-			slog.Info("source map", "url", where, "sources", len(sm.Sources), "own", n)
+			slog.Info("source map", "url", where, "sources", sourcesN, "own", n)
 		},
 		Request: func(e traffic.Entry) {
 			if tw == nil || !cfg.Record.Wants(e.ResourceType) {
@@ -330,14 +365,22 @@ func RunHTTP(ctx context.Context, cfg Config, ho HTTPOptions) (Record, error) {
 	}
 	switch {
 	case ctx.Err() != nil || (cerr != nil && !errors.Is(cerr, httpcrawl.ErrStopped)):
+		cancelStage1()
+		stage1WG.Wait()
 	case seedDead:
 		// Not the archives: a target that cannot be reached is a mistake to
 		// fix (a URL, a certificate), not minutes of listing to wait out;
 		// jsharvest archive runs them on its own.
+		cancelStage1()
+		stage1WG.Wait()
 	case blockedEmpty && fallback != nil:
+		stage1WG.Wait()
 		slog.Info("the first page is a challenge: trying the archives, and the live files their old pages name")
 		run.Fallback = fallback(ctx)
 	case ho.Archive != nil:
+		// Barrier: wait for any overlapped Stage 1 index listing (and release of
+		// archive/.jsharvest.lock) after Escalate/SPABoot/writeEndpoints finish.
+		stage1WG.Wait()
 		slog.Info("the crawl is done; now the target's history: old pages and scripts in the archives, each checked live first (-archive=false to skip)")
 		run.Archive = ho.Archive(ctx)
 		if ctx.Err() == nil {

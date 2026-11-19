@@ -39,7 +39,8 @@ func runVerify(args []string) error {
 	includeSourceOnly := fs.Bool("include-source-only", false, "probe endpoints found only in sourcemaps (tree-shaken from active bundles)")
 	noCloudProbe := fs.Bool("no-cloud-probe", false, "skip safe ACL checks of cloud storage URLs in intel.json")
 	scopeMode := fs.String("scope", "", "rdn or fqdn: the hosts requests may go to; default: the crawl's -scope")
-	concurrency := fs.Int("concurrency", 8, "hosts verified at once, each one request at a time (-rate stays the ceiling on all requests)")
+	concurrency := fs.Int("concurrency", 8, "hosts verified at once, each one request at a time unless -host-inflight > 1 (-rate stays the ceiling on all requests)")
+	hostInFlight := fs.Int("host-inflight", 1, "concurrent probes allowed on a single host when -concurrency > 1 (default 1; raise to 2-4 with higher -rate on high-RTT gateways)")
 	gateAfter := fs.Int("gate-after", 0, "probes in a row on a host that all answer alike, as their canaries (a login, a device or app header before every route): the host's other drafts are not sent (0: never)")
 	rf := addReplayFlags(fs)
 	fs.Parse(args)
@@ -74,19 +75,27 @@ func runVerify(args []string) error {
 		return err
 	}
 	snap, _ := session.Load(filepath.Join(*profiles, targetDir(*target), *role))
-	ua := pickUA(snap, dir, filepath.Join(*out, targetDir(*target), "*"))
 	if *concurrency < 1 {
 		return errors.New("verify: -concurrency must be 1 or more")
 	}
-	sender, policy, err := rf.sender(filepath.Join(dest, "sent.jsonl"), *concurrency, ua, *target)
+	if *hostInFlight < 1 {
+		return errors.New("verify: -host-inflight must be 1 or more")
+	}
+	_, recorded, scannedUA := archive.CrawlHostsWithUA(*out, targetDir(*target), dir, in)
+	ua := scannedUA
+	if snap != nil && snap.UserAgent != "" && !strings.Contains(snap.UserAgent, "HeadlessChrome") {
+		ua = snap.UserAgent
+	}
+	effConcurrency := max(*concurrency, *hostInFlight)
+	sender, policy, err := rf.sender(filepath.Join(dest, "sent.jsonl"), effConcurrency, ua, *target)
 	if err != nil {
 		return err
 	}
 	defer sender.Close()
 	o := verify.Options{Target: targetDir(*target), Role: *role, Drafts: drafts, Sender: sender, Policy: policy, InScope: in,
 		AllowWrite: *rf.allowWrite, IncludeDocs: *includeDocs, IncludeStrings: *includeStrings, IncludeSourceOnly: *includeSourceOnly,
-		Dir: dest, GateAfter: *gateAfter, Concurrency: *concurrency, Cloud: inputs.Intel.Cloud, IntelDir: dir, NoCloudProbe: *noCloudProbe}
-	_, o.Recorded = archive.CrawlHosts(*out, in)
+		Dir: dest, GateAfter: *gateAfter, Concurrency: effConcurrency, HostInFlight: *hostInFlight, Cloud: inputs.Intel.Cloud, IntelDir: dir, NoCloudProbe: *noCloudProbe}
+	o.Recorded = recorded
 	// The role's identity: its saved login's cookies, and the credential
 	// headers its traffic carried (Authorization, an API key), as replay
 	// takes them (POL-23-2). anon with no login sends none: a draft's

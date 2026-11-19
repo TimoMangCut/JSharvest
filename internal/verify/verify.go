@@ -70,9 +70,12 @@ type Options struct {
 	// to 1-segment parent canaries (0: unlimited — every prefix gets its own canary).
 	MaxPrefixes int
 	// Concurrency: hosts verified at once, each one request at a time
-	// (round 25K); the Sender's -rate stays the ceiling on all. 1 (or
-	// less): one host after another, in the order of probeOrder.
-	Concurrency  int
+	// unless HostInFlight > 1 (round 25K); the Sender's -rate stays the
+	// ceiling on all. 1 (or less): one host after another, in probeOrder.
+	Concurrency int
+	// HostInFlight: concurrent probes allowed on a single host when
+	// Concurrency > 1 (<= 1: strictly 1 request at a time per host).
+	HostInFlight int
 	Cloud        []endpoints.IntelURL // cloud storage URLs from intel.json
 	IntelDir     string               // role directory whose intel.json is updated when writable
 	NoCloudProbe bool                 // -no-cloud-probe: skip safe cloud ACL checks
@@ -110,6 +113,9 @@ type Canary struct {
 	Options *Sig   `json:"options,omitempty"`
 	Err     string `json:"error,omitempty"`
 	Drafts  int    `json:"drafts"`
+
+	ready   chan struct{}
+	optOnce sync.Once
 }
 
 // Report is verify.json.
@@ -142,7 +148,7 @@ type Report struct {
 func Run(ctx context.Context, o Options) (*Report, error) {
 	rep := &Report{Target: o.Target, Role: o.Role, DryRun: o.Sender.DryRun(), AllowWrite: o.AllowWrite, Started: time.Now().UTC(),
 		Verdicts: map[string]int{}, Tiers: map[string]int{}, Confidence: map[string]int{}}
-	v := &verifier{o: o, rep: rep, canaries: map[string]*Canary{}, htmlShells: map[string][]Sig{}, shellHosts: map[string]map[string]bool{}, perOrigin: map[string]int{}, gates: map[string]*gate{}, parents: map[string]int{}, hostPrefixes: map[string]int{}, hostMu: map[string]*sync.Mutex{}, specBases: map[string]*specBaseStat{}}
+	v := &verifier{o: o, rep: rep, canaries: map[string]*Canary{}, htmlShells: map[string][]Sig{}, shellHosts: map[string]map[string]bool{}, perOrigin: map[string]int{}, gates: map[string]*gate{}, parents: map[string]int{}, hostPrefixes: map[string]int{}, hostPools: map[string]*hostSlotPool{}, specBases: map[string]*specBaseStat{}}
 	// The hosts: those of the drafts in scope, nothing else.
 	hosts := map[string]bool{}
 	for _, d := range o.Drafts {
@@ -279,10 +285,86 @@ type verifier struct {
 	// found gated.
 	hostPrefixes map[string]int
 	// mu guards the maps every host's probes share (canaries, perOrigin,
-	// parents, gates, hostMu, specBases); hostMu holds a host for one probe at a time.
+	// parents, gates, hostPools, specBases).
 	mu        sync.Mutex
-	hostMu    map[string]*sync.Mutex
+	hostPools map[string]*hostSlotPool
 	specBases map[string]*specBaseStat
+}
+
+type hostSlotPool struct {
+	mu        sync.Mutex
+	limit     int
+	inFlight  int
+	throttled bool
+	wake      chan struct{}
+}
+
+func newHostSlotPool(limit int) *hostSlotPool {
+	if limit < 1 {
+		limit = 1
+	}
+	return &hostSlotPool{limit: limit, wake: make(chan struct{})}
+}
+
+func (p *hostSlotPool) acquire(ctx context.Context) (func(), bool) {
+	for {
+		p.mu.Lock()
+		lim := p.limit
+		if p.throttled || lim < 1 {
+			lim = 1
+		}
+		if p.inFlight < lim {
+			p.inFlight++
+			p.mu.Unlock()
+			return p.release, true
+		}
+		w := p.wake
+		p.mu.Unlock()
+		select {
+		case <-w:
+		case <-ctx.Done():
+			return nil, false
+		}
+	}
+}
+
+func (p *hostSlotPool) release() {
+	p.mu.Lock()
+	p.inFlight--
+	close(p.wake)
+	p.wake = make(chan struct{})
+	p.mu.Unlock()
+}
+
+func (p *hostSlotPool) stepDown() {
+	p.mu.Lock()
+	p.throttled = true
+	p.mu.Unlock()
+}
+
+func (v *verifier) hostMaxInFlight() int {
+	if v.o.Concurrency <= 1 || v.o.HostInFlight <= 1 {
+		return 1
+	}
+	return min(v.o.HostInFlight, v.o.Concurrency)
+}
+
+func (v *verifier) poolForHost(host string) *hostSlotPool {
+	v.mu.Lock()
+	p := v.hostPools[host]
+	if p == nil {
+		p = newHostSlotPool(v.hostMaxInFlight())
+		v.hostPools[host] = p
+	}
+	v.mu.Unlock()
+	return p
+}
+
+func (v *verifier) stepDownHost(host string) {
+	if host == "" || v.hostMaxInFlight() <= 1 {
+		return
+	}
+	v.poolForHost(host).stepDown()
 }
 
 const specBasePruneAfter = 16
@@ -343,29 +425,18 @@ var gateStatus = map[int]bool{400: true, 401: true, 403: true, 407: true, 412: t
 // prefix behind a login (/opaque) is that prefix's, not the host's.
 const gatePrefixes = 3
 
-// gateOf is a host's gate (made when make is set), under v.mu.
-func (v *verifier) gateOf(host string, make bool) *gate {
+func (v *verifier) hostGateWhy(host string) string {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	g := v.gates[host]
-	if g == nil && make {
-		g = &gate{}
-		v.gates[host] = g
+	if g := v.gates[host]; g != nil {
+		return g.why
 	}
-	return g
+	return ""
 }
 
-// lockHost holds a host for one probe; it returns the unlock.
-func (v *verifier) lockHost(host string) func() {
-	v.mu.Lock()
-	m := v.hostMu[host]
-	if m == nil {
-		m = &sync.Mutex{}
-		v.hostMu[host] = m
-	}
-	v.mu.Unlock()
-	m.Lock()
-	return m.Unlock
+// acquireHost holds one per-host slot (1 by default, up to -host-inflight).
+func (v *verifier) acquireHost(ctx context.Context, host string) (func(), bool) {
+	return v.poolForHost(host).acquire(ctx)
 }
 
 // noteGate counts a probe's answer toward its host's gate.
@@ -373,7 +444,13 @@ func (v *verifier) noteGate(host string, sig Sig, r *Result, asCanary bool) {
 	if v.o.GateAfter <= 0 {
 		return
 	}
-	g := v.gateOf(host, true)
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	g := v.gates[host]
+	if g == nil {
+		g = &gate{}
+		v.gates[host] = g
+	}
 	if g.broken || g.why != "" {
 		return
 	}
@@ -590,11 +667,15 @@ func (v *verifier) probe(ctx context.Context, d Draft, target string) Result {
 		r.Verdict, r.Reason = Skipped, err.Error()
 		return r
 	}
-	// One request at a time on a host (verify -concurrency): its gate,
-	// its canaries, its probes and their OPTIONS in turn.
-	defer v.lockHost(hostOf(target))()
-	if g := v.gateOf(hostOf(target), false); g != nil && g.why != "" {
-		r.Verdict, r.Reason = HostGated, g.why
+	// Bounded in-flight per host (1 by default, -host-inflight N when opted in).
+	unlock, ok := v.acquireHost(ctx, hostOf(target))
+	if !ok {
+		r.Verdict, r.Reason = Unreachable, ctx.Err().Error()
+		return r
+	}
+	defer unlock()
+	if why := v.hostGateWhy(hostOf(target)); why != "" {
+		r.Verdict, r.Reason = HostGated, why
 		return r
 	}
 	if why := v.o.Sender.BlockedHosts()[hostOf(target)]; why != "" {
@@ -682,6 +763,11 @@ func (v *verifier) judge(ctx context.Context, r *Result, d Draft, sig Sig, body 
 		r.Verdict, r.Reason = DeadOrFP, "answers as any path does (the canary)"
 	case st >= 200 && st < 300:
 		if sig.Shell != "" && strings.Contains(sig.Type, "html") {
+			if !v.matchesKnownHTMLShell(hostOf(target), sig) && v.hostMaxInFlight() > 1 {
+				if origin, _ := GatewayPrefix(target); origin != "" && c.Prefix != origin+"/" {
+					v.ensureRootCanary(ctx, d, origin)
+				}
+			}
 			if v.matchesKnownHTMLShell(hostOf(target), sig) {
 				if d.Confidence == "string" && d.Method == "" {
 					r.Verdict, r.Reason = ClientRoute, "bare string answered with a catch-all HTML shell"
@@ -748,7 +834,12 @@ func (v *verifier) send(ctx context.Context, raw []byte, target, purpose, item s
 		raw, _ = replay.Apply(raw, v.o.Identity, target, nil)
 	}
 	u, _ := url.Parse(target)
-	return v.o.Sender.Send(ctx, raw, u.Scheme, purpose, v.o.Role, item, nil)
+	h := hostOf(target)
+	return v.o.Sender.Send(ctx, raw, u.Scheme, purpose, v.o.Role, item, func(line *replay.Sent) {
+		if line.Status == 429 || (line.Block != nil && line.Block.Kind == replay.BlockRate) {
+			v.stepDownHost(h)
+		}
+	})
 }
 
 // GatewayPrefix is a URL's first fixed path segments, two at most and
@@ -802,12 +893,19 @@ func canaryHeaderKey(d Draft, bare bool) string {
 }
 
 // canary is the answer of the target's prefix to a path that cannot exist,
-// asked once.
+// asked once (with singleflight synchronization when -host-inflight > 1).
 func (v *verifier) canary(ctx context.Context, d Draft, target string) *Canary {
 	c, cu, key := v.canaryFor(d, target)
 	if cu == "" {
+		if c.ready != nil {
+			select {
+			case <-c.ready:
+			case <-ctx.Done():
+			}
+		}
 		return c
 	}
+	defer close(c.ready)
 	cd := Draft{ID: "canary", Method: "GET", Headers: d.Headers, SampleHeaders: d.SampleHeaders}
 	raw, err := cd.raw(cu, v.o.Identity == nil)
 	if err != nil {
@@ -816,6 +914,10 @@ func (v *verifier) canary(ctx context.Context, d Draft, target string) *Canary {
 	}
 	ans, err := v.send(ctx, raw, cu, "canary", key)
 	return v.canaryAnswer(c, ans, err)
+}
+
+func (v *verifier) ensureRootCanary(ctx context.Context, d Draft, origin string) {
+	_ = v.canary(ctx, d, origin+"/")
 }
 
 // canaryFor is the canary a target is judged against: one already asked
@@ -868,7 +970,7 @@ func (v *verifier) canaryFor(d Draft, target string) (c *Canary, cu, key string)
 	}
 	v.perOrigin[origin]++
 	cu = strings.TrimRight(origin+prefix, "/") + "/" + marker.Slug()
-	c = &Canary{Prefix: key, URL: cu, Drafts: 1}
+	c = &Canary{Prefix: key, URL: cu, Drafts: 1, ready: make(chan struct{})}
 	v.canaries[cacheKey(key)] = c
 	return c, cu, key
 }
@@ -988,13 +1090,20 @@ func (v *verifier) subCanary(ctx context.Context, d Draft, origin, subPrefix str
 	if c := v.canaries[ck]; c != nil {
 		c.Drafts++
 		v.mu.Unlock()
+		if c.ready != nil {
+			select {
+			case <-c.ready:
+			case <-ctx.Done():
+			}
+		}
 		return c
 	}
 	cu := strings.TrimRight(key, "/") + "/" + marker.Slug()
-	c := &Canary{Prefix: key, URL: cu, Drafts: 1}
+	c := &Canary{Prefix: key, URL: cu, Drafts: 1, ready: make(chan struct{})}
 	v.canaries[ck] = c
 	v.mu.Unlock()
 
+	defer close(c.ready)
 	cd := Draft{ID: "canary", Method: "GET", Headers: d.Headers, SampleHeaders: d.SampleHeaders}
 	raw, err := cd.raw(cu, v.o.Identity == nil)
 	if err != nil {
@@ -1030,15 +1139,20 @@ func (v *verifier) options(ctx context.Context, raw []byte, target, item string)
 }
 
 func (v *verifier) canaryOptions(ctx context.Context, d Draft, c *Canary) *Sig {
-	if c.Options != nil || c.Err != "" {
-		return c.Options
-	}
-	cd := Draft{ID: "canary", Method: "GET", Headers: d.Headers, SampleHeaders: d.SampleHeaders}
-	raw, err := cd.raw(c.URL, v.o.Identity == nil)
-	if err != nil {
+	if c == nil || c.Err != "" {
 		return nil
 	}
-	c.Options = v.options(ctx, raw, c.URL, c.Prefix)
+	c.optOnce.Do(func() {
+		if c.Options != nil {
+			return
+		}
+		cd := Draft{ID: "canary", Method: "GET", Headers: d.Headers, SampleHeaders: d.SampleHeaders}
+		raw, err := cd.raw(c.URL, v.o.Identity == nil)
+		if err != nil {
+			return
+		}
+		c.Options = v.options(ctx, raw, c.URL, c.Prefix)
+	})
 	return c.Options
 }
 
@@ -1170,6 +1284,42 @@ func hostOf(raw string) string {
 // candidates span hosts is the first one's, and holds each other host it
 // tries for its probe (lockHost).
 func (v *verifier) byHost(ctx context.Context, order []int, results []*Result) {
+	if v.hostMaxInFlight() > 1 {
+		var sendOrder []int
+		for _, i := range order {
+			if v.firstTarget(v.o.Drafts[i]) == "" {
+				r := v.one(ctx, v.o.Drafts[i])
+				results[i] = &r
+				continue
+			}
+			sendOrder = append(sendOrder, i)
+		}
+		if len(sendOrder) == 0 {
+			return
+		}
+		ch := make(chan int, len(sendOrder))
+		for _, i := range sendOrder {
+			ch <- i
+		}
+		close(ch)
+		var wg sync.WaitGroup
+		for range min(v.o.Concurrency, len(sendOrder)) {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for i := range ch {
+					if ctx.Err() != nil {
+						return
+					}
+					r := v.one(ctx, v.o.Drafts[i])
+					results[i] = &r
+				}
+			}()
+		}
+		wg.Wait()
+		return
+	}
+
 	queues := map[string][]int{}
 	var hosts []string
 	for _, i := range order {

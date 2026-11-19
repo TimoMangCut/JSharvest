@@ -62,6 +62,8 @@ func archiveRun(ctx context.Context, args []string) (*archive.Summary, error) {
 	proxy := fs.String("proxy", "", "send everything through this proxy: the archives and the live checks (default JSHARVEST_PROXY, HTTPS_PROXY, HTTP_PROXY; none: no proxy)")
 	hostRules := fs.String("host-resolver-rules", env("JSHARVEST_HOST_RESOLVER_RULES", ""), `Chrome host resolver rules for the live check, e.g. "MAP *.example.test 127.0.0.1" (env JSHARVEST_HOST_RESOLVER_RULES)`)
 	insecure := fs.Bool("insecure", false, "the live check accepts any TLS certificate (a self-signed lab target)")
+	listOnly := fs.Bool("list-only", false, "stage 1 internal: list public archive indexes only without live checks or memento fetches")
+	stage2 := fs.Bool("stage2", false, "stage 2 internal: resume after in-process stage 1 listing (delta extra hosts + fetch/history)")
 	waitLock := waitLockFlag(fs)
 	fs.Parse(args)
 	given := map[string]bool{}
@@ -107,8 +109,9 @@ func archiveRun(ctx context.Context, args []string) (*archive.Summary, error) {
 		return nil, err
 	}
 	defer unlock()
-	o := archive.Options{Dir: dir, Root: *out, Host: hostOnly(*target), InScope: in, Since: from, Live: *live, MaxFiles: *maxFiles, MaxPages: *maxPages, MaxHTML: *maxHTML,
+	o := archive.Options{Dir: dir, Root: *out, Host: hostOnly(*target), InScope: in, Since: from, Live: *live && !*listOnly, MaxFiles: *maxFiles, MaxPages: *maxPages, MaxHTML: *maxHTML,
 		Vendor: *vendor, MaxBody: 32 << 20, Workers: *concurrency, Sources: strings.Split(*sources, ","),
+		ListOnly: *listOnly, Stage2: *stage2, DisablePrefetch: *listOnly,
 		Log: func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) }}
 
 	// Patient budgets (EDGI's client keeps under 0.4/s for the CDX server
@@ -178,16 +181,16 @@ func archiveRun(ctx context.Context, args []string) (*archive.Summary, error) {
 	if collapseVal == "none" || (!shardedWB && !given["collapse"]) {
 		collapseVal = ""
 	}
-	wbIndexGap := gap(2 * time.Second)
-	if shardedWB {
-		wbIndexGap = gap(800 * time.Millisecond)
-	}
+	// Keep CDX index pacing <= 24 req/min (2.5s gap = 80% of Internet Archive's
+	// ~30 req/min hard CDX limit), with AIMD expansion up to 10s on 429/503.
+	wbIndexGap := gap(2500 * time.Millisecond)
+	wbIndexMaxGap := gap(10 * time.Second)
 	wbFilesGap := gap(time.Second)
 	if *concurrency > 1 {
 		wbFilesGap = gap(300 * time.Millisecond)
 	}
 	o.Wayback = &archive.Wayback{Base: wbBase, Client: wbFilesClient, IndexClient: wbIndexClient,
-		Index: &archive.Budget{Gap: wbIndexGap}, Files: &archive.Budget{Gap: wbFilesGap},
+		Index: &archive.Budget{Gap: wbIndexGap, MaxGap: wbIndexMaxGap}, Files: &archive.Budget{Gap: wbFilesGap, MaxGap: gap(5 * time.Second)},
 		PageSize: *pageSize, Collapse: collapseVal, Sharded: shardedWB}
 
 	otxClient := archive.NewClientSafe(proxyURL, hostRuleSet, services)
@@ -215,48 +218,53 @@ func archiveRun(ctx context.Context, args []string) (*archive.Summary, error) {
 	o.URLScan = &archive.URLScan{Base: usBase, Key: os.Getenv("URLSCAN_API_KEY"), Client: usClient,
 		Budget: &archive.Budget{Gap: gap(2 * time.Second)}, Pages: 10, Results: 10}
 
-	if *scopeMode == "rdn" {
-		// The other hosts the crawls reached: OTX and urlscan are asked of
-		// them too (MAX-06).
-		crawled, _ := archive.CrawlHosts(*out, in)
-		seen := map[string]bool{hostOnly(*target): true}
-		for h := range crawled {
-			if h = hostOnly(h); !seen[h] {
-				seen[h] = true
-				o.ExtraHosts = append(o.ExtraHosts, h)
+	if !*listOnly && (*scopeMode == "rdn" || o.Live) {
+		crawled, recorded, ua := archive.CrawlHostsWithUA(*out, hostOnly(*target), "", in)
+		if *scopeMode == "rdn" {
+			// The other hosts the crawls reached: OTX and urlscan are asked of
+			// them too (MAX-06).
+			seen := map[string]bool{hostOnly(*target): true}
+			for h := range crawled {
+				if h = hostOnly(h); !seen[h] {
+					seen[h] = true
+					o.ExtraHosts = append(o.ExtraHosts, h)
+				}
 			}
+			sort.Strings(o.ExtraHosts)
 		}
-		sort.Strings(o.ExtraHosts)
-	}
-	if *live {
-		hosts, recorded := archive.CrawlHosts(*out, in)
-		if *liveHosts != "" {
-			hosts = map[string]bool{}
-			for _, h := range strings.Split(*liveHosts, ",") {
-				hosts[strings.TrimSpace(h)] = true
+		if o.Live {
+			hosts := crawled
+			if *liveHosts != "" {
+				hosts = map[string]bool{}
+				for _, h := range strings.Split(*liveHosts, ",") {
+					hosts[strings.TrimSpace(h)] = true
+				}
+			} else {
+				// The target itself, crawled or not (ARC-01): the operator named
+				// it. An old subdomain is asked only once a crawl reached it: it
+				// may point at someone else's service now.
+				if len(hosts) == 0 {
+					fmt.Fprintln(os.Stderr, "note: no crawl of the target yet: the live check asks the target's own host only (-live-hosts to name more)")
+				}
+				hosts[liveHost(*target)] = true
+				hosts[hostOnly(*target)] = true
 			}
-		} else {
-			// The target itself, crawled or not (ARC-01): the operator named
-			// it. An old subdomain is asked only once a crawl reached it: it
-			// may point at someone else's service now.
-			if len(hosts) == 0 {
-				fmt.Fprintln(os.Stderr, "note: no crawl of the target yet: the live check asks the target's own host only (-live-hosts to name more)")
+			so := replay.SenderOptions{Hosts: hosts, Recorded: recorded, Max: 10 * *maxFiles, Concurrency: *concurrency, Rate: time.Duration(float64(time.Second) / *liveRate),
+				Log: filepath.Join(dir, "live-checks.jsonl"), Insecure: *insecure,
+				UserAgent: ua}
+			so.Proxy, so.HostRules = proxyURL, hostRuleSet
+			so.AllowPrivate = netsafe.InternalTargetVia(ctx, liveHost(*target), so.HostRules, nil, proxyURL != nil)
+			if o.Sender, err = replay.NewSender(so); err != nil {
+				return nil, err
 			}
-			hosts[liveHost(*target)] = true
-			hosts[hostOnly(*target)] = true
+			defer o.Sender.Close()
+			o.LiveHosts = hosts
 		}
-		so := replay.SenderOptions{Hosts: hosts, Recorded: recorded, Max: 10 * *maxFiles, Concurrency: *concurrency, Rate: time.Duration(float64(time.Second) / *liveRate),
-			Log: filepath.Join(dir, "live-checks.jsonl"), Insecure: *insecure,
-			UserAgent: observedUA(filepath.Join(root, "*"), filepath.Join(*out, hostOnly(*target)+"_*", "*"))}
-		so.Proxy, so.HostRules = proxyURL, hostRuleSet
-		so.AllowPrivate = netsafe.InternalTargetVia(ctx, liveHost(*target), so.HostRules, nil, proxyURL != nil)
-		if o.Sender, err = replay.NewSender(so); err != nil {
-			return nil, err
-		}
-		defer o.Sender.Close()
-		o.LiveHosts = hosts
 	}
 	sum, err := archive.Run(ctx, o)
+	if *listOnly {
+		return sum, err
+	}
 	if sum != nil {
 		var listed []string
 		for k, v := range sum.Listed {

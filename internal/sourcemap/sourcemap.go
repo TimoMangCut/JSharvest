@@ -23,8 +23,18 @@ var sourceMappingURLRe = regexp.MustCompile(`(?m)(?://|/\*)[#@]\s*sourceMappingU
 type Ref struct {
 	URL    string // absolute; empty for an inline map
 	Inline []byte // a data: URI's map
+	// RelRef is the normalized script-relative map reference (e.g. "app.js.map"
+	// or ".map" for a guess); empty when the map URL is root-anchored or absolute.
+	RelRef string
 	// Guess: no header or comment names it; <script>.map is a guess.
 	Guess bool
+}
+
+func relativeMapToken(raw string) string {
+	if raw == "" || strings.Contains(raw, "://") || strings.HasPrefix(raw, "//") || strings.HasPrefix(raw, "/") {
+		return ""
+	}
+	return path.Clean(raw)
 }
 
 // Find returns where a script's map is: the SourceMap (or X-SourceMap)
@@ -48,7 +58,7 @@ func Find(scriptURL string, headers map[string]string, body []byte, guess bool) 
 			return Ref{}, false
 		}
 		u.Fragment = ""
-		return Ref{URL: u.String()}, true
+		return Ref{URL: u.String(), RelRef: relativeMapToken(ref)}, true
 	}
 	for _, k := range []string{"sourcemap", "x-sourcemap"} {
 		if v := headers[k]; v != "" {
@@ -67,7 +77,7 @@ func Find(scriptURL string, headers map[string]string, body []byte, guess bool) 
 		u := *base
 		u.Path += ".map"
 		u.RawPath, u.RawQuery, u.Fragment = "", "", ""
-		return Ref{URL: u.String(), Guess: true}, true
+		return Ref{URL: u.String(), RelRef: ".map", Guess: true}, true
 	}
 	return Ref{}, false
 }
@@ -149,6 +159,33 @@ func Parse(b []byte) (*Map, error) {
 		return nil, ErrNotMap
 	}
 	return &m, nil
+}
+
+// CompleteSourcesContent reports whether m embeds non-empty sourcesContent for
+// every source file it lists. A production map with stripped sourcesContent
+// returns false so cross-host map deduplication does not shadow a staging copy
+// that still carries full sourcesContent.
+func (m *Map) CompleteSourcesContent() bool {
+	if m == nil || len(m.Sources) == 0 || len(m.SourcesContent) < len(m.Sources) {
+		return false
+	}
+	for i := range m.Sources {
+		if m.SourcesContent[i] == nil || *m.SourcesContent[i] == "" {
+			return false
+		}
+	}
+	return true
+}
+
+// LibraryClassKey returns the URL-derived standalone-library classification
+// inputs used by FilesFor(scriptURL) so content-addressed map caching only
+// shares filtered OwnFiles between scripts with identical library semantics.
+func LibraryClassKey(scriptURL string) string {
+	isLib, stem := standaloneLibraryInfo(scriptURL)
+	if isLib {
+		return "1|" + stem
+	}
+	return "0|" + stem
 }
 
 // File is one original source a map carries.
