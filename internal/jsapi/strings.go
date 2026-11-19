@@ -40,6 +40,20 @@ func (x *extractor) add(u js.IExpr, ep Endpoint, at js.INode, lv level) string {
 			ep.NoInheritBase, ep.Collector = true, true
 		}
 	}
+	var uCRef *ConstRef
+	var uCSfx string
+	uCRefChecked := false
+	resolveCRef := func() (*ConstRef, string) {
+		if !uCRefChecked {
+			uCRefChecked = true
+			if ep.Method != "" && ep.Kind != "navigation" && ep.Kind != "route" && ep.Kind != "string" {
+				if cref, csfx, ok := x.extractArgConstRef(u); ok {
+					uCRef, uCSfx = cref, csfx
+				}
+			}
+		}
+		return uCRef, uCSfx
+	}
 	for _, t := range vals {
 		// Each value is found by its own literals: r = "/a"; c && (r =
 		// "/b") gives two, each at its place.
@@ -55,16 +69,22 @@ func (x *extractor) add(u js.IExpr, ep Endpoint, at js.INode, lv level) string {
 			}
 			continue
 		}
-		for _, t := range x.prefixed(t) {
+		for _, pt := range x.prefixed(t) {
 			e := ep
 			e.Query, e.Operations = slices.Clone(ep.Query), slices.Clone(ep.Operations)
-			if strings.Contains(t, deferOpen) {
-				if key := x.addDeferred(t, e, q, at, lv); key != "" && first == "" {
+			if strings.Contains(pt, deferOpen) {
+				if key := x.addDeferred(pt, e, q, at, lv); key != "" && first == "" {
 					first = key
 				}
 				continue
 			}
-			if key := x.addOne(cleanURL(t), e, q, at, lv); key != "" && first == "" {
+			ct := cleanURL(pt)
+			if len(vals) == 1 && len(x.pre) == 0 && strings.HasPrefix(ct, unknown) {
+				if cref, csfx := resolveCRef(); cref != nil {
+					e.ConstRef, e.ConstSuffix = cref, csfx
+				}
+			}
+			if key := x.addOne(ct, e, q, at, lv); key != "" && first == "" {
 				first = key
 			}
 		}
@@ -74,15 +94,16 @@ func (x *extractor) add(u js.IExpr, ep Endpoint, at js.INode, lv level) string {
 }
 
 func (x *extractor) addOne(t string, ep Endpoint, q []string, at js.INode, lv level) string {
-	if !looksLikePath(t, lv) || devToolPath(t) {
+	allowSymBare := ep.ConstRef != nil && (t == unknown || strings.HasPrefix(t, unknown+"?"))
+	if (!allowSymBare && !looksLikePath(t, lv)) || devToolPath(t) {
 		return ""
 	}
 	path, query, _ := strings.Cut(t, "?")
 	ep.URL = path
 	ep.Query = append(ep.Query, q...)
-	if staticJSONRe.MatchString(path) && !specNameRe.MatchString(path) {
-		// `${e}/app-config.json`: a file under a URL the caller gives,
-		// not under the app's API base.
+	if (staticJSONRe.MatchString(path) || (!strings.Contains(path, unknown) && webrootStaticJSONRe.MatchString(path))) && !specNameRe.MatchString(path) {
+		// `${e}/app-config.json` or `assets/i18n/tr.json`: a static file
+		// served from the page's own webroot, not under an API gateway base.
 		ep.NoInheritBase = true
 	}
 	if c, ok := at.(*js.CallExpr); ok {
@@ -93,7 +114,7 @@ func (x *extractor) addOne(t string, ep Endpoint, q []string, at js.INode, lv le
 			ep.Query = append(ep.Query, k)
 		}
 	}
-	if ep.Kind == "client" && !strings.Contains(path, "://") && !strings.HasPrefix(path, "//") && !x.ownPrefix(x.pre, path) {
+	if ep.Kind == "client" && !ep.NoInheritBase && !strings.Contains(path, "://") && !strings.HasPrefix(path, "//") && !x.ownPrefix(x.pre, path) {
 		ep.Client = true
 		if c, ok := at.(*js.CallExpr); ok {
 			if d, ok := unwrapEnumGroup(c.X).(*js.DotExpr); ok {
@@ -132,6 +153,9 @@ func (x *extractor) addOne(t string, ep Endpoint, q []string, at js.INode, lv le
 		}
 	}
 	key := ep.Method + " " + ep.URL + " " + ep.Kind
+	if ep.ConstRef != nil {
+		key += " @" + ep.ConstRef.Module + ":" + ep.ConstRef.Export + ":" + ep.ConstRef.Key + ep.ConstSuffix
+	}
 	x.producers[key] = append(x.producers[key], at)
 	if x.made != nil {
 		*x.made = append(*x.made, key)

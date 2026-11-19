@@ -538,6 +538,9 @@ func (x *extractor) imported(callee js.IExpr) (string, string, bool) {
 	if !ok {
 		return "", "", false
 	}
+	if mod, wok := x.wpRequireModID(d.X, 0); wok && mod != "" && propName(d.Y) != "" {
+		return mod, propName(d.Y), true
+	}
 	h, ok := d.X.(*js.Var)
 	if !ok {
 		return "", "", false
@@ -1603,10 +1606,15 @@ func (x *extractor) indexWebpackModuleObject(obj *js.ObjectExpr) {
 	confirmed := false
 	for i := range obj.List {
 		p := &obj.List[i]
-		if p.Spread || p.Name == nil || p.Value == nil {
+		if p.Spread || p.Value == nil {
 			continue
 		}
-		modID := propKey(p)
+		modID := ""
+		if p.Name != nil {
+			modID = propKey(p)
+		} else if md, isMD := p.Value.(*js.MethodDecl); isMD {
+			modID = memberName(&md.Name)
+		}
 		if modID == "" {
 			continue
 		}
@@ -2130,8 +2138,25 @@ func (x *extractor) importedCall(callee js.IExpr, curCls *js.ClassDecl) (string,
 	return "", "", false
 }
 
+func joinConstSuffix(pfx, sfx string) string {
+	if pfx == "" {
+		return sfx
+	}
+	if sfx == "" {
+		return pfx
+	}
+	if strings.HasSuffix(pfx, "/") && strings.HasPrefix(sfx, "/") {
+		return pfx + strings.TrimPrefix(sfx, "/")
+	}
+	return pfx + sfx
+}
+
 func (x *extractor) extractArgConstRef(a js.IExpr) (*ConstRef, string, bool) {
-	if a == nil {
+	return x.extractArgConstRefAt(a, 0)
+}
+
+func (x *extractor) extractArgConstRefAt(a js.IExpr, depth int) (*ConstRef, string, bool) {
+	if a == nil || depth > 6 {
 		return nil, "", false
 	}
 	a = ungroup(a)
@@ -2150,9 +2175,24 @@ func (x *extractor) extractArgConstRef(a js.IExpr) (*ConstRef, string, bool) {
 		return cleanURL(vals[0]), true
 	}
 	switch n := a.(type) {
+	case *js.Var:
+		if c := x.constOrSingleExpr(root(n)); c != nil && c != a {
+			return x.extractArgConstRefAt(c, depth+1)
+		}
+	case *js.DotExpr:
+		if x.isThis(n.X) {
+			if curCls := x.selfClass(); curCls != nil {
+				if fs := x.classField(x.lookupClass(curCls, n.Y), propName(n.Y)); len(fs) == 1 && fs[0] != a {
+					return x.extractArgConstRefAt(fs[0], depth+1)
+				}
+			}
+		}
+		if prop, ok := x.memberN(n, depth+1); ok && prop != a {
+			return x.extractArgConstRefAt(prop, depth+1)
+		}
 	case *js.TemplateExpr:
 		if n.Tag == nil && len(n.List) >= 1 && templateText(n.List[0].Value, true, false) == "" {
-			if cref, ok := x.extractConstRef(n.List[0].Expr); ok {
+			if cref, pfx, ok := x.extractArgConstRefAt(n.List[0].Expr, depth+1); ok {
 				sfx := ""
 				for j := 1; j < len(n.List); j++ {
 					sfx += templateText(n.List[j].Value, false, false)
@@ -2163,7 +2203,7 @@ func (x *extractor) extractArgConstRef(a js.IExpr) (*ConstRef, string, bool) {
 					sfx += part
 				}
 				sfx += templateText(n.Tail, false, true)
-				return cref, cleanURL(sfx), true
+				return cref, joinConstSuffix(pfx, cleanURL(sfx)), true
 			}
 		}
 	case *js.BinaryExpr:
@@ -2178,7 +2218,7 @@ func (x *extractor) extractArgConstRef(a js.IExpr) (*ConstRef, string, bool) {
 				rhsTerms = append(rhsTerms, be.Y)
 				cur = be.X
 			}
-			if cref, ok := x.extractConstRef(cur); ok && len(rhsTerms) > 0 {
+			if cref, pfx, ok := x.extractArgConstRefAt(cur, depth+1); ok && len(rhsTerms) > 0 {
 				sfx := ""
 				for i := len(rhsTerms) - 1; i >= 0; i-- {
 					part, pok := evalTail(rhsTerms[i])
@@ -2187,7 +2227,7 @@ func (x *extractor) extractArgConstRef(a js.IExpr) (*ConstRef, string, bool) {
 					}
 					sfx += part
 				}
-				return cref, cleanURL(sfx), true
+				return cref, joinConstSuffix(pfx, cleanURL(sfx)), true
 			}
 		}
 	}

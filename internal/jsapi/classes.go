@@ -413,6 +413,21 @@ func (x *extractor) classOfExprAt(e js.IExpr, depth int) *js.ClassDecl {
 		if k := x.constOrSingleExpr(n); k != nil && k != e {
 			return x.classOfExprAt(k, depth+1)
 		}
+	case *js.DotExpr:
+		if m, ok := x.wpMember(n, depth+1); ok && m != e {
+			return x.classOfExprAt(m, depth+1)
+		}
+		if obj, ok := x.objectN(n.X, depth+1); ok && obj != nil {
+			if pv := objectValue(obj, propName(n.Y)); pv != nil && pv != e {
+				return x.classOfExprAt(pv, depth+1)
+			}
+		}
+	case *js.BinaryExpr:
+		if n.Op == js.OrToken {
+			if c := x.classOfExprAt(n.Y, depth+1); c != nil {
+				return c
+			}
+		}
 	case *js.CallExpr:
 		if len(n.Args.List) == 0 {
 			if _, body, ok := fnParts(n.X); ok && body != nil {
@@ -748,6 +763,11 @@ func (x *extractor) instanceSites(c *js.ClassDecl) []instanceSite {
 				as = args(ne.Args)
 			}
 			out = append(out, instanceSite{k, as})
+		}
+		if len(x.newSites[k]) == 0 && k != c {
+			if info := x.classes[k]; info != nil && info.hasSuper && len(info.superArgs) > 0 && len(out) < maxInstanceSites*4 {
+				out = append(out, instanceSite{k, nil})
+			}
 		}
 		for _, sub := range x.subclasses[k] {
 			walk(sub, depth+1)

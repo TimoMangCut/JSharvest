@@ -9,6 +9,7 @@ import (
 
 type constSlot struct {
 	val     string
+	defIdx  int
 	clashed bool
 }
 
@@ -81,6 +82,9 @@ func isValidLinkedAuthzToken(s string) bool {
 func isValidLinkedRouteToken(s string) bool {
 	s = strings.TrimSpace(s)
 	if len(s) == 0 || len(s) > 128 {
+		return false
+	}
+	if strings.HasPrefix(s, jsapi.SymConstPrefix) || strings.Contains(s, "://") || strings.HasPrefix(s, "/") {
 		return false
 	}
 	return !strings.ContainsAny(s, " \t\r\n<>\"'`\\{}")
@@ -238,13 +242,29 @@ func resolveScriptAuthzConsts(scripts []Script) map[int]*resolvedScriptAuthz {
 		return resolved, resolved != ""
 	}
 
-	lookup := func(s *Script, ref *jsapi.ConstRef) (string, bool) {
-		if ref == nil {
+	var lookupAt func(s *Script, ref *jsapi.ConstRef, depth int) (string, bool)
+	expandAuthzSym := func(s *Script, raw string, depth int) (string, bool) {
+		subMod, subExp, subKey, rest, ok := jsapi.DecodeSymConstPrefix(raw)
+		if !ok {
+			return raw, true
+		}
+		pfx, pok := lookupAt(s, &jsapi.ConstRef{Module: subMod, Export: subExp, Key: subKey}, depth+1)
+		if !pok {
+			return "", false
+		}
+		return pfx + rest, true
+	}
+	lookupAt = func(s *Script, ref *jsapi.ConstRef, depth int) (string, bool) {
+		if ref == nil || depth > 6 {
 			return "", false
 		}
 		if strings.HasPrefix(ref.Module, "./") || strings.HasPrefix(ref.Module, "../") || strings.HasPrefix(ref.Module, "/") {
 			if len(s.URLs) == 0 {
-				return lookupInScope("esm:", "", ref.Export, ref.Key)
+				v, ok := lookupInScope("esm:", "", ref.Export, ref.Key)
+				if !ok {
+					return "", false
+				}
+				return expandAuthzSym(s, v, depth)
 			}
 			var resolved string
 			for _, rawU := range s.URLs {
@@ -257,6 +277,10 @@ func resolveScriptAuthzConsts(scripts []Script) map[int]*resolvedScriptAuthz {
 					continue
 				}
 				v, ok := lookupESM(normalizeESMURL(rel.String()), ref.Export, ref.Key, 0)
+				if !ok {
+					continue
+				}
+				v, ok = expandAuthzSym(s, v, depth)
 				if !ok {
 					continue
 				}
@@ -275,12 +299,19 @@ func resolveScriptAuthzConsts(scripts []Script) map[int]*resolvedScriptAuthz {
 			if !ok {
 				continue
 			}
+			v, ok = expandAuthzSym(s, v, depth)
+			if !ok {
+				continue
+			}
 			if resolved != "" && resolved != v {
 				return "", false
 			}
 			resolved = v
 		}
 		return resolved, resolved != ""
+	}
+	lookup := func(s *Script, ref *jsapi.ConstRef) (string, bool) {
+		return lookupAt(s, ref, 0)
 	}
 
 	out := map[int]*resolvedScriptAuthz{}

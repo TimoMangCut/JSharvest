@@ -205,6 +205,13 @@ func (x *extractor) eval(e js.IExpr, q *[]string, depth int) []string {
 		if baseSlashGlobal(n) {
 			return []string{"{origin}/"}
 		}
+		if x.symConstMode {
+			if cref, ok := x.extractConstRef(n); ok {
+				if tok := EncodeSymConst(cref); tok != "" {
+					return []string{tok}
+				}
+			}
+		}
 	case *js.IndexExpr:
 		if ev := x.enumVar(n.X, 0); ev != nil {
 			m := x.enumProps[ev]
@@ -887,6 +894,20 @@ func (x *extractor) evalCall(c *js.CallExpr, q *[]string, depth int) []string {
 			out, isQuery = []string{""}, true
 		}
 	}
+	if q != nil && len(out) > 0 {
+		hasQMark := false
+		for _, s := range out {
+			if strings.Contains(s, "?") {
+				hasQMark = true
+				break
+			}
+		}
+		if hasQMark {
+			if lks := x.localQueryKeys(key, params, body); len(lks) > 0 {
+				*q = append(*q, lks...)
+			}
+		}
+	}
 	if ownPath(out) {
 		if viaMethod {
 			known = true
@@ -946,6 +967,94 @@ func (x *extractor) queryParam(v *js.Var, params js.Params, body *js.BlockStmt) 
 	}
 	x.qparams[v] = found
 	return found
+}
+
+// localQueryKeys extracts static query parameter names built into a local
+// object inside a URL-builder helper (`const D = {sort, size, page};
+// t && (D.projection = t); return P + "?" + Object.keys(D).map(...)`).
+func (x *extractor) localQueryKeys(fnKey any, params js.Params, body *js.BlockStmt) []string {
+	if fnKey != nil && x.localQDone[fnKey] {
+		return x.localQKeys[fnKey]
+	}
+	if fnKey != nil {
+		x.localQDone[fnKey] = true
+	}
+	if body == nil {
+		return nil
+	}
+	isParam := map[*js.Var]bool{}
+	for _, b := range params.List {
+		if p, ok := b.Binding.(*js.Var); ok {
+			isParam[root(p)] = true
+		}
+	}
+	qObjs := map[*js.Var]bool{}
+	noteObj := func(e js.IExpr) {
+		if v, ok := ungroup(e).(*js.Var); ok {
+			rv := root(v)
+			if !isParam[rv] {
+				qObjs[rv] = true
+			}
+		}
+	}
+	js.Walk(walker(func(n js.INode) {
+		switch n := n.(type) {
+		case *js.CallExpr:
+			if d, ok := n.X.(*js.DotExpr); ok && isGlobal(d.X, "Object") && len(n.Args.List) > 0 {
+				if p := propName(d.Y); p == "entries" || p == "keys" {
+					noteObj(n.Args.List[0].Value)
+				}
+			}
+		case *js.NewExpr:
+			if globalName(n.X) == "URLSearchParams" && n.Args != nil && len(n.Args.List) > 0 {
+				noteObj(n.Args.List[0].Value)
+			}
+		case *js.ForInStmt:
+			noteObj(n.Value)
+		}
+	}), body)
+	if len(qObjs) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	addKey := func(k string) {
+		if isQueryKey(k) {
+			seen[k] = true
+		}
+	}
+	for ov := range qObjs {
+		for _, def := range x.defs[ov] {
+			if obj, ok := ungroup(def).(*js.ObjectExpr); ok && len(obj.List) <= 32 {
+				for i := range obj.List {
+					p := &obj.List[i]
+					if !p.Spread && p.Name != nil {
+						addKey(propKey(p))
+					}
+				}
+			}
+		}
+	}
+	js.Walk(walker(func(n js.INode) {
+		b, ok := n.(*js.BinaryExpr)
+		if !ok || b.Op != js.EqToken {
+			return
+		}
+		d, ok := ungroup(b.X).(*js.DotExpr)
+		if !ok {
+			return
+		}
+		if v, ok := ungroup(d.X).(*js.Var); ok && qObjs[root(v)] {
+			addKey(propName(d.Y))
+		}
+	}), body)
+	if len(seen) == 0 {
+		return nil
+	}
+	out := sortedKeys(seen)
+	if fnKey != nil {
+		x.localQKeys[fnKey] = out
+	}
+	return out
 }
 
 func nonEmpty(vals []string) []string {
@@ -1472,7 +1581,7 @@ func (x *extractor) memberN(d *js.DotExpr, depth int) (js.IExpr, bool) {
 			return v, true
 		}
 	}
-	if cls := x.classOfExpr(d.X); cls != nil {
+	if cls := x.classOfExprAt(d.X, depth+1); cls != nil {
 		if v, ok := x.classStaticField(cls, propName(d.Y)); ok {
 			return v, true
 		}

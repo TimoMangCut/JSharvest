@@ -388,7 +388,11 @@ func SemanticAPISig(r jsapi.Result) (sig [32]byte, empty bool) {
 		if e.Collector {
 			continue
 		}
-		parts = append(parts, "ep:"+e.Method+"|"+e.Kind+"|"+e.Base+"|"+e.URL+"|"+strings.Join(e.Query, ",")+"|"+strings.Join(e.Body, ",")+"|"+strings.Join(e.Headers, ",")+"|"+strings.Join(e.Operations, ","))
+		crefTag := ""
+		if e.ConstRef != nil {
+			crefTag = "|" + e.ConstRef.Module + ":" + e.ConstRef.Export + ":" + e.ConstRef.Key + ":" + e.ConstSuffix
+		}
+		parts = append(parts, "ep:"+e.Method+"|"+e.Kind+"|"+e.Base+"|"+e.URL+"|"+strings.Join(e.Query, ",")+"|"+strings.Join(e.Body, ",")+"|"+strings.Join(e.Headers, ",")+"|"+strings.Join(e.Operations, ",")+crefTag)
 	}
 	for _, b := range r.Bases {
 		parts = append(parts, "b:"+b)

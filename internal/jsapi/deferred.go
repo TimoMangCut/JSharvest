@@ -10,6 +10,7 @@ package jsapi
 // arguments given (EvalBuilder) and puts the values in place.
 
 import (
+	"sort"
 	"strconv"
 	"strings"
 
@@ -20,9 +21,11 @@ import (
 // Builder is a function a module exports that makes a URL of what it is
 // given.
 type Builder struct {
-	Name   string `json:"name"`
-	Local  string `json:"local,omitempty"`
-	Params int    `json:"params"`
+	Module string   `json:"module,omitempty"`
+	Name   string   `json:"name"`
+	Local  string   `json:"local,omitempty"`
+	Params int      `json:"params"`
+	Query  []string `json:"query,omitempty"`
 }
 
 // Deferred is a request whose URL calls a function another module
@@ -80,11 +83,94 @@ func (x *extractor) noteBuilder(name, local string, v *js.Var) {
 	if len(rets) == 0 || len(rets) > maxReturns || !writesPath(rets) {
 		return
 	}
-	b := Builder{Name: name, Params: len(params.List)}
+	b := Builder{Name: name, Params: len(params.List), Query: x.localQueryKeys(v, params, body)}
 	if local != name {
 		b.Local = local
 	}
 	x.builders = append(x.builders, b)
+}
+
+func (x *extractor) hasLocalWPExport(mod, name string) bool {
+	if mod == "" || name == "" {
+		return false
+	}
+	if em := x.wpModExports[mod]; em != nil && em[name] != nil {
+		return true
+	}
+	if (name == "*" || name == "default" || name == "a") && x.wpModDefault[mod] != nil {
+		return true
+	}
+	return false
+}
+
+// returnsParamURLWithQuery reports whether a helper returns one of its parameters
+// (optionally normalized via .replace) concatenated with "?" + query string.
+func returnsParamURLWithQuery(params js.Params, rets []js.IExpr, x *extractor) bool {
+	if len(params.List) == 0 || len(rets) == 0 {
+		return false
+	}
+	hasQMark := false
+	for _, r := range rets {
+		js.Walk(mentionVisitor{func(n js.INode) {
+			if l, ok := n.(*js.LiteralExpr); ok {
+				if s, sok := literalString(l); sok && strings.HasPrefix(s, "?") {
+					hasQMark = true
+				}
+			}
+		}}, r)
+	}
+	if !hasQMark {
+		return false
+	}
+	pIdx, _ := x.paramOrigin(params, rets[0], 0)
+	return pIdx >= 0
+}
+
+func (x *extractor) noteWebpackBuilders() {
+	if len(x.wpModExports) == 0 {
+		return
+	}
+	mods := make([]string, 0, len(x.wpModExports))
+	for m := range x.wpModExports {
+		mods = append(mods, m)
+	}
+	sort.Strings(mods)
+	for _, mod := range mods {
+		em := x.wpModExports[mod]
+		names := make([]string, 0, len(em))
+		for n := range em {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			target := ungroup(em[name])
+			var fnKey any = target
+			var params js.Params
+			var body *js.BlockStmt
+			var ok bool
+			if fv, isVar := target.(*js.Var); isVar {
+				fnKey, params, body, ok = x.fnOf(fv)
+			} else {
+				params, body, ok = fnParts(target)
+			}
+			if !ok || body == nil || params.Rest != nil || len(params.List) == 0 || len(params.List) > maxBuilderParams {
+				continue
+			}
+			rets := returnsOf(body)
+			if len(rets) == 0 || len(rets) > maxReturns {
+				continue
+			}
+			if !writesPath(rets) && !returnsParamURLWithQuery(params, rets, x) {
+				continue
+			}
+			x.builders = append(x.builders, Builder{
+				Module: mod,
+				Name:   name,
+				Params: len(params.List),
+				Query:  x.localQueryKeys(fnKey, params, body),
+			})
+		}
+	}
 }
 
 // writesPath reports whether returns write a path of their own: a string or
@@ -123,7 +209,7 @@ func writesPath(rets []js.IExpr) bool {
 // value is a marker the catalog replaces.
 func (x *extractor) deferImported(c *js.CallExpr, depth int) ([]string, bool) {
 	mod, name, ok := x.imported(c.X)
-	if !ok || mod == "" || name == "" || len(x.deferCalls) >= 256 {
+	if !ok || mod == "" || name == "" || len(x.deferCalls) >= 256 || x.hasLocalWPExport(mod, name) {
 		return nil, false
 	}
 	x.deferring = false
@@ -210,17 +296,37 @@ func PrepareModule(src []byte) *Module {
 // arguments' values, so that its tests (e in table, startsWith, substring)
 // see one value each.
 func (m *Module) EvalBuilder(name string, args [][]string) (out []string) {
+	return m.EvalBuilderFor("", name, args)
+}
+
+// EvalBuilderFor evaluates an exported builder function by bundler module ID
+// (when module != "") or ES module export name (when module == "").
+func (m *Module) EvalBuilderFor(module, name string, args [][]string) (out []string) {
 	x := m.x
 	defer func() {
 		if r := recover(); r != nil {
 			out = nil
 		}
 	}()
-	v := x.exportVars[name]
-	if v == nil {
-		return nil
+	var params js.Params
+	var body *js.BlockStmt
+	var ok bool
+	if module != "" {
+		if em := x.wpModExports[module]; em != nil && em[name] != nil {
+			target := ungroup(em[name])
+			if fv, isVar := target.(*js.Var); isVar {
+				_, params, body, ok = x.fnOf(fv)
+			} else {
+				params, body, ok = fnParts(target)
+			}
+		}
+	} else {
+		v := x.exportVars[name]
+		if v == nil {
+			return nil
+		}
+		_, params, body, ok = x.fnOf(v)
 	}
-	_, params, body, ok := x.fnOf(v)
 	if !ok || body == nil {
 		return nil
 	}

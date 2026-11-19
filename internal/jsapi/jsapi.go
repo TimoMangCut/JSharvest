@@ -22,15 +22,17 @@ import (
 
 // Version changes when what Extract finds changes, so that cached results
 // are made again.
-const Version = 44
+const Version = 45
 
 // Endpoint is one call to a URL that a script makes.
 type Endpoint struct {
 	Method string `json:"method,omitempty"` // empty when the code does not say
 	// URL is the path (or absolute URL) without its query, with {} for each
 	// part the code computes.
-	URL  string `json:"url"`
-	Kind string `json:"kind"` // fetch, xhr, client, wrapper, options, websocket, sse, beacon, navigation, string
+	URL         string    `json:"url"`
+	Kind        string    `json:"kind"` // fetch, xhr, client, wrapper, options, websocket, sse, beacon, navigation, string
+	ConstRef    *ConstRef `json:"const_ref,omitempty"`
+	ConstSuffix string    `json:"const_suffix,omitempty"`
 	// Client is a client's path relative to a base URL set elsewhere, as
 	// an axios instance or an Angular service builds it.
 	Client     bool     `json:"client,omitempty"`
@@ -291,8 +293,9 @@ var collectorRe = regexp.MustCompile(`(?i)/com\.snowplowanalytics\.snowplow/|/(?
 // staticJSONRe is a JSON file right under an unknown root ({}/app-config.json);
 // specNameRe an API description's name, which stays an API's.
 var (
-	staticJSONRe = regexp.MustCompile(`^\{\}/[\w.-]+\.json$`)
-	specNameRe   = regexp.MustCompile(`(?i)(openapi|swagger|api-docs|asyncapi)`)
+	staticJSONRe        = regexp.MustCompile(`^\{\}/[\w.-]+\.json$`)
+	webrootStaticJSONRe = regexp.MustCompile(`^(?:/|\./)?(?:assets|static|public|i18n|locales|translations|lang|fonts|icons|images|media)/[\w./-]+\.json$`)
+	specNameRe          = regexp.MustCompile(`(?i)(openapi|swagger|api-docs|asyncapi)`)
 )
 
 // keyNameRe names a setting whose value is a key, an id or a secret.
@@ -686,6 +689,9 @@ type extractor struct {
 	varInstanceImports   map[*js.Var][2]string
 	unresolvedRoutePerms []UnresolvedRoutePerm
 	unresolvedAuthzRules []UnresolvedAuthzRule
+	symConstMode         bool
+	localQKeys           map[any][]string
+	localQDone           map[any]bool
 }
 
 // newExtractor is an extractor for a script, its tables empty.
@@ -701,6 +707,7 @@ func newExtractor(src, origSrc []byte, lm *esbuildLineMap, nested bool) *extract
 		wpModExports: map[string]map[string]js.IExpr{}, wpModDefault: map[string]js.IExpr{}, wpReqVars: map[*js.Var]bool{}, jsonObjs: map[*js.CallExpr]*js.ObjectExpr{},
 		renderCtxVars: map[*js.Var]bool{}, hasVueRenderHint: hasVueHint, thisObjCache: map[string]*js.ObjectExpr{}, thisObjDone: map[string]bool{}, thisEnumCache: map[string]*js.Var{}, thisEnumDone: map[string]bool{}, esExports: map[string]js.IExpr{}, turbopackConst: map[[2]string]js.IExpr{},
 		classFieldImports: map[*js.ClassDecl]map[string][2]string{}, varInstanceImports: map[*js.Var][2]string{},
+		localQKeys: map[any][]string{}, localQDone: map[any]bool{},
 		classes: map[*js.ClassDecl]*classInfo{}, classByVar: map[*js.Var]*js.ClassDecl{}, subclasses: map[*js.ClassDecl][]*js.ClassDecl{}, privOwner: map[*js.Var]*js.ClassDecl{}, newSites: map[*js.ClassDecl][]*js.NewExpr{}, urlSets: map[*js.Var][]urlSet{}, urlPath: map[*js.Var][]string{}, exportVars: map[string]*js.Var{}, reqBases: map[string]bool{}}
 }
 
@@ -714,4 +721,5 @@ func (x *extractor) prepare(ast *js.AST) {
 	js.Walk(builderVisitor{x}, ast)
 	x.scanESModules(ast)
 	x.scanWebpackClassExports()
+	x.noteWebpackBuilders()
 }

@@ -817,6 +817,14 @@ func (x *extractor) paramOrigin(params js.Params, e js.IExpr, depth int) (int, s
 				return idx, outerProp + "." + k
 			}
 		case *js.CallExpr:
+			if dExpr, isDot := ungroup(n.X).(*js.DotExpr); isDot {
+				m := propName(dExpr.Y)
+				if stringMethods[m] || m == "trim" || m == "toString" {
+					if idx, prop := trace(dExpr.X, d+1); idx >= 0 {
+						return idx, prop
+					}
+				}
+			}
 			if len(n.Args.List) == 1 && !n.Args.List[0].Rest {
 				if idx, prop := trace(n.Args.List[0].Value, d+1); idx >= 0 {
 					return idx, prop

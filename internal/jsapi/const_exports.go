@@ -51,9 +51,69 @@ type UnresolvedAuthzRule struct {
 	SubjectLit string    `json:"subject_lit,omitempty"`
 }
 
+// SymConstPrefix marks a symbolic cross-module ConstRef embedded at the head of
+// an exported constant string (e.g. `$jsh_const[77747|c|gateway]/svc-a/items`)
+// so multi-hop constant dictionaries across chunks resolve transitively.
+const SymConstPrefix = "$jsh_const["
+
+// EncodeSymConst formats a ConstRef as a printable symbolic prefix token.
+func EncodeSymConst(ref *ConstRef) string {
+	if ref == nil || ref.Module == "" || ref.Export == "" {
+		return ""
+	}
+	if strings.ContainsAny(ref.Module+ref.Export+ref.Key, "[]|\r\n\x00") {
+		return ""
+	}
+	return SymConstPrefix + ref.Module + "|" + ref.Export + "|" + ref.Key + "]"
+}
+
+// DecodeSymConstPrefix parses a leading `$jsh_const[mod|exp|key]` prefix token
+// and returns (mod, exp, key, suffixRest, true).
+func DecodeSymConstPrefix(s string) (mod, exp, key, rest string, ok bool) {
+	if !strings.HasPrefix(s, SymConstPrefix) {
+		return "", "", "", "", false
+	}
+	body := s[len(SymConstPrefix):]
+	end := strings.IndexByte(body, ']')
+	if end <= 0 {
+		return "", "", "", "", false
+	}
+	head := body[:end]
+	p1 := strings.IndexByte(head, '|')
+	if p1 <= 0 {
+		return "", "", "", "", false
+	}
+	p2 := strings.IndexByte(head[p1+1:], '|')
+	if p2 < 0 {
+		return "", "", "", "", false
+	}
+	p2 += p1 + 1
+	mod, exp, key = head[:p1], head[p1+1:p2], head[p2+1:]
+	if mod == "" || exp == "" {
+		return "", "", "", "", false
+	}
+	return mod, exp, key, body[end+1:], true
+}
+
+// IsValidAuthzToken reports whether s is a valid RBAC role or permission token
+// (and not a URL or symbolic constant reference).
+func IsValidAuthzToken(s string) bool {
+	if strings.HasPrefix(s, SymConstPrefix) || strings.Contains(s, "://") || strings.HasPrefix(s, "/") {
+		return false
+	}
+	return isValidAuthzToken(s)
+}
+
+func isConstURLOrPathScalar(s string) bool {
+	if strings.HasPrefix(s, SymConstPrefix) || strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://") {
+		return !strings.ContainsAny(s, " \t")
+	}
+	return strings.HasPrefix(s, "/") && len(s) > 1 && !strings.HasPrefix(s, "//") && !strings.ContainsAny(s, " \t")
+}
+
 func isValidConstScalar(s string) bool {
 	s = strings.TrimSpace(s)
-	if len(s) == 0 || len(s) > 128 {
+	if len(s) == 0 || len(s) > 256 {
 		return false
 	}
 	return !strings.ContainsAny(s, "\r\n\x00<>\"'`\\{}")
@@ -74,10 +134,17 @@ func (x *extractor) evalConstScalar(e js.IExpr) (string, bool) {
 		return "", false
 	}
 	savedNoMark := x.noMarkUsed
+	savedSym := x.symConstMode
 	x.noMarkUsed = true
+	x.symConstMode = true
 	vals := x.eval(e, nil, 0)
+	x.symConstMode = savedSym
 	x.noMarkUsed = savedNoMark
 	if len(vals) == 1 && !strings.Contains(vals[0], unknown) && isValidConstScalar(vals[0]) {
+		// Reject nested or mid-string symbolic tokens; allow at most one leading token.
+		if idx := strings.Index(vals[0], SymConstPrefix); idx > 0 || (idx == 0 && strings.Contains(vals[0][len(SymConstPrefix):], SymConstPrefix)) {
+			return "", false
+		}
 		return vals[0], true
 	}
 	return "", false
@@ -205,7 +272,7 @@ func (x *extractor) extractConstDictExpr(e js.IExpr) (vals map[string]string, sc
 			return out, "", true
 		}
 	}
-	if s, sok := x.evalConstScalar(e); sok && isValidAuthzToken(s) {
+	if s, sok := x.evalConstScalar(e); sok && (isValidAuthzToken(s) || isConstURLOrPathScalar(s)) {
 		return nil, s, true
 	}
 	return nil, "", false

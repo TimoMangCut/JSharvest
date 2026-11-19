@@ -20,8 +20,10 @@ import (
 const maxDeferredDepth = 8
 
 type builderRef struct {
-	tid  int
-	name string
+	tid    int
+	module string
+	name   string
+	query  []string
 }
 
 func linkDeferred(scripts []Script, byKey map[string]*Endpoint, order *[]string, origins map[*Endpoint]map[string]bool,
@@ -30,12 +32,38 @@ func linkDeferred(scripts []Script, byKey map[string]*Endpoint, order *[]string,
 	// Each exporting module is read once (parsed, its definitions read),
 	// whatever the number of calls and arguments it serves.
 	modMemo := map[int]*jsapi.Module{}
+	bundlerBuilders := map[[3]string][]builderRef{}
+	for si, s := range scripts {
+		if isTrackerScript(s) || len(s.Builders) == 0 {
+			continue
+		}
+		origs := scriptOrigins(s.URLs)
+		for _, b := range s.Builders {
+			if b.Module == "" {
+				continue
+			}
+			for _, orig := range origs {
+				bk := [3]string{orig, b.Module, b.Name}
+				bundlerBuilders[bk] = append(bundlerBuilders[bk], builderRef{tid: si, module: b.Module, name: b.Name, query: b.Query})
+			}
+		}
+	}
 	var find func(curIdx int, spec, name string, depth int, seen map[string]bool) []builderRef
 	find = func(curIdx int, spec, name string, depth int, seen map[string]bool) []builderRef {
 		if depth > maxDeferredDepth {
 			return nil
 		}
 		var out []builderRef
+		if !strings.HasPrefix(spec, ".") && !strings.HasPrefix(spec, "/") {
+			for _, orig := range scriptOrigins(scripts[curIdx].URLs) {
+				if refs := bundlerBuilders[[3]string{orig, spec, name}]; len(refs) > 0 {
+					out = append(out, refs...)
+				}
+			}
+			if len(out) > 0 {
+				return out
+			}
+		}
 		tids, allowLocal := targetScripts(curIdx, spec)
 		for _, tid := range tids {
 			k := fmt.Sprintf("%d\x00%s", tid, name)
@@ -46,8 +74,8 @@ func linkDeferred(scripts []Script, byKey map[string]*Endpoint, order *[]string,
 			ts := scripts[tid]
 			matched := false
 			for _, b := range ts.Builders {
-				if b.Name == name {
-					out = append(out, builderRef{tid, b.Name})
+				if b.Module == "" && b.Name == name {
+					out = append(out, builderRef{tid: tid, name: b.Name, query: b.Query})
 					matched = true
 				}
 			}
@@ -62,8 +90,8 @@ func linkDeferred(scripts []Script, byKey map[string]*Endpoint, order *[]string,
 			}
 			if !matched && allowLocal {
 				for _, b := range ts.Builders {
-					if b.Local == name {
-						out = append(out, builderRef{tid, b.Name})
+					if b.Module == "" && b.Local == name {
+						out = append(out, builderRef{tid: tid, name: b.Name, query: b.Query})
 					}
 				}
 			}
@@ -84,7 +112,7 @@ func linkDeferred(scripts []Script, byKey map[string]*Endpoint, order *[]string,
 				if ts.Load == nil {
 					continue
 				}
-				mk := fmt.Sprintf("%d\x00%s\x00%q", ref.tid, ref.name, d.Args)
+				mk := fmt.Sprintf("%d\x00%s\x00%s\x00%q", ref.tid, ref.module, ref.name, d.Args)
 				vals, ok := evalMemo[mk]
 				if !ok {
 					m, have := modMemo[ref.tid]
@@ -95,7 +123,7 @@ func linkDeferred(scripts []Script, byKey map[string]*Endpoint, order *[]string,
 						modMemo[ref.tid] = m
 					}
 					if m != nil {
-						vals = m.EvalBuilder(ref.name, d.Args)
+						vals = m.EvalBuilderFor(ref.module, ref.name, d.Args)
 					}
 					evalMemo[mk] = vals
 				}
@@ -142,6 +170,7 @@ func linkDeferred(scripts []Script, byKey map[string]*Endpoint, order *[]string,
 						}
 						ep.bundleStatic = ep.bundleStatic || !s.Source
 						ep.Query = append(ep.Query, d.Query...)
+						ep.Query = append(ep.Query, ref.query...)
 						ep.Body = append(ep.Body, d.Body...)
 						ep.Headers = append(ep.Headers, d.Headers...)
 						if ep.client {

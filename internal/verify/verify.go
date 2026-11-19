@@ -142,7 +142,7 @@ type Report struct {
 func Run(ctx context.Context, o Options) (*Report, error) {
 	rep := &Report{Target: o.Target, Role: o.Role, DryRun: o.Sender.DryRun(), AllowWrite: o.AllowWrite, Started: time.Now().UTC(),
 		Verdicts: map[string]int{}, Tiers: map[string]int{}, Confidence: map[string]int{}}
-	v := &verifier{o: o, rep: rep, canaries: map[string]*Canary{}, htmlShells: map[string][]Sig{}, shellHosts: map[string]map[string]bool{}, perOrigin: map[string]int{}, gates: map[string]*gate{}, parents: map[string]int{}, hostPrefixes: map[string]int{}, hostMu: map[string]*sync.Mutex{}}
+	v := &verifier{o: o, rep: rep, canaries: map[string]*Canary{}, htmlShells: map[string][]Sig{}, shellHosts: map[string]map[string]bool{}, perOrigin: map[string]int{}, gates: map[string]*gate{}, parents: map[string]int{}, hostPrefixes: map[string]int{}, hostMu: map[string]*sync.Mutex{}, specBases: map[string]*specBaseStat{}}
 	// The hosts: those of the drafts in scope, nothing else.
 	hosts := map[string]bool{}
 	for _, d := range o.Drafts {
@@ -279,9 +279,48 @@ type verifier struct {
 	// found gated.
 	hostPrefixes map[string]int
 	// mu guards the maps every host's probes share (canaries, perOrigin,
-	// parents, gates, hostMu); hostMu holds a host for one probe at a time.
-	mu     sync.Mutex
-	hostMu map[string]*sync.Mutex
+	// parents, gates, hostMu, specBases); hostMu holds a host for one probe at a time.
+	mu        sync.Mutex
+	hostMu    map[string]*sync.Mutex
+	specBases map[string]*specBaseStat
+}
+
+const specBasePruneAfter = 16
+
+type specBaseStat struct {
+	deadPaths map[string]bool
+	signals   int
+}
+
+func (v *verifier) isSpecBasePruned(base string) bool {
+	if base == "" {
+		return false
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	st := v.specBases[base]
+	return st != nil && st.signals == 0 && len(st.deadPaths) >= specBasePruneAfter
+}
+
+func (v *verifier) noteSpecBase(base, path, verdict string) {
+	if base == "" {
+		return
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	st := v.specBases[base]
+	if st == nil {
+		st = &specBaseStat{deadPaths: map[string]bool{}}
+		v.specBases[base] = st
+	}
+	switch verdict {
+	case Alive, Resource404, ServerError, AuthWall, WAFBlocked:
+		st.signals++
+	case DeadOrFP:
+		if st.signals == 0 && path != "" {
+			st.deadPaths[path] = true
+		}
+	}
 }
 
 // gate is what a host's probes said so far: alike, as their canaries.
@@ -367,7 +406,9 @@ func (v *verifier) one(ctx context.Context, d Draft) Result {
 	// Each candidate in turn, to the first that answers as a route; one
 	// the policy will not send (a base under /auth) is passed over, not
 	// the end of the line (POL-23-1).
+	speculative := d.URL == "" && len(targets) > 1
 	var best *Result
+	probedAny := false
 	for i, t := range targets {
 		u, err := url.Parse(t)
 		if err != nil || !v.o.InScope(u.Hostname()) {
@@ -376,10 +417,25 @@ func (v *verifier) one(ctx context.Context, d Draft) Result {
 			}
 			continue
 		}
+		candBase := ""
+		if i < len(bases) {
+			candBase = bases[i]
+		}
+		if speculative && candBase != "" && v.isSpecBasePruned(candBase) {
+			// Always probe at least one candidate per draft so no draft is skipped
+			// solely due to speculative base pruning when all candidates were pruned.
+			if probedAny || i < len(targets)-1 {
+				continue
+			}
+		}
+		probedAny = true
 		res := v.probe(ctx, d, t)
 		res.ID, res.Source, res.Method, res.Path, res.Confidence, res.Tier = r.ID, r.Source, r.Method, r.Path, r.Confidence, r.Tier
-		if (res.Verdict == Alive || res.Verdict == Resource404) && i < len(bases) && bases[i] != "" {
-			res.VerifiedBase = bases[i]
+		if speculative && candBase != "" {
+			v.noteSpecBase(candBase, d.Path, res.Verdict)
+		}
+		if (res.Verdict == Alive || res.Verdict == Resource404) && candBase != "" {
+			res.VerifiedBase = candBase
 		}
 		switch {
 		case res.Verdict == Alive || res.Verdict == Resource404:

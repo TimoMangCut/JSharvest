@@ -689,6 +689,7 @@ func Build(scripts []Script, reqs []Request, inScope func(host string) bool) []E
 		}
 		return settingFor(mark, allSettings)
 	}
+	scriptOrigins, targetScripts, resolveConstAt := buildModuleGraph(scripts)
 	byKey := map[string]*Endpoint{}
 	var order []string
 	for sIdx, s := range scripts {
@@ -697,7 +698,30 @@ func Build(scripts []Script, reqs []Request, inScope func(host string) bool) []E
 			script = s.URLs[0]
 		}
 		for _, e := range s.Endpoints {
-			host, path := split(e.URL)
+			rawURL := e.URL
+			var constQuery []string
+			if e.ConstRef != nil {
+				if cv, cok := resolveConstAt(sIdx, e.ConstRef.Module, e.ConstRef.Export, e.ConstRef.Key, 0); cok {
+					if strings.HasPrefix(cv, "http://") || strings.HasPrefix(cv, "https://") || strings.HasPrefix(cv, "//") || (strings.HasPrefix(cv, "/") && len(cv) > 1) {
+						joined := joinConstURL(cv, e.ConstSuffix)
+						jPath, jQuery, hasQ := strings.Cut(joined, "?")
+						if isValidConstEndpointVal(jPath, false) {
+							rawURL = jPath
+							if hasQ && jQuery != "" {
+								for _, kv := range strings.Split(jQuery, "&") {
+									if k, _, _ := strings.Cut(kv, "="); k != "" && k != placeholder && !strings.Contains(k, "{") {
+										constQuery = append(constQuery, k)
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+			if rawURL == placeholder {
+				continue
+			}
+			host, path := split(rawURL)
 			if detect.InfraPath(path) {
 				continue // the CDN's own (/cdn-cgi/), on every site it fronts
 			}
@@ -718,7 +742,7 @@ func Build(scripts []Script, reqs []Request, inScope func(host string) bool) []E
 			sTracker := isTrackerScript(s)
 			if ep == nil {
 				ep = &Endpoint{Method: e.Method, Host: host, Path: path, Status: Static, Kind: e.Kind, ThirdParty: sTracker,
-					client: e.Client || strings.HasPrefix(path, unknownPrefix)}
+					client: (e.Client && host == "") || strings.HasPrefix(path, unknownPrefix)}
 				byKey[key] = ep
 				order = append(order, key)
 			}
@@ -750,6 +774,7 @@ func Build(scripts []Script, reqs []Request, inScope func(host string) bool) []E
 				}
 			}
 			ep.Query = append(ep.Query, e.Query...)
+			ep.Query = append(ep.Query, constQuery...)
 			ep.Body = append(ep.Body, e.Body...)
 			ep.Headers = append(ep.Headers, e.Headers...)
 			ep.Auth = append(ep.Auth, e.Auth...)
@@ -787,7 +812,7 @@ func Build(scripts []Script, reqs []Request, inScope func(host string) bool) []E
 		}
 	}
 	dropped := mergeDocs(order, byKey)
-	hints := linkModules(scripts, byKey, &order, origins, inScope)
+	hints := linkModules(scripts, byKey, &order, origins, inScope, scriptOrigins, targetScripts, resolveConstAt)
 	for ep, os := range origins {
 		if hb := hints[ep]; len(hb) > 0 {
 			// The caller names the setting its client is made with
@@ -1119,19 +1144,49 @@ func Build(scripts []Script, reqs []Request, inScope func(host string) bool) []E
 	return out
 }
 
-// linkModules joins the calls to an imported function with the request
-// the module exporting it makes (COV-04): the caller's object is the
-// body, the setting it names (cfg.AUTH_API_URL) the base. A setting given
-// to a client factory, through an export or by a call in its own script
-// (a(e.CLIENT_API_URL)), is the base of every request its methods make,
-// exported or not. It returns those bases by endpoint.
-func linkModules(scripts []Script, byKey map[string]*Endpoint, order *[]string, origins map[*Endpoint]map[string]bool, inScope func(host string) bool) map[*Endpoint][]string {
-	settings := map[string][]string{}
-	type indexedExport struct {
-		jsapi.Export
-		si int
+func joinConstURL(baseConst, suffix string) string {
+	if suffix == "" {
+		return baseConst
 	}
-	bundlerExports := map[string][]indexedExport{}
+	if strings.HasSuffix(baseConst, "/") && strings.HasPrefix(suffix, "/") {
+		return baseConst + strings.TrimPrefix(suffix, "/")
+	}
+	return baseConst + suffix
+}
+
+func isValidConstEndpointVal(v string, hasBasePrefix bool) bool {
+	v = strings.TrimSpace(v)
+	if v == "" || len(v) > 512 || strings.HasPrefix(v, jsapi.SymConstPrefix) || strings.ContainsAny(v, " \t\r\n<>\"'`\\") {
+		return false
+	}
+	if strings.HasPrefix(v, "http://") || strings.HasPrefix(v, "https://") || strings.HasPrefix(v, "//") || (strings.HasPrefix(v, "/") && len(v) > 1) {
+		return true
+	}
+	if strings.Contains(v, "/") {
+		return !hasStaticAssetExt(v)
+	}
+	if !hasBasePrefix {
+		return false
+	}
+	hasAlpha := false
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z':
+			hasAlpha = true
+		case c >= '0' && c <= '9', c == '-', c == '_', c == '.':
+		default:
+			return false
+		}
+	}
+	return hasAlpha && len(v) >= 2 && !hasStaticAssetExt(v)
+}
+
+func buildModuleGraph(scripts []Script) (
+	scriptOrigins [][]string,
+	targetScripts func(int, string) ([]int, bool),
+	resolveConstAt func(curIdx int, modSpec, expName, key string, hop int) (string, bool),
+) {
 	esmScripts := map[string][]int{}
 	esmByBase := map[string][]int{}
 	baseCount := map[string]int{}
@@ -1139,7 +1194,7 @@ func linkModules(scripts []Script, byKey map[string]*Endpoint, order *[]string, 
 	smapSuffix := map[string][]int{}
 	smapPkg := map[string][]int{}
 	scriptSmapPaths := make([][]string, len(scripts))
-	scriptOrigins := make([][]string, len(scripts))
+	scriptOrigins = make([][]string, len(scripts))
 
 	cleanModURL := func(raw string) string {
 		if strings.Contains(raw, "#") {
@@ -1208,50 +1263,7 @@ func linkModules(scripts []Script, byKey map[string]*Endpoint, order *[]string, 
 		}
 	}
 
-	factories := map[string]jsapi.Factory{} // by sha and id
-	given := map[string][]string{}          // the settings each factory is given
-	for si, s := range scripts {
-		if isTrackerScript(s) {
-			continue
-		}
-		for _, st := range s.Settings {
-			if !slices.Contains(settings[st.Name], st.Value) {
-				settings[st.Name] = append(settings[st.Name], st.Value)
-			}
-		}
-		for _, pb := range s.PropBases {
-			if !slices.Contains(settings[pb.Name], pb.Value) {
-				settings[pb.Name] = append(settings[pb.Name], pb.Value)
-			}
-		}
-		for _, ex := range s.Exports {
-			if ex.Module != "" {
-				k := ex.Module + "\x00" + ex.Name
-				bundlerExports[k] = append(bundlerExports[k], indexedExport{ex, si})
-			}
-		}
-		for _, f := range s.Factories {
-			k := s.SHA256 + "\x00" + f.ID
-			factories[k] = f
-			given[k] = append(given[k], f.Settings...)
-		}
-	}
-
-	lookup := func(methodURL string) *Endpoint {
-		method, u, _ := strings.Cut(methodURL, " ")
-		host, p := split(u)
-		if ep := byKey[method+" "+host+" "+p]; ep != nil {
-			return ep
-		}
-		if host == "" && strings.HasPrefix(p, "/") {
-			return byKey[method+"  "+placeholder+p]
-		}
-		return nil
-	}
-
-	// targetScripts finds candidate module scripts for (callerIdx, spec) across
-	// HTTP ESM URLs and SourceMap virtual paths (`#<sourcePath>`).
-	targetScripts := func(callerIdx int, spec string) (targets []int, allowLocalFallback bool) {
+	targetScripts = func(callerIdx int, spec string) (targets []int, allowLocalFallback bool) {
 		cs := scripts[callerIdx]
 		addAll := func(ids []int) {
 			for _, id := range ids {
@@ -1260,7 +1272,6 @@ func linkModules(scripts []Script, byKey map[string]*Endpoint, order *[]string, 
 				}
 			}
 		}
-		// 1. SourceMap virtual path namespace (when caller has `#<sourcePath>`)
 		if len(scriptSmapPaths[callerIdx]) > 0 {
 			origs := scriptOrigins[callerIdx]
 			if len(origs) == 0 {
@@ -1311,7 +1322,6 @@ func linkModules(scripts []Script, byKey map[string]*Endpoint, order *[]string, 
 				}
 			}
 		}
-		// 2. HTTP ESM URL namespace
 		if strings.HasPrefix(spec, "./") || strings.HasPrefix(spec, "../") || strings.HasPrefix(spec, "/") {
 			if rel, err := url.Parse(spec); err == nil {
 				for _, raw := range cs.URLs {
@@ -1336,43 +1346,12 @@ func linkModules(scripts []Script, byKey map[string]*Endpoint, order *[]string, 
 		return targets, false
 	}
 
-	hints := map[*Endpoint][]string{}
-	validHTTPMethod := map[string]bool{"GET": true, "POST": true, "PUT": true, "PATCH": true, "DELETE": true, "HEAD": true, "OPTIONS": true}
-
-	extractExportKeys := func(ex jsapi.Export, args []jsapi.ImportArg) (qOut, bOut []string) {
-		getK := func(idx int, prop string) []string {
-			if idx < 0 || idx >= len(args) {
-				return nil
-			}
-			if prop != "" {
-				return args[idx].PropKeys[prop]
-			}
-			return args[idx].Keys
-		}
-		same := ex.BodyArg >= 0 && ex.BodyArg == ex.QueryArg && ex.BodyProp == ex.QueryProp
-		if same {
-			if ex.Method == "GET" || ex.Method == "HEAD" || ex.Method == "DELETE" {
-				qOut = append(qOut, getK(ex.QueryArg, ex.QueryProp)...)
-			} else if ex.Method != "" {
-				bOut = append(bOut, getK(ex.BodyArg, ex.BodyProp)...)
-			}
-			return qOut, bOut
-		}
-		qOut = append(qOut, getK(ex.QueryArg, ex.QueryProp)...)
-		bOut = append(bOut, getK(ex.BodyArg, ex.BodyProp)...)
-		if (ex.Method == "GET" || ex.Method == "HEAD") && len(bOut) > 0 {
-			qOut = append(qOut, bOut...)
-			bOut = nil
-		}
-		return qOut, bOut
-	}
-
 	type constKey struct {
 		mod, exp, key string
 	}
 	scriptConsts := make([]map[constKey]constSlot, len(scripts))
 	bundlerConsts := map[[4]string]constSlot{}
-	putSlot := func(m map[constKey]constSlot, ck constKey, val string) {
+	putSlot := func(m map[constKey]constSlot, ck constKey, val string, defIdx int) {
 		if val == "" {
 			return
 		}
@@ -1383,9 +1362,9 @@ func linkModules(scripts []Script, byKey map[string]*Endpoint, order *[]string, 
 			}
 			return
 		}
-		m[ck] = constSlot{val: val}
+		m[ck] = constSlot{val: val, defIdx: defIdx}
 	}
-	putBundlerConst := func(orig, mod, exp, key, val string) {
+	putBundlerConst := func(orig, mod, exp, key, val string, defIdx int) {
 		if val == "" {
 			return
 		}
@@ -1397,7 +1376,7 @@ func linkModules(scripts []Script, byKey map[string]*Endpoint, order *[]string, 
 			}
 			return
 		}
-		bundlerConsts[bk] = constSlot{val: val}
+		bundlerConsts[bk] = constSlot{val: val, defIdx: defIdx}
 	}
 	for si, s := range scripts {
 		if len(s.ConstExports) == 0 || isTrackerScript(s) {
@@ -1410,18 +1389,18 @@ func linkModules(scripts []Script, byKey map[string]*Endpoint, order *[]string, 
 		}
 		for _, cd := range s.ConstExports {
 			for k, v := range cd.Values {
-				putSlot(sm, constKey{cd.Module, cd.Export, k}, v)
+				putSlot(sm, constKey{cd.Module, cd.Export, k}, v, si)
 				if cd.Module != "" {
 					for _, orig := range origs {
-						putBundlerConst(orig, cd.Module, cd.Export, k, v)
+						putBundlerConst(orig, cd.Module, cd.Export, k, v, si)
 					}
 				}
 			}
 			if cd.Scalar != "" {
-				putSlot(sm, constKey{cd.Module, cd.Export, ""}, cd.Scalar)
+				putSlot(sm, constKey{cd.Module, cd.Export, ""}, cd.Scalar, si)
 				if cd.Module != "" {
 					for _, orig := range origs {
-						putBundlerConst(orig, cd.Module, cd.Export, "", cd.Scalar)
+						putBundlerConst(orig, cd.Module, cd.Export, "", cd.Scalar, si)
 					}
 				}
 			}
@@ -1429,53 +1408,68 @@ func linkModules(scripts []Script, byKey map[string]*Endpoint, order *[]string, 
 		scriptConsts[si] = sm
 	}
 
-	lookupSlotInMap := func(sm map[constKey]constSlot, mod, exp, key string) (string, bool) {
+	lookupSlotInMap := func(sm map[constKey]constSlot, mod, exp, key string) (constSlot, bool) {
 		if len(sm) == 0 {
-			return "", false
+			return constSlot{}, false
 		}
 		if sl, ok := sm[constKey{mod, exp, key}]; ok && !sl.clashed {
-			return sl.val, true
+			return sl, true
 		}
 		if exp == "a" || exp == "default" {
 			if sl, ok := sm[constKey{mod, "*", key}]; ok && !sl.clashed {
-				return sl.val, true
+				return sl, true
 			}
 		}
 		if exp != "*" && exp != "" && key != "" {
 			if sl, ok := sm[constKey{mod, "*", exp + "." + key}]; ok && !sl.clashed {
-				return sl.val, true
+				return sl, true
 			}
 		}
-		return "", false
+		return constSlot{}, false
 	}
 
-	lookupBundlerSlot := func(orig, mod, exp, key string) (string, bool) {
+	lookupBundlerSlot := func(orig, mod, exp, key string) (constSlot, bool) {
 		if sl, ok := bundlerConsts[[4]string{orig, mod, exp, key}]; ok && !sl.clashed {
-			return sl.val, true
+			return sl, true
 		}
 		if exp == "a" || exp == "default" {
 			if sl, ok := bundlerConsts[[4]string{orig, mod, "*", key}]; ok && !sl.clashed {
-				return sl.val, true
+				return sl, true
 			}
 		}
 		if exp != "*" && exp != "" && key != "" {
 			if sl, ok := bundlerConsts[[4]string{orig, mod, "*", exp + "." + key}]; ok && !sl.clashed {
-				return sl.val, true
+				return sl, true
 			}
 		}
-		return "", false
+		return constSlot{}, false
 	}
 
-	var resolveConstAt func(curIdx int, modSpec, expName, key string, hop int) (string, bool)
+	expandSym := func(sl constSlot, hop int) (string, bool) {
+		subMod, subExp, subKey, rest, ok := jsapi.DecodeSymConstPrefix(sl.val)
+		if !ok {
+			return sl.val, true
+		}
+		pfx, pok := resolveConstAt(sl.defIdx, subMod, subExp, subKey, hop+1)
+		if !pok {
+			return "", false
+		}
+		return joinConstURL(pfx, rest), true
+	}
+
 	resolveConstAt = func(curIdx int, modSpec, expName, key string, hop int) (string, bool) {
-		if hop > 4 || modSpec == "" || expName == "" {
+		if hop > 6 || modSpec == "" || expName == "" {
 			return "", false
 		}
 		tids, _ := targetScripts(curIdx, modSpec)
 		if len(tids) > 0 {
 			resolved := ""
 			for _, tid := range tids {
-				if v, ok := lookupSlotInMap(scriptConsts[tid], "", expName, key); ok {
+				if sl, ok := lookupSlotInMap(scriptConsts[tid], "", expName, key); ok {
+					v, eok := expandSym(sl, hop)
+					if !eok {
+						continue
+					}
 					if resolved != "" && resolved != v {
 						return "", false
 					}
@@ -1509,7 +1503,11 @@ func linkModules(scripts []Script, byKey map[string]*Endpoint, order *[]string, 
 			}
 			resolved := ""
 			for _, orig := range origs {
-				if v, ok := lookupBundlerSlot(orig, modSpec, expName, key); ok {
+				if sl, ok := lookupBundlerSlot(orig, modSpec, expName, key); ok {
+					v, eok := expandSym(sl, hop)
+					if !eok {
+						continue
+					}
 					if resolved != "" && resolved != v {
 						return "", false
 					}
@@ -1522,33 +1520,102 @@ func linkModules(scripts []Script, byKey map[string]*Endpoint, order *[]string, 
 		}
 		return "", false
 	}
+	return scriptOrigins, targetScripts, resolveConstAt
+}
 
-	isValidConstEndpointVal := func(v string, hasBasePrefix bool) bool {
-		v = strings.TrimSpace(v)
-		if v == "" || len(v) > 512 || strings.ContainsAny(v, " \t\r\n<>\"'`\\") {
-			return false
+// linkModules joins the calls to an imported function with the request
+// the module exporting it makes (COV-04): the caller's object is the
+// body, the setting it names (cfg.AUTH_API_URL) the base. A setting given
+// to a client factory, through an export or by a call in its own script
+// (a(e.CLIENT_API_URL)), is the base of every request its methods make,
+// exported or not. It returns those bases by endpoint.
+func linkModules(
+	scripts []Script,
+	byKey map[string]*Endpoint,
+	order *[]string,
+	origins map[*Endpoint]map[string]bool,
+	inScope func(host string) bool,
+	scriptOrigins [][]string,
+	targetScripts func(int, string) ([]int, bool),
+	resolveConstAt func(curIdx int, modSpec, expName, key string, hop int) (string, bool),
+) map[*Endpoint][]string {
+	settings := map[string][]string{}
+	type indexedExport struct {
+		jsapi.Export
+		si int
+	}
+	bundlerExports := map[string][]indexedExport{}
+
+	factories := map[string]jsapi.Factory{} // by sha and id
+	given := map[string][]string{}          // the settings each factory is given
+	for si, s := range scripts {
+		if isTrackerScript(s) {
+			continue
 		}
-		if strings.HasPrefix(v, "http://") || strings.HasPrefix(v, "https://") || strings.HasPrefix(v, "//") || (strings.HasPrefix(v, "/") && len(v) > 1) {
-			return true
-		}
-		if strings.Contains(v, "/") {
-			return !hasStaticAssetExt(v)
-		}
-		if !hasBasePrefix {
-			return false
-		}
-		hasAlpha := false
-		for i := 0; i < len(v); i++ {
-			c := v[i]
-			switch {
-			case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z':
-				hasAlpha = true
-			case c >= '0' && c <= '9', c == '-', c == '_', c == '.':
-			default:
-				return false
+		for _, st := range s.Settings {
+			if !slices.Contains(settings[st.Name], st.Value) {
+				settings[st.Name] = append(settings[st.Name], st.Value)
 			}
 		}
-		return hasAlpha && len(v) >= 2 && !hasStaticAssetExt(v)
+		for _, pb := range s.PropBases {
+			if !slices.Contains(settings[pb.Name], pb.Value) {
+				settings[pb.Name] = append(settings[pb.Name], pb.Value)
+			}
+		}
+		for _, ex := range s.Exports {
+			if ex.Module != "" {
+				k := ex.Module + "\x00" + ex.Name
+				bundlerExports[k] = append(bundlerExports[k], indexedExport{ex, si})
+			}
+		}
+		for _, f := range s.Factories {
+			k := s.SHA256 + "\x00" + f.ID
+			factories[k] = f
+			given[k] = append(given[k], f.Settings...)
+		}
+	}
+
+	lookup := func(methodURL string) *Endpoint {
+		method, u, _ := strings.Cut(methodURL, " ")
+		host, p := split(u)
+		if ep := byKey[method+" "+host+" "+p]; ep != nil {
+			return ep
+		}
+		if host == "" && strings.HasPrefix(p, "/") {
+			return byKey[method+"  "+placeholder+p]
+		}
+		return nil
+	}
+
+	hints := map[*Endpoint][]string{}
+	validHTTPMethod := map[string]bool{"GET": true, "POST": true, "PUT": true, "PATCH": true, "DELETE": true, "HEAD": true, "OPTIONS": true}
+
+	extractExportKeys := func(ex jsapi.Export, args []jsapi.ImportArg) (qOut, bOut []string) {
+		getK := func(idx int, prop string) []string {
+			if idx < 0 || idx >= len(args) {
+				return nil
+			}
+			if prop != "" {
+				return args[idx].PropKeys[prop]
+			}
+			return args[idx].Keys
+		}
+		same := ex.BodyArg >= 0 && ex.BodyArg == ex.QueryArg && ex.BodyProp == ex.QueryProp
+		if same {
+			if ex.Method == "GET" || ex.Method == "HEAD" || ex.Method == "DELETE" {
+				qOut = append(qOut, getK(ex.QueryArg, ex.QueryProp)...)
+			} else if ex.Method != "" {
+				bOut = append(bOut, getK(ex.BodyArg, ex.BodyProp)...)
+			}
+			return qOut, bOut
+		}
+		qOut = append(qOut, getK(ex.QueryArg, ex.QueryProp)...)
+		bOut = append(bOut, getK(ex.BodyArg, ex.BodyProp)...)
+		if (ex.Method == "GET" || ex.Method == "HEAD") && len(bOut) > 0 {
+			qOut = append(qOut, bOut...)
+			bOut = nil
+		}
+		return qOut, bOut
 	}
 
 	applyLeaf := func(callerIdx int, caller Script, im jsapi.Import, ex indexedExport, effArgs []jsapi.ImportArg, viaQ, viaB []string) {
@@ -1738,6 +1805,8 @@ func linkModules(scripts []Script, byKey map[string]*Endpoint, order *[]string, 
 			leafBaseKeys = append(leafBaseKeys, "prop:"+ex.BaseProp)
 		} else if ex.BaseArg < 0 && ex.HasDynBase && ex.Name != "" {
 			leafBaseKeys = append(leafBaseKeys, "exp:"+exScript.SHA256+"\x00"+ex.Name)
+		} else if ex.BaseArg < 0 && !ex.HasDynBase && ex.URLArg >= 0 && ex.URLArg < len(effArgs) && effArgs[ex.URLArg].BaseKey != "" {
+			leafBaseKeys = append(leafBaseKeys, effArgs[ex.URLArg].BaseKey)
 		}
 
 		for _, method := range methods {
@@ -2407,6 +2476,27 @@ func PreferInScope(bases []string, inScope func(host string) bool) []string {
 // path is from that origin's root: that origin, and no other. Otherwise
 // the candidates: absolute ones before relative ones (a setting's
 // default), the shortest (an origin) first.
+func sameServiceFamily(segA, segB string) bool {
+	if segA == "" || segB == "" || segA == segB {
+		return false
+	}
+	a := strings.ToLower(segA)
+	b := strings.ToLower(segB)
+	ta := strings.Split(a, "-")
+	tb := strings.Split(b, "-")
+	if len(ta) < 2 || len(tb) < 2 {
+		return false
+	}
+	if len(ta[0]) >= 3 && ta[0] == tb[0] && !genericSegRe.MatchString(ta[0]) {
+		return true
+	}
+	lastA, lastB := ta[len(ta)-1], tb[len(tb)-1]
+	if lastA == lastB && (lastA == "api" || lastA == "service" || lastA == "svc") {
+		return true
+	}
+	return false
+}
+
 func baseFor(bases []string, path, kind string, inScope func(host string) bool) []string {
 	bases = PreferInScope(bases, inScope)
 	if kind == "openapi" {
@@ -2420,7 +2510,14 @@ func baseFor(bases []string, path, kind string, inScope func(host string) bool) 
 			return uniq(spec)
 		}
 	}
-	var first, rest []string
+	hasPlaceholderPrefix := strings.HasPrefix(path, placeholder)
+	cleanPath := strings.TrimPrefix(path, placeholder)
+	if !strings.HasPrefix(cleanPath, "/") {
+		cleanPath = "/" + cleanPath
+	}
+	pathFirstSeg := gatewaySeg(cleanPath)
+
+	var first, inferredParent, rest []string
 	own := false
 	for _, b := range bases {
 		head, bp := "", strings.TrimRight(b, "/")
@@ -2428,20 +2525,38 @@ func baseFor(bases []string, path, kind string, inScope func(host string) bool) 
 			head, bp = u.Scheme+"://"+u.Host, strings.TrimRight(u.EscapedPath(), "/")
 		}
 		switch {
-		case head != "" && bp != "" && (path == bp || strings.HasPrefix(path, bp+"/")):
+		case head != "" && bp != "" && (cleanPath == bp || strings.HasPrefix(cleanPath, bp+"/")):
 			first = append(first, head)
-		case head != "" && bp != "" && gatewaySeg(bp) != "" && gatewaySeg(bp) == gatewaySeg(path):
+		case head != "" && bp != "" && gatewaySeg(bp) != "" && gatewaySeg(bp) == pathFirstSeg:
 			first = append(first, head)
-		case bp != "" && head == "" && strings.HasPrefix(path, bp+"/"):
+		case bp != "" && head == "" && !hasPlaceholderPrefix && (cleanPath == bp || strings.HasPrefix(cleanPath, bp+"/")):
 			// A relative base the path starts with (a proxy of the page's
 			// origin: /console-api): the page's own origin, and no other.
 			own = true
 		default:
+			if head != "" && bp != "" && pathFirstSeg != "" {
+				if idx := strings.LastIndexByte(bp, '/'); idx > 0 {
+					parentBP, leafSeg := bp[:idx], bp[idx+1:]
+					if sameServiceFamily(leafSeg, pathFirstSeg) {
+						inferredParent = append(inferredParent, head+parentBP)
+						continue
+					}
+				}
+			}
+			if head == "" && bp != "" && pathFirstSeg != "" && strings.Count(bp, "/") == 1 {
+				relSeg := strings.TrimPrefix(bp, "/")
+				if relSeg == pathFirstSeg || sameServiceFamily(relSeg, pathFirstSeg) {
+					continue
+				}
+			}
 			rest = append(rest, b)
 		}
 	}
 	if len(first) > 0 {
 		return uniq(first)
+	}
+	if len(inferredParent) > 0 {
+		return uniq(inferredParent)
 	}
 	if own {
 		return nil
