@@ -484,6 +484,11 @@ var nonAPIInfraDomains = []string{
 	"vimeo.com",
 	"youtube.com",
 	"ytimg.com",
+	"onetrust.com",
+	"cookielaw.org",
+	"cookiebot.com",
+	"trustarc.com",
+	"usercentrics.eu",
 }
 
 // IsTrackerHost reports whether host belongs to a third-party analytics,

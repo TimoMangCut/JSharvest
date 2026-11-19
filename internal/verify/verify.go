@@ -795,6 +795,14 @@ func (v *verifier) judge(ctx context.Context, r *Result, d Draft, sig Sig, body 
 		r.Verdict, r.Reason = DeadOrFP, "answers as any path does (the canary)"
 	case st >= 200 && st < 300:
 		if sig.Shell != "" && strings.Contains(sig.Type, "html") {
+			if c.Answer != nil && sameHTMLShellBody(*c.Answer, sig) {
+				if d.Confidence == "string" && d.Method == "" {
+					r.Verdict, r.Reason = ClientRoute, "bare string answered 2xx with the canary's HTML shell"
+				} else {
+					r.Verdict, r.Reason = DeadOrFP, "answers 2xx with the same HTML shell as the canary"
+				}
+				break
+			}
 			if !v.matchesKnownHTMLShell(hostOf(target), sig) {
 				// An HTML page no canary has shown yet, under a prefix of
 				// its own: the origin's root may answer every path with it
@@ -1115,12 +1123,16 @@ func (v *verifier) canaryAnswer(c *Canary, ans replay.Answer, err error) *Canary
 	return c
 }
 
-func sameHTMLShell(ex, s Sig) bool {
-	if ex.Status != s.Status || !strings.Contains(s.Type, "html") || s.Shell == "" || ex.Shell != s.Shell {
+func sameHTMLShellBody(ex, s Sig) bool {
+	if !strings.Contains(ex.Type, "html") || !strings.Contains(s.Type, "html") || s.Shell == "" || ex.Shell != s.Shell {
 		return false
 	}
 	lo, hi := min(ex.Words, s.Words), max(ex.Words, s.Words)
 	return hi == 0 || float64(hi-lo) <= 0.25*float64(hi) || (hi <= 45 && hi-lo <= 15)
+}
+
+func sameHTMLShell(ex, s Sig) bool {
+	return ex.Status == s.Status && sameHTMLShellBody(ex, s)
 }
 
 func (v *verifier) recordHTMLShell(host string, s Sig, isWAF bool) {

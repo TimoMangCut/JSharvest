@@ -263,7 +263,7 @@ func (m *Map) FilesFor(scriptURL string) []File {
 var (
 	schemeRe               = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9+.-]*:/*`)
 	standaloneVendorDirRe  = regexp.MustCompile(`(?i)/(?:vendors?|bower_components|node_modules|wp-includes/js|javax\.faces\.resource)/`)
-	standaloneVendorFileRe = regexp.MustCompile(`(?i)^(?:jquery|bootstrap|ckeditor\d*|tinymce|datatables|jszip|select2|flatpickr|moment(?:-with-locales)?|owl\.carousel|swiper|lodash|underscore|backbone|handlebars|mustache|tabbable|popper|livewire|alpine(?:\.min)?|filepond|chart(?:\.umd)?|d3|three|pdf(?:\.worker)?|prism|highlight)(?:[._-][\w.~-]*)?\.m?js$`)
+	standaloneVendorFileRe = regexp.MustCompile(`(?i)^(?:jquery|bootstrap|adminlte|ckeditor\d*|tinymce|datatables|jszip|select2|flatpickr|moment(?:-with-locales)?|owl\.carousel|swiper|lodash|underscore|backbone|handlebars|mustache|tabbable|popper|livewire|alpine(?:\.min)?|filepond|chart(?:\.umd)?|d3|three|pdf(?:\.worker)?|prism|highlight|toastr|sweetalert\d*|apexcharts|echarts|fullcalendar|dropzone|summernote|quill)(?:[._-][\w.~-]*)?\.m?js$`)
 	genericAppStem         = map[string]bool{
 		"main": true, "index": true, "app": true, "bundle": true, "chunk": true,
 		"client": true, "page": true, "pages": true, "entry": true, "script": true,

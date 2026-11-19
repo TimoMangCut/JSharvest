@@ -48,6 +48,8 @@ var (
 	// Next.js Pages Router: chunk paths in _buildManifest.js, relative to
 	// /_next/, in the route table and in the arguments of its wrapper.
 	nextChunkRe = regexp.MustCompile(`"(static/[^"\s]+?\.js)"`)
+	// Next.js App Router: escaped chunk paths inside self.__next_f.push([1,"..."]).
+	nextRSCRefRe = regexp.MustCompile(`\\"((?:/_next/static/|static/chunks/)[\w@~.+%/-]+?\.m?js)\\"`)
 	// Workers the code starts by a constant URL: navigator.serviceWorker
 	// (?.)register("/sw.js"), new Worker("w.js"), new SharedWorker("/s.js").
 	// Their URL is relative to the document, not to the script.
@@ -112,6 +114,22 @@ func Static(body []byte, scriptURL, pageURL string) []Candidate {
 			for _, s := range nextChunkRe.FindAllStringSubmatch(src, -1) {
 				add(s[1], "build-manifest", &next)
 			}
+		}
+	}
+	if strings.Contains(src, "__next_f") {
+		root := originRoot(pageURL, base)
+		for _, s := range nextRSCRefRe.FindAllStringSubmatch(src, -1) {
+			ref := s[1]
+			if strings.HasPrefix(ref, "static/") {
+				ref = "/_next/" + ref
+			}
+			add(ref, "next-rsc", root)
+		}
+	}
+	if strings.Contains(src, "TURBOPACK") {
+		root := originRoot(pageURL, base)
+		for _, s := range nextChunkRe.FindAllStringSubmatch(src, -1) {
+			add("/_next/"+s[1], "next-rsc", root)
 		}
 	}
 

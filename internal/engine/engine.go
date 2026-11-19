@@ -34,6 +34,7 @@ import (
 	"github.com/TimoMangCut/JSharvest/internal/endpoints"
 	"github.com/TimoMangCut/JSharvest/internal/flow"
 	"github.com/TimoMangCut/JSharvest/internal/guard"
+	"github.com/TimoMangCut/JSharvest/internal/htmlscan"
 	"github.com/TimoMangCut/JSharvest/internal/httpcrawl"
 	"github.com/TimoMangCut/JSharvest/internal/netsafe"
 	"github.com/TimoMangCut/JSharvest/internal/resolve"
@@ -312,6 +313,7 @@ type runState struct {
 	mapsSeen map[string]bool              // source map URLs asked for
 	// mapGuesses: the <script>.map guesses each origin missed and found.
 	mapGuesses sourcemap.Guesses
+	rscDeduper htmlscan.RSCDeduper
 	// resolveMu: one resolver round at a time, so that -resolve-rate is the
 	// run's, and its counts in the run record are kept by one.
 	resolveMu sync.Mutex
@@ -1080,6 +1082,20 @@ func (e *engine) startOn(tab context.Context) (*capture.Capture, string, error) 
 // sink stores one captured script. Capture calls it from one goroutine at a
 // time, so the run record needs no lock here.
 func (e *engine) sink(s capture.Script) {
+	if s.Kind == "inline" && len(s.Body) > 0 {
+		refURL := s.Page
+		if refURL == "" {
+			refURL = s.URL
+		}
+		if u, err := url.Parse(refURL); err == nil && u.Scheme != "" && u.Host != "" {
+			orig := strings.ToLower(u.Scheme + "://" + u.Host)
+			var keep bool
+			s.Body, keep = e.rscDeduper.Compact(orig, s.Body)
+			if !keep {
+				return
+			}
+		}
+	}
 	e.noteCaptured(&s)
 	key, isNew, err := e.st.Put(toRecord(s))
 	if err != nil {

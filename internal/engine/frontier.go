@@ -25,6 +25,7 @@ import (
 	"github.com/TimoMangCut/JSharvest/internal/detect"
 	"github.com/TimoMangCut/JSharvest/internal/endpoints"
 	"github.com/TimoMangCut/JSharvest/internal/frontier"
+	"github.com/TimoMangCut/JSharvest/internal/htmlscan"
 	"github.com/TimoMangCut/JSharvest/internal/guard"
 	"github.com/TimoMangCut/JSharvest/internal/resolve"
 	"github.com/TimoMangCut/JSharvest/internal/scope"
@@ -227,6 +228,7 @@ func runFrontier(ctx context.Context, cfg Config, tab context.Context, g *guard.
 		deferredBySkel: map[string][]deferredFound{},
 		deferredSeen:   map[string]bool{},
 		dedupe:         n > 1,
+		rscDeduper:     &e.rscDeduper,
 	}
 	c.cond = sync.NewCond(&c.mu)
 	var wg sync.WaitGroup
@@ -386,6 +388,7 @@ type crawl struct {
 	deferredKeys   []string
 	deferredSeen   map[string]bool
 	totalDeferred  int
+	rscDeduper     *htmlscan.RSCDeduper
 }
 
 func isFrontierSpecURL(raw string) bool {
@@ -658,6 +661,7 @@ func (c *crawl) commit() {
 		var inlineSigs [][32]byte
 		if d.readScripts {
 			var mine map[string]bool
+			wasReadAny := c.readAnyYet
 			if c.readAnyYet {
 				mine = map[string]bool{}
 				for _, sha := range d.scripts {
@@ -665,6 +669,9 @@ func (c *crawl) commit() {
 				}
 			}
 			c.readAnyYet = true
+			if !wasReadAny && c.dedupe && c.rscDeduper != nil {
+				c.rscDeduper.Freeze()
+			}
 			for _, s := range ss {
 				if (mine != nil && !mine[s.SHA256]) || c.seenScriptSHA[s.SHA256] {
 					continue

@@ -301,6 +301,7 @@ type crawler struct {
 	mapMu        sync.Mutex
 	mapCache     map[string]*mapDedupEntry
 	mapInflight  map[string]*mapDedupEntry
+	rscDeduper   htmlscan.RSCDeduper
 }
 
 // originOf is a URL's scheme and host, lowercased.
@@ -1002,6 +1003,11 @@ func (cr *crawler) commitPage(fp fetchedPage, first bool, b *bucket) ([]job, []f
 		code := []byte(s.Inline)
 		if detect.IsChallengeScript("", "", "inline", code, false) {
 			cr.count(func(st *Stats) { st.Challenge++ })
+			continue
+		}
+		var keep bool
+		code, keep = cr.rscDeduper.Compact(originOf(a.URL), code)
+		if !keep {
 			continue
 		}
 		cr.count(func(st *Stats) { st.Inline++ })
