@@ -262,6 +262,9 @@ func (r *runner) flushFilesLocked() {
 // history calls. It resumes where a run stopped, when the query is the
 // same.
 func Run(ctx context.Context, o Options) (*Summary, error) {
+	if o.Log == nil {
+		o.Log = func(string, ...any) {}
+	}
 	if o.Mode == ModeListOnly {
 		// The public indexes only: never the target (no live check, so no
 		// prefetch either), whatever the caller set.
@@ -391,8 +394,11 @@ func Run(ctx context.Context, o Options) (*Summary, error) {
 	}
 	r.cur = loadCurrent(o.Root, o.InScope)
 
+	var listDur, pagesDur, fetchDur, historyDur time.Duration
 	if !r.st.Listed {
+		t0 := time.Now()
 		err := r.list(ctx)
+		listDur = time.Since(t0)
 		r.flushFiles()
 		r.mu.Lock()
 		if len(r.seenURLs) > 0 {
@@ -417,19 +423,30 @@ func Run(ctx context.Context, o Options) (*Summary, error) {
 		r.note("no crawl of the target to compare with: every endpoint of the old scripts will read as historical; crawl the target first")
 	}
 
+	tPages := time.Now()
 	err = r.pages(ctx)
+	pagesDur = time.Since(tPages)
 	if err == nil {
+		tFetch := time.Now()
 		err = r.fetch(ctx)
-	}
-	if ferr := r.store.Flush(); err == nil {
+		if ferr := r.store.Flush(); err == nil {
+			err = ferr
+		}
+		fetchDur = time.Since(tFetch)
+	} else if ferr := r.store.Flush(); err == nil {
 		err = ferr
 	}
 	// The history always, a block or not, an empty store or not: it
 	// rewrites historical.jsonl, which would otherwise be the last run's
 	// beside this run's archive.json (round 37.1, F3).
 	if err == nil {
+		tHist := time.Now()
 		err = r.history(ctx)
+		historyDur = time.Since(tHist)
 	}
+	o.Log("archive timings: list=%s pages=%s fetch=%s history=%s",
+		listDur.Round(time.Millisecond), pagesDur.Round(time.Millisecond),
+		fetchDur.Round(time.Millisecond), historyDur.Round(time.Millisecond))
 	r.save()
 	if err == nil {
 		r.mu.Lock()
@@ -478,16 +495,20 @@ func (r *runner) history(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	t0 := time.Now()
 	scripts, err := endpoints.AnalyzeSlim(r.o.Dir, 0)
 	if err != nil {
 		return err
 	}
+	analyzeDur := time.Since(t0)
+	numScripts := len(scripts)
 	if r.store.Len() > 1000 {
 		endpoints.ClearResultMemCache()
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	t1 := time.Now()
 	d := results.Open(r.o.Dir)
 	if err := d.Refresh(); err != nil {
 		return err
@@ -496,15 +517,20 @@ func (r *runner) history(ctx context.Context) error {
 	if err := endpoints.Write(r.o.Dir, eps); err != nil {
 		return err
 	}
+	assembleDur := time.Since(t1)
+	numEps := len(eps)
 	// Old code's client headers and buckets: a secret rotated out of
 	// today's bundle may still work.
+	t2 := time.Now()
 	if _, err := endpoints.SaveIntelFromScripts(r.o.Dir, scripts, r.o.InScope, nil); err != nil {
 		return err
 	}
+	intelDur := time.Since(t2)
 	scripts = nil
 	if r.store.Len() > 1000 {
 		endpoints.ClearMemCache()
 	}
+	t3 := time.Now()
 	lines, _, err := classifyCtx(ctx, eps, r.cur, r.store.Entry)
 	if err != nil {
 		return err
@@ -521,7 +547,17 @@ func (r *runner) history(ctx context.Context) error {
 	if err := os.WriteFile(tmp, []byte(b.String()), 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, filepath.Join(r.o.Dir, "historical.jsonl"))
+	if err := os.Rename(tmp, filepath.Join(r.o.Dir, "historical.jsonl")); err != nil {
+		return err
+	}
+	classifyDur := time.Since(t3)
+	if r.o.Log != nil {
+		r.o.Log("history timings: scripts=%d endpoints=%d analyze=%s assemble=%s intel=%s classify=%s",
+			numScripts, numEps,
+			analyzeDur.Round(time.Millisecond), assembleDur.Round(time.Millisecond),
+			intelDur.Round(time.Millisecond), classifyDur.Round(time.Millisecond))
+	}
+	return nil
 }
 
 func appendFile(p string) (*os.File, error) {
