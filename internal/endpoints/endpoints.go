@@ -247,6 +247,18 @@ func analyzeDir(dir string, workers int, skip map[string]bool, slim bool) ([]Scr
 
 const heavyScriptBytes = 320 << 10
 
+var (
+	extractHeavySem = make(chan struct{}, max(2, min(4, runtime.GOMAXPROCS(0)/2)))
+	extractSFMu     sync.Mutex
+	extractInflight = map[string]*extractCall{}
+	testExtractHook atomic.Pointer[func()]
+)
+
+type extractCall struct {
+	ready chan struct{}
+	res   jsapi.Result
+}
+
 func extractJS(src []byte, hint string, heavySem chan struct{}) jsapi.Result {
 	// Clip slice capacity so tdewolff/parse/v2.NewInputBytes (which appends a
 	// NUL sentinel byte) never mutates a shared backing array across workers.
@@ -259,6 +271,9 @@ func extractJS(src []byte, hint string, heavySem chan struct{}) jsapi.Result {
 			heavySem <- struct{}{}
 			defer func() { <-heavySem }()
 		}
+		if fn := testExtractHook.Load(); fn != nil {
+			(*fn)()
+		}
 		res := jsapi.ExtractLoose(src)
 		res.LooseFallback = true
 		res.ParseError = fmt.Sprintf("oversize_ast_bypass: %d bytes", len(src))
@@ -267,6 +282,9 @@ func extractJS(src []byte, hint string, heavySem chan struct{}) jsapi.Result {
 	if heavySem != nil && len(src) >= heavyScriptBytes {
 		heavySem <- struct{}{}
 		defer func() { <-heavySem }()
+	}
+	if fn := testExtractHook.Load(); fn != nil {
+		(*fn)()
 	}
 	res := jsapi.ExtractSource(src, hint)
 	if strings.HasPrefix(res.Error, "parse") {
@@ -299,47 +317,74 @@ func writeStaticCache(cache string, res jsapi.Result) {
 	_ = os.Remove(tmpName)
 }
 
+func ensureStaticCache(dir, sum string, res jsapi.Result) {
+	if dir == "" {
+		return
+	}
+	cacheDir := filepath.Join(dir, CacheDir)
+	cache := filepath.Join(cacheDir, sum+".json")
+	if _, err := os.Stat(cache); err != nil && os.MkdirAll(cacheDir, 0o700) == nil {
+		writeStaticCache(cache, res)
+	}
+}
+
 // ExtractCached extracts JS/TS/SFC metadata for src using <dir>/static/<sha256>.json
-// so HTTP crawls that inspect scripts for frontier routes or Phase-2 spec probing
-// warm the exact cache Analyze reads at the end of the run instead of parsing AST twice.
+// so HTTP crawls and archive fetches warm the exact cache Analyze reads at the
+// end of the run, deduplicating concurrent parses per SHA-256 and bounding
+// multi-hundred-KB AST allocations via extractHeavySem.
 func ExtractCached(dir string, src []byte, hint string) jsapi.Result {
 	rawSum := sha256.Sum256(src)
 	sum := hex.EncodeToString(rawSum[:])
 	if res, ok := memGetResult(sum); ok {
-		if dir != "" {
-			cache := filepath.Join(dir, CacheDir, sum+".json")
-			if _, err := os.Stat(cache); err != nil && os.MkdirAll(filepath.Join(dir, CacheDir), 0o700) == nil {
-				writeStaticCache(cache, res)
+		ensureStaticCache(dir, sum, res)
+		return res
+	}
+
+	extractSFMu.Lock()
+	if res, ok := memGetResult(sum); ok {
+		extractSFMu.Unlock()
+		ensureStaticCache(dir, sum, res)
+		return res
+	}
+	if call, ok := extractInflight[sum]; ok {
+		extractSFMu.Unlock()
+		<-call.ready
+		ensureStaticCache(dir, sum, call.res)
+		return call.res
+	}
+	call := &extractCall{ready: make(chan struct{})}
+	extractInflight[sum] = call
+	extractSFMu.Unlock()
+
+	defer func() {
+		close(call.ready)
+		extractSFMu.Lock()
+		delete(extractInflight, sum)
+		extractSFMu.Unlock()
+	}()
+
+	if dir != "" {
+		cache := filepath.Join(dir, CacheDir, sum+".json")
+		var res jsapi.Result
+		if b, err := os.ReadFile(cache); err == nil && json.Unmarshal(b, &res) == nil && res.Version == jsapi.Version {
+			memPutResult(sum, res)
+			if len(res.Builders) > 0 || len(res.Exports) > 0 {
+				CacheScriptBody(sum, src)
 			}
+			call.res = res
+			return res
 		}
-		return res
 	}
-	if dir == "" {
-		res := extractJS(src, hint, nil)
-		memPutResult(sum, res)
-		if len(res.Builders) > 0 || len(res.Exports) > 0 {
-			CacheScriptBody(sum, src)
-		}
-		return res
-	}
-	cacheDir := filepath.Join(dir, CacheDir)
-	cache := filepath.Join(cacheDir, sum+".json")
-	var res jsapi.Result
-	if b, err := os.ReadFile(cache); err == nil && json.Unmarshal(b, &res) == nil && res.Version == jsapi.Version {
-		memPutResult(sum, res)
-		if len(res.Builders) > 0 || len(res.Exports) > 0 {
-			CacheScriptBody(sum, src)
-		}
-		return res
-	}
-	res = extractJS(src, hint, nil)
+
+	res := extractJS(src, hint, extractHeavySem)
 	memPutResult(sum, res)
 	if len(res.Builders) > 0 || len(res.Exports) > 0 {
 		CacheScriptBody(sum, src)
 	}
-	if os.MkdirAll(cacheDir, 0o700) == nil {
-		writeStaticCache(cache, res)
+	if dir != "" && os.MkdirAll(filepath.Join(dir, CacheDir), 0o700) == nil {
+		writeStaticCache(filepath.Join(dir, CacheDir, sum+".json"), res)
 	}
+	call.res = res
 	return res
 }
 
