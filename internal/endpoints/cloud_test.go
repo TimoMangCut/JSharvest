@@ -311,8 +311,11 @@ func TestProbeCloudClassificationsAndSafety(t *testing.T) {
 func TestProbeCloudSSRFGuardProxyAndCap(t *testing.T) {
 	// 1. Without HostRules and AllowPrivate=false, DNS resolving to 127.0.0.1 is refused by netsafe.
 	hit := false
+	var hitMu sync.Mutex
 	localSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hitMu.Lock()
 		hit = true
+		hitMu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer localSrv.Close()

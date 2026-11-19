@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 )
 
@@ -53,7 +54,8 @@ func TestLiteralHostValues(t *testing.T) {
 
 func TestGuardRoundTripper(t *testing.T) {
 	hit := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hit++ }))
+	var hitMu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hitMu.Lock(); hit++; hitMu.Unlock() }))
 	defer srv.Close()
 	rules, _ := ParseHostRules("MAP *.jsh.test 127.0.0.1")
 	do := func(g Guard, u string) error {

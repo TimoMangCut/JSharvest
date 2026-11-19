@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/TimoMangCut/JSharvest/internal/frontier"
@@ -48,9 +49,9 @@ func TestSkeletonControllerPrunesSaturatedSSRButKeepsFeatureTabs(t *testing.T) {
 		}
 		fmt.Fprintf(w, `<html><head><title>Account %s</title><script src="/app.js"></script></head><body>%s</body></html>`, tab, extra)
 	})
-	newsHits := 0
+	var newsHits atomic.Int32
 	mux.HandleFunc("/news/", func(w http.ResponseWriter, r *http.Request) {
-		newsHits++
+		newsHits.Add(1)
 		w.Header().Set("Content-Type", "text/html")
 		// Distinct <title> per article so SPA shellPrint does not match, plus
 		// repetitive inline config with no new API endpoints.
@@ -84,8 +85,8 @@ func TestSkeletonControllerPrunesSaturatedSSRButKeepsFeatureTabs(t *testing.T) {
 			t.Errorf("feature tab /account/%s was not visited", tab)
 		}
 	}
-	if newsHits >= 15 {
-		t.Fatalf("expected SSR /news/{id} template to saturate early, but hit %d/30 articles", newsHits)
+	if newsHits.Load() >= 15 {
+		t.Fatalf("expected SSR /news/{id} template to saturate early, but hit %d/30 articles", newsHits.Load())
 	}
 	if res.Listed[frontier.TemplateSaturated] < 15 {
 		t.Fatalf("expected >= 15 template-saturated listings, got %d (listed=%v)", res.Listed[frontier.TemplateSaturated], res.Listed)

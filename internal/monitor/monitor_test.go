@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -128,6 +129,7 @@ func TestRuns(t *testing.T) {
 
 func TestWebhook(t *testing.T) {
 	var got []Payload
+	var gotMu sync.Mutex
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/moved" {
 			http.Redirect(w, r, "/elsewhere", http.StatusFound)
@@ -135,7 +137,9 @@ func TestWebhook(t *testing.T) {
 		}
 		var p Payload
 		json.NewDecoder(r.Body).Decode(&p)
+		gotMu.Lock()
 		got = append(got, p)
+		gotMu.Unlock()
 		w.WriteHeader(204)
 	}))
 	defer srv.Close()

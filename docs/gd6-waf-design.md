@@ -1935,3 +1935,11 @@ Review đúng ở cả hai điểm. `check_url` khác origin với tab (bị g�
   - Cần thêm danh sách method gửi request của cùng lớp (`getJSON`, `ajax`, `fetch`), cũng xác định qua thân hàm.
 - **Rủi ro precision:** `getUrl` là tên phổ biến. Nên chỉ nhận khi định nghĩa duy nhất trong tập script có thân đúng dấu hiệu, và nơi gọi đưa kết quả vào một request đã nhận diện được.
 - **Trần ước tính:** khoảng 44 operation trên Jellyfin. Cần kiểm thêm trên một tập khác trước khi tin là tổng quát.
+
+## 49. Đợt 37 & 37.1: `verify -host-inflight`, root canary, re-judge, gate
+
+- **Khi nào có lợi:** một host, RTT `r`, N = 1 thì trần là `1/r` req/s (đo được 3,6 req/s ở 273 ms). `-host-inflight N` chỉ có lợi khi `-rate` lớn hơn `1/r`. Mặc định giữ 1 (đúng thiết kế 25K: mỗi host một request mỗi lần, verdict và `Sent` giống `-concurrency 1`).
+- **Đồng bộ:** singleflight (`ready`) cho canary, sub-canary và root canary; `optOnce` cho OPTIONS của canary; toàn bộ gate nằm dưới `v.mu`.
+- **Root canary ở mọi N:** một câu trả lời 2xx-HTML chưa biết, dưới prefix khác `/`, kích hoạt canary gốc của origin (một lần mỗi origin). Canary này không tính vào `-max-prefixes` cho đến khi một draft của prefix `/` dùng nó.
+- **Re-judge:** sau mọi probe, các `verified_alive` là 2xx-HTML được judge lại bằng nhánh đầu của `judge` với tập shell **cuối cùng**. Không gửi gì; chỉ hạ verdict; tất định bất kể thứ tự và N. Sửa luôn tính không tất định của shell `*` (2 host trở lên) vốn đã có ở N = 1 khi `-concurrency > 1`.
+- **Hạ về 1:** `throttled` (429 hoặc block kiểu rate, một chiều) và `gateSer` (từ ứng viên gate đầu tiên tới khi `g.broken`, tự nhả). Request đang bay lúc đó (tối đa N−1) vẫn báo verdict thật.

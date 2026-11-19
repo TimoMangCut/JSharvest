@@ -39,6 +39,22 @@ type Wayback struct {
 	Sharded     bool   // use ZipNum showNumPages + parallel page=0..N-1 shards
 }
 
+// CarryIndexBlock is called as a crawl's stage 2 begins (round 37.1, B5).
+// When the CDX client found the address blocked (the Wayback refused or
+// reset its connections, not a 429), the memento client waits its Wait
+// before its first request and gives up at the first refusal: a blocked
+// address is blocked for every Wayback endpoint. A 429 of the CDX server
+// carries nothing: the mementos have a limit of their own. It reports
+// whether it carried anything.
+func (w *Wayback) CarryIndexBlock() bool {
+	if w == nil || w.Client == nil || w.IndexClient == nil || w.IndexClient == w.Client || !w.IndexClient.isBlocked() {
+		return false
+	}
+	w.Files.cooldown(w.Client.Wait)
+	w.Client.suspect()
+	return true
+}
+
 func (w *Wayback) indexClient() *Client {
 	if w.IndexClient != nil {
 		return w.IndexClient

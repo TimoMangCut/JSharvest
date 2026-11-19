@@ -50,6 +50,9 @@ type client struct {
 	maxBody   int
 	jar       http.CookieJar
 	aia       *tlsutil.AIA
+	// dials holds host:port pairs that never answered (nil behind a proxy
+	// or with a test resolver).
+	dials *hostPortBreaker
 }
 
 // shouldAbortDocumentBody reports whether a k == document response header
@@ -92,8 +95,10 @@ func newClient(o Options, jar http.CookieJar, allow func(u, first *url.URL, doc 
 	// (!TargetPublic) may reach private addresses.
 	dialer := &netsafe.Dialer{HostRules: rules, AllowPrivate: o.AllowPrivate, Proxy: o.Proxy, Resolver: o.Resolver, Timeout: dialTimeout}
 	dialCtx := dialer.DialContext
+	var dials *hostPortBreaker
 	if o.Proxy == nil && o.Resolver == nil {
-		dialCtx = newHostPortBreaker(dialCtx)
+		dials = newDialBreaker(dialCtx)
+		dialCtx = dials.dialContext
 	}
 	tr := &http.Transport{
 		Proxy:                 netsafe.ProxyFunc(o.Proxy, rules),
@@ -107,7 +112,7 @@ func newClient(o Options, jar http.CookieJar, allow func(u, first *url.URL, doc 
 	if o.Proxy == nil {
 		tr.Proxy = nil
 	}
-	c := &client{ua: o.UserAgent, limit: newLimiter(o.Rate), pageLimit: newLimiter(o.PageRate), maxBody: o.MaxBody, jar: jar}
+	c := &client{ua: o.UserAgent, limit: newLimiter(o.Rate), pageLimit: newLimiter(o.PageRate), maxBody: o.MaxBody, jar: jar, dials: dials}
 	switch {
 	case o.Insecure:
 		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}

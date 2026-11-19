@@ -40,7 +40,7 @@ func runVerify(args []string) error {
 	noCloudProbe := fs.Bool("no-cloud-probe", false, "skip safe ACL checks of cloud storage URLs in intel.json")
 	scopeMode := fs.String("scope", "", "rdn or fqdn: the hosts requests may go to; default: the crawl's -scope")
 	concurrency := fs.Int("concurrency", 8, "hosts verified at once, each one request at a time unless -host-inflight > 1 (-rate stays the ceiling on all requests)")
-	hostInFlight := fs.Int("host-inflight", 1, "concurrent probes allowed on a single host when -concurrency > 1 (default 1; raise to 2-4 with higher -rate on high-RTT gateways)")
+	hostInFlight := fs.Int("host-inflight", 1, "concurrent probes allowed on a single host when -concurrency > 1 (default 1; raise to 2-4 with a -rate above 1/RTT on high-RTT gateways). A host drops to one at a time on a 429, and while a gate is being counted (back to N once it answers otherwise); probes already in flight then still report their own verdict")
 	gateAfter := fs.Int("gate-after", 0, "probes in a row on a host that all answer alike, as their canaries (a login, a device or app header before every route): the host's other drafts are not sent (0: never)")
 	rf := addReplayFlags(fs)
 	fs.Parse(args)

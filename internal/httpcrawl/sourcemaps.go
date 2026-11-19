@@ -9,11 +9,23 @@ import (
 	"github.com/TimoMangCut/JSharvest/internal/sourcemap"
 )
 
+// mapDedupEntry is a map fetched once for a bundle several hosts serve.
+// It keeps the sources' references, not their content: the content is in
+// the store, by its SHA-256 (round 37.1, D).
 type mapDedupEntry struct {
 	ready    chan struct{}
 	ok       bool
-	ownFiles []sourcemap.File
+	ownRefs  []SourceRef
 	sourcesN int
+}
+
+func sourceRefs(own []sourcemap.File) []SourceRef {
+	refs := make([]SourceRef, 0, len(own))
+	for _, f := range own {
+		sum := sha256.Sum256([]byte(f.Content))
+		refs = append(refs, SourceRef{Path: f.Path, SHA256: hex.EncodeToString(sum[:])})
+	}
+	return refs
 }
 
 func mapDedupeKey(scriptURL string, scriptBody []byte, ref sourcemap.Ref) string {
@@ -72,14 +84,13 @@ func (cr *crawler) sourceMap(ctx context.Context, a answer, j job, h map[string]
 			cr.mapMu.Lock()
 			if cached, hit := cr.mapCache[dedupKey]; hit {
 				cr.mapMu.Unlock()
-				if ref.Guess {
-					cr.guesses.Done(ref.URL, true)
-				}
+				// No request to this origin: its guesses learn nothing
+				// (round 37.1, F2).
 				cr.count(func(st *Stats) { st.SourceMaps++ })
 				cr.o.SourceMap(SourceMap{
 					URL:       ref.URL,
 					ScriptURL: a.URL,
-					OwnFiles:  cached.ownFiles,
+					OwnRefs:   cached.ownRefs,
 					SourcesN:  cached.sourcesN,
 					Reused:    true,
 				})
@@ -104,6 +115,11 @@ func (cr *crawler) sourceMap(ctx context.Context, a answer, j job, h map[string]
 			break
 		}
 	}
+	// finishFlight publishes the map to the hosts waiting on the same
+	// bundle. It runs only after SourceMap has stored the sources (the
+	// callback stores them before it returns), so a reuse never names a
+	// source the store does not have yet; the deferred call releases the
+	// waiters, with nothing to reuse, on every other way out.
 	finishFlight := func(sm *sourcemap.Map, own []sourcemap.File) {
 		if myFlight == nil {
 			return
@@ -112,7 +128,7 @@ func (cr *crawler) sourceMap(ctx context.Context, a answer, j job, h map[string]
 		delete(cr.mapInflight, dedupKey)
 		if sm != nil && sm.CompleteSourcesContent() {
 			myFlight.ok = true
-			myFlight.ownFiles = own
+			myFlight.ownRefs = sourceRefs(own)
 			myFlight.sourcesN = len(sm.Sources)
 			if cr.mapCache == nil {
 				cr.mapCache = map[string]*mapDedupEntry{}
@@ -148,7 +164,6 @@ func (cr *crawler) sourceMap(ctx context.Context, a answer, j job, h map[string]
 		return
 	}
 	own := extractOwnMapFiles(sm, a.URL)
-	finishFlight(sm, own)
 	cr.count(func(st *Stats) { st.SourceMaps++ })
 	cr.o.SourceMap(SourceMap{
 		URL:       ref.URL,
@@ -158,4 +173,5 @@ func (cr *crawler) sourceMap(ctx context.Context, a answer, j job, h map[string]
 		OwnFiles:  own,
 		SourcesN:  len(sm.Sources),
 	})
+	finishFlight(sm, own) // stored: now the waiting hosts may reuse it
 }

@@ -148,6 +148,9 @@ func TestRound37SourceMapSingleflightDedupAndStrippedFallback(t *testing.T) {
 			for _, f := range m.OwnFiles {
 				ownByScript[m.ScriptURL] = append(ownByScript[m.ScriptURL], f.Path)
 			}
+			for _, r := range m.OwnRefs { // a reused map names its sources by reference (round 37.1, D)
+				ownByScript[m.ScriptURL] = append(ownByScript[m.ScriptURL], r.Path)
+			}
 			mu.Unlock()
 		},
 	})

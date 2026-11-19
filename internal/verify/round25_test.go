@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/TimoMangCut/JSharvest/internal/endpoints"
@@ -20,8 +21,11 @@ import (
 // is enabled or verify already confirmed the route alive.
 func TestRound25SourceOnlyVerifyAndWriteDrafts(t *testing.T) {
 	var hitPaths []string
+	var hitPathsMu sync.Mutex
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hitPathsMu.Lock()
 		hitPaths = append(hitPaths, r.URL.Path)
+		hitPathsMu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/api/active" || r.URL.Path == "/api/treeshaken" {
 			w.Write([]byte(`{"ok":true}`))

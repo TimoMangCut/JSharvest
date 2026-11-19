@@ -265,3 +265,18 @@ Unit test: `TestCommonCrawlCollections`, `TestCommonCrawlFetch`, `TestURLScan`; 
 
 **Để sau:** MAX-06; tải body từ `urlscan.io/responses/<sha256>/` (cần kiểm điều khoản và khoá); đoán `<script>.map` cho script cũ trong archive (mỗi lần đoán tốn một request tới server và một tới Wayback).
 
+
+## 12. Đợt 37 & 37.1: hai stage, nhịp CDX, truyền tín hiệu chặn
+
+**Nhịp.** Thư viện `wayback` (theo hướng dẫn của Internet Archive, 2026) đặt mặc định ở 80% giới hạn cứng: CDX/timemap khoảng 30 req/phút, Memento khoảng 600 req/phút. Hai giới hạn **tách biệt**. `wbIndexGap` 2,5 s (24 req/phút), AIMD lên tối đa 10 s khi gặp 429/503 (cooldown dùng chung giữa các worker), giảm dần khi thành công; `Wait` 60 s hoặc theo `Retry-After`. Với domain hàng nghìn shard, liệt kê đầy đủ mất từ 44 phút trở lên. Vì vậy `crawl -archive` đặt trần `-archive-max-pages 150`, duyệt shard theo stride nguyên tố cùng nhau (phủ đều không gian SURT), và các run sau tiếp tục từ `PagesDone`.
+
+**Cô lập lỗi.** `ErrBlocked`/`ErrExcluded` của một nguồn chỉ dừng nguồn đó; chỉ `ctx` bị hủy mới dừng tất cả. Memento bị chặn thì `pages()` bỏ phần Memento và `fetch()` chuyển sang WARC của CC; mục chưa xong không đánh dấu done. `history()` luôn chạy. Mã thoát 3 giữ nguyên, `run.json` giữ `summary` khi có lỗi.
+
+**Hai stage trong crawl (`archive.Mode`).**
+- `ModeListOnly`: chỉ index công khai, `Live`/`Sender` bị bỏ ngay tại `Run`. Không gửi request tới target, không prefetch. Chạy khi seed đã sống, chồng lên crawl.
+- `ModeResume`: chạy sau barrier (Escalate, SPABoot, `writeEndpoints`). Không liệt kê lại; hỏi OTX/URLScan cho delta `ExtraHosts`; rồi `pages` → `fetch` → `history`.
+- `ModeFull`: khi không có Stage 1 (`-depth 0`, hoặc Stage 1 bị dừng sớm).
+- Cả hai stage chạy trên **một** `archiveEnv` (`cmd/jsharvest/archive.go`). Env giữ khoá `archive/` liên tục, giữ client và budget (AIMD của OTX/URLScan được giữ), và được đóng ngay sau mỗi target.
+- Cờ được parse bằng `ContinueOnError`, nên không bao giờ `os.Exit` trong tiến trình crawl.
+
+**Truyền tín hiệu CDX → Memento (B5).** Chỉ khi client CDX bị **từ chối kết nối** đến mức latch (IP bị chặn): `Wayback.CarryIndexBlock()` cho client Memento chờ `Wait` rồi latch ngay ở lần từ chối đầu. 429 thuần của CDX không truyền. Không truyền chiều ngược lại (test cách ly `round34_2_test.go`).

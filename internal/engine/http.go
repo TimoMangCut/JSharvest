@@ -118,7 +118,9 @@ func RunHTTP(ctx context.Context, cfg Config, ho HTTPOptions) (Record, error) {
 
 	var mu sync.Mutex
 	scripts, newScripts := map[string]bool{}, 0
-	put := func(r store.Record, label string) {
+	// put stores a script (or notes a sighting of one, by SHA256) and
+	// returns its key: "" when nothing was stored.
+	put := func(r store.Record, label string) string {
 		key, isNew, err := st.Put(r)
 		mu.Lock()
 		defer mu.Unlock()
@@ -129,16 +131,17 @@ func RunHTTP(ctx context.Context, cfg Config, ho HTTPOptions) (Record, error) {
 				run.StoreErrors["write"]++
 				slog.Error("store script", "url", r.URL, "err", err)
 			}
-			return
+			return ""
 		}
 		if key == "" {
-			return
+			return ""
 		}
 		scripts[key] = true
 		if isNew {
 			newScripts++
 			slog.Info(label, "kind", r.Kind, "size", len(r.Body), "url", r.URL)
 		}
+		return key
 	}
 	mapsDir := filepath.Join(st.Dir(), "maps")
 	enc := json.NewEncoder(pages)
@@ -235,6 +238,22 @@ func RunHTTP(ctx context.Context, cfg Config, ho HTTPOptions) (Record, error) {
 				put(store.Record{Body: []byte(f.Content), URL: where + "#" + f.Path, Kind: "source", Via: "sourcemap", Target: "http",
 					Page: m.ScriptURL, Tags: []string{"sourcemap", "source:" + f.Path}, Source: "live",
 					Initiator: &store.Initiator{Type: "sourcemap", URL: m.ScriptURL}}, "source")
+			}
+			// A map another host's copy of the bundle brought: its sources
+			// are stored; this script is noted as their page too, by their
+			// SHA-256 (round 37.1, D). One the store does not have (the
+			// first copy was too large to keep) is counted, not dropped
+			// silently.
+			for _, r := range m.OwnRefs {
+				n++
+				if put(store.Record{SHA256: r.SHA256, URL: where + "#" + r.Path, Kind: "source", Via: "sourcemap", Target: "http",
+					Page: m.ScriptURL, Tags: []string{"sourcemap", "source:" + r.Path}, Source: "live",
+					Initiator: &store.Initiator{Type: "sourcemap", URL: m.ScriptURL}}, "source") == "" {
+					mu.Lock()
+					run.StoreErrors["sighting_missing"]++
+					mu.Unlock()
+					slog.Warn("source map: a reused source is not in the store", "url", where+"#"+r.Path, "sha256", r.SHA256)
+				}
 			}
 			slog.Info("source map", "url", where, "sources", sourcesN, "own", n)
 		},

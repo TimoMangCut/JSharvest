@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 )
@@ -66,12 +67,15 @@ func bufioReader(s string) *bufio.Reader { return bufio.NewReader(strings.NewRea
 
 func TestSenderRequestURIAccepted(t *testing.T) {
 	var got []string
+	var gotMu sync.Mutex
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMu.Lock()
 		got = append(got, r.Method+" "+r.RequestURI+" "+r.Host)
+		gotMu.Unlock()
 		w.Write([]byte("ok"))
 	}))
 	srv.Listener.Close()

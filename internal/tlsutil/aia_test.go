@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -82,14 +83,14 @@ func TestAIACompletesARealChain(t *testing.T) {
 	root := newCert(t, "Root", nil, true, "")
 	inter := newCert(t, "Intermediate", root, true, "")
 	// The intermediate, served as a CA serves it: DER at one URL, PEM at another.
-	var pemHits, derHits int
+	var pemHits, derHits atomic.Int32
 	aiaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/inter.crt":
-			derHits++
+			derHits.Add(1)
 			w.Write(inter.der)
 		case "/inter.pem":
-			pemHits++
+			pemHits.Add(1)
 			pem.Encode(w, &pem.Block{Type: "CERTIFICATE", Bytes: inter.der})
 		}
 	}))
@@ -126,14 +127,14 @@ func TestAIACompletesARealChain(t *testing.T) {
 			t.Errorf("%s: incomplete chain not noted: %v", p, a.Hosts())
 		}
 		// Kept: the next connection does not fetch it again.
-		before := derHits + pemHits
+		before := derHits.Load() + pemHits.Load()
 		if err := get(a, srv.URL+"/again"); err != nil {
 			t.Fatal(err)
 		}
 		_ = before
 	}
-	if derHits != 1 || pemHits != 1 {
-		t.Errorf("fetched %d DER, %d PEM; want each once", derHits, pemHits)
+	if derHits.Load() != 1 || pemHits.Load() != 1 {
+		t.Errorf("fetched %d DER, %d PEM; want each once", derHits.Load(), pemHits.Load())
 	}
 }
 

@@ -51,7 +51,7 @@ output/<target>/<role>/
 
 **Recorder và kết luận.** Outcome `ok` của recorder là **mọi response, kể cả 401/403**: trạng thái lấy từ mã HTTP (`results.Req.Status`, `observed.statuses`). Request bị guard giữ, của worker, hoặc từ cache chỉ có header tạm (`headers_provisional`). Template endpoint phải suy bằng `flow.EntryTemplates` (frame ứng dụng dưới hàm bọc request; dùng frame trên cùng sẽ gộp nhầm thành `/api/{param}`).
 
-**Output.** Mọi file output `0600`, thư mục `0700`. Thư mục host cổng không mặc định là `host_port` (`scope.TargetDir`; loopback giữ tên trần); `archive` ghi theo hostname và là tên role dành riêng. Mỗi run ghi `scripts:[sha]`; snapshot của `monitor` chỉ lưu run ID. Mã thoát: `0` xong, `1` lỗi, `3` bị chặn, `4` mất session, `5` `monitor -fail-on`, `130` bị ngắt. Không bao giờ commit `output/`, `profiles/`, `bin/`, file log hay ground truth lấy từ mục tiêu thật.
+**Output.** Mọi file output `0600`, thư mục `0700`. Thư mục host cổng không mặc định là `host_port` (`scope.TargetDir`; loopback giữ tên trần); `archive` ghi theo hostname và là tên role dành riêng. Mỗi run ghi `scripts:[sha]`; snapshot của `monitor` chỉ lưu run ID. `requests.jsonl` chỉ ghi request **đã gửi**: request bị breaker dial/origin của `httpcrawl` giữ thì không ghi, chỉ ghi `pages.jsonl` `reason: origin-unreachable`. Stage 1 của `crawl -archive` (`archive.ModeListOnly`) không bao giờ gửi request tới target. Mã thoát: `0` xong, `1` lỗi, `3` bị chặn, `4` mất session, `5` `monitor -fail-on`, `130` bị ngắt. Không bao giờ commit `output/`, `profiles/`, `bin/`, file log hay ground truth lấy từ mục tiêu thật.
 
 **jsapi.** Đổi kết quả thì tăng `jsapi.Version` (hiện `40`). Khi sửa `internal/jsapi`, so snapshot với HEAD (output chỉ khác ở chỗ định sửa):
 `JSAPI_SNAPSHOT=<file đường dẫn tuyệt đối> go test -v -run TestSnapshot ./internal/jsapi | grep '^SNAP' | md5sum` (cần `-v`; corpus dev `output/_live_25e_max/*/anon/js/*.js`). Kiểm mù chạy **một lần** rồi thành dev (dev hiện có: Keycloak, Appwrite, Medusa, Directus, Jellyfin); tập mới chờ xác nhận trước khi tải. Nhiễu: `JSAPI_STATS=list go test -run TestStats ./internal/jsapi`. Trần cứng: `bin/testbed perfgate` — 2.000 script `≤ 15 s`, RSS đỉnh `≤ 500 MB`.
@@ -83,7 +83,7 @@ output/<target>/<role>/
 | `internal/replay`, `authz`/`replay`, `export.Load`, `authz-app` | `testbed/replay-check.sh` |
 | `authz -peers`, `peer-app`, `get_authz` | `testbed/bola-check.sh` (`testbed/lab/` cho lab Jellyfin/Directus) |
 | `Dockerfile`, `docker/`, `internal/browser`, WebRTC | `testbed/docker-check.sh` (khi sửa WebRTC chạy cả `webrtc-check.sh`) |
-| `internal/archive`, `archive` | `testbed/archive-check.sh` |
+| `internal/archive`, `archive`, `archiveEnv`/`archive.Mode` (crawl `-archive`) | `testbed/archive-check.sh` + `pipeline-check.sh` |
 | `internal/monitor`, `monitor`, `runs.jsonl` | `testbed/monitor-check.sh` |
 | `internal/explore`, `engine/explore*.go`, guard của explore | `testbed/explore-check.sh` |
 | `internal/detect`, `/cdn-cgi/`, `httpcrawl`, `htmlscan`, `sourcemap`, `ua.go` | `testbed/waf-check.sh` |
@@ -91,6 +91,8 @@ output/<target>/<role>/
 | `engine/batch.go`, `shared.go`, `Guard.TakeFor`/`Capture.Owns` | `testbed/parallel-check.sh` |
 | Đa tab `-tabs N` của `engine/frontier.go` | `testbed/frontier-tabs-check.sh` |
 | `httpcrawl`, `engine/http.go`, `tlsutil`, `infra.go`/`enrich.go`, `TargetDir` | `testbed/pipeline-check.sh` |
+| `httpcrawl/breaker.go`, `origins.go`, `sourcemaps.go` (breaker, ổn định origin, dedup map) | `testbed/pipeline-check.sh` + `waf-check.sh` + `bin/testbed reqcheck` |
+| Test có `httptest` handler | `go test ./internal/testlint` (handler không được ghi biến capture khi không khoá) |
 | `internal/verify`, `verify`, `export -drafts` | `testbed/verify-check.sh` |
 | `verify`, base cross-origin/ESM, `-page-scope`, `recycleTab`, FileChooser | `testbed/crosscheck-check.sh` |
 | `internal/netsafe`, nguồn proxy, client archive | `testbed/proxy-check.sh` |

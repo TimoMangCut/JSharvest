@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -61,8 +62,11 @@ func TestCommonCrawlFetch(t *testing.T) {
 	rec := warcRecord(t, "response", "HTTP/1.1 200 OK\r\nContent-Type: application/javascript\r\nContent-Length: 15\r\n\r\nfetch('/api/w')")
 	file := append(append(bytes.Repeat([]byte("x"), 100), rec...), bytes.Repeat([]byte("y"), 50)...)
 	var rng string
+	var rngMu sync.Mutex
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rngMu.Lock()
 		rng = r.Header.Get("Range")
+		rngMu.Unlock()
 		http.ServeContent(w, r, "f.warc.gz", time.Time{}, bytes.NewReader(file))
 	}))
 	defer srv.Close()
@@ -81,8 +85,11 @@ func TestCommonCrawlFetch(t *testing.T) {
 func TestURLScan(t *testing.T) {
 	var results atomic.Int32
 	var key string
+	var keyMu sync.Mutex
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		keyMu.Lock()
 		key = r.Header.Get("Api-Key")
+		keyMu.Unlock()
 		switch {
 		case r.URL.Path == "/api/v1/search/" && r.URL.Query().Get("q") == "domain:a.test":
 			io.WriteString(w, `{"results":[

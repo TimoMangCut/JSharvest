@@ -21,6 +21,11 @@ const (
 
 type dialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
 
+// errDialBreaker marks a request the dial breaker held: no packet left for
+// it, so the crawl neither logs it as a request nor counts it a visit
+// (round 37.1, F4).
+var errDialBreaker = errors.New("dial breaker: host:port unreachable (held, not sent)")
+
 type endpointDialState struct {
 	ok          bool
 	probing     bool
@@ -42,13 +47,29 @@ type hostPortBreaker struct {
 }
 
 func newHostPortBreaker(next dialFunc) dialFunc {
-	b := &hostPortBreaker{
+	return newDialBreaker(next).dialContext
+}
+
+func newDialBreaker(next dialFunc) *hostPortBreaker {
+	return &hostPortBreaker{
 		next:     next,
 		cooldown: breakerCooldown,
 		now:      time.Now,
 		states:   map[string]*endpointDialState{},
 	}
-	return b.dialContext
+}
+
+// isOpen reports, without dialling, whether addr (host:port) is held open:
+// the crawl asks before it spends a -http-rate turn on a request that
+// could not leave (round 37.1, F4).
+func (b *hostPortBreaker) isOpen(addr string) bool {
+	if b == nil {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	st := b.states[strings.ToLower(addr)]
+	return st != nil && !st.ok && !st.openUntil.IsZero() && b.now().Before(st.openUntil)
 }
 
 func (b *hostPortBreaker) dialContext(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -69,7 +90,7 @@ func (b *hostPortBreaker) dialContext(ctx context.Context, network, addr string)
 			if now.Before(st.openUntil) {
 				lastErr := st.lastErr
 				b.mu.Unlock()
-				return nil, fmt.Errorf("dial breaker: %s unreachable (%w)", addr, lastErr)
+				return nil, fmt.Errorf("%w: %s (%w)", errDialBreaker, addr, lastErr)
 			}
 			// Half-open window expired: allow a single probe through while others wait.
 			if st.probing {

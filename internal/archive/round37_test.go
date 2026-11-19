@@ -346,7 +346,7 @@ func TestRound37TwoStageOverlappedListingZeroTargetHitsAndDeltaExtraHosts(t *tes
 	archDir := filepath.Join(root, "app.jsh.test", "archive")
 	inScope := func(h string) bool { return h == "app.jsh.test" || strings.HasSuffix(h, ".jsh.test") }
 
-	// Stage 1 (ListOnly=true, MaxPages=2 of 4 shards) runs BEFORE live crawl finishes!
+	// Stage 1 (ModeListOnly, MaxPages=2 of 4 shards) runs BEFORE live crawl finishes!
 	_, err := Run(context.Background(), Options{
 		Dir:      archDir,
 		Root:     root,
@@ -354,7 +354,7 @@ func TestRound37TwoStageOverlappedListingZeroTargetHitsAndDeltaExtraHosts(t *tes
 		InScope:  inScope,
 		Sources:  []string{"wayback", "otx"},
 		MaxPages: 2,
-		ListOnly: true,
+		Mode:     ModeListOnly,
 		Wayback:  mkWB(),
 		OTX:      mkOTX(),
 		Log:      func(string, ...any) {},
@@ -377,7 +377,7 @@ func TestRound37TwoStageOverlappedListingZeroTargetHitsAndDeltaExtraHosts(t *tes
 	_, _ = st.Add(store.Record{Body: liveBundle, URL: "http://app.jsh.test:" + port + "/live.js", Kind: "file", Via: "http", Source: "live"})
 	_ = st.Flush()
 
-	// Stage 2 (Stage2=true) runs with ExtraHosts=["sub.jsh.test"]:
+	// Stage 2 (ModeResume) runs with ExtraHosts=["sub.jsh.test"]:
 	// - Must send 0 additional Wayback CDX shard requests in this crawl!
 	// - Must skip liveBundle via cur.sha1 (Known == 1, only 1 memento hit for oldBundle)!
 	// - Must query delta ExtraHosts ("sub.jsh.test") on OTX!
@@ -391,7 +391,7 @@ func TestRound37TwoStageOverlappedListingZeroTargetHitsAndDeltaExtraHosts(t *tes
 		ExtraHosts: []string{"sub.jsh.test"},
 		Live:       false,
 		MaxPages:   2,
-		Stage2:     true,
+		Mode:       ModeResume,
 		MaxBody:    2 << 20,
 		Wayback:    mkWB(),
 		OTX:        mkOTX(),

@@ -15,10 +15,8 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -534,6 +532,7 @@ func runCrawl(args []string) error {
 			c := cfg
 			c.Target = t
 			ho.Fallback, ho.Archive, ho.ArchiveStage1 = nil, nil, nil
+			closeEnv := func() {}
 			if *archiveFallback || *archiveAfter {
 				baseArgs := []string{"-o", *out, "-target", t.Hostname(), "-scope", *scopeMode, "-sources", archiveSources,
 					"-concurrency", fmt.Sprint(max(*tabs*4, 8)), "-live-rate", fmt.Sprint(max(*httpRate, 5)), "-mem-cache-mb", fmt.Sprint(*memCacheMB)}
@@ -551,29 +550,56 @@ func runCrawl(args []string) error {
 				if *insecure {
 					baseArgs = append(baseArgs, "-insecure")
 				}
-				var stage1Done atomic.Bool
-				var stage1Mu sync.Mutex
-				var stage1BlockErr error
+				// One env for the target's archive work: stage 1 (the
+				// indexes, while the crawl runs) and stage 2 share its
+				// lock, clients and budgets; it is closed as soon as the
+				// target is done (round 37.1, B).
+				var envMu sync.Mutex
+				var env *archiveEnv
+				getEnv := func() (*archiveEnv, error) {
+					envMu.Lock()
+					defer envMu.Unlock()
+					if env != nil {
+						return env, nil
+					}
+					cfg, err := parseArchiveFlags(baseArgs)
+					if err != nil {
+						return nil, err
+					}
+					if env, err = newArchiveEnv(cfg); err != nil {
+						return nil, err
+					}
+					return env, nil
+				}
+				closeEnv = func() {
+					envMu.Lock()
+					defer envMu.Unlock()
+					env.Close()
+					env = nil
+				}
 				run := func(ctx context.Context) any {
-					runArgs := slices.Clone(baseArgs)
-					if stage1Done.Load() {
-						runArgs = append(runArgs, "-stage2")
-					}
-					sum, err := archiveRun(ctx, runArgs)
-					stage1Mu.Lock()
-					if err == nil && stage1BlockErr != nil {
-						err = stage1BlockErr
-					}
-					stage1Mu.Unlock()
+					res := map[string]any{"archive": filepath.Join(*out, t.Hostname(), "archive")}
+					e, err := getEnv()
 					if err != nil {
 						slog.Warn("archive", "err", err)
-						res := map[string]any{"archive": filepath.Join(*out, t.Hostname(), "archive"), "error": err.Error()}
-						if sum != nil {
-							res["summary"] = sum
-						}
+						res["error"] = err.Error()
 						return res
 					}
-					return map[string]any{"archive": filepath.Join(*out, t.Hostname(), "archive"), "summary": sum}
+					// Stage 2 when stage 1 listed the indexes; a whole run
+					// otherwise (-depth 0, a stage 1 stopped early).
+					mode := archive.ModeFull
+					if e.Stage1Ran() {
+						mode = archive.ModeResume
+					}
+					sum, err := e.Run(ctx, mode)
+					if sum != nil {
+						res["summary"] = sum
+					}
+					if err != nil {
+						slog.Warn("archive", "err", err)
+						res["error"] = err.Error()
+					}
+					return res
 				}
 				switch {
 				case *archiveAfter && !archived[t.Hostname()]:
@@ -581,16 +607,12 @@ func runCrawl(args []string) error {
 					archived[t.Hostname()] = true
 					ho.Archive = run
 					ho.ArchiveStage1 = func(sctx context.Context) error {
-						_, serr := archiveRun(sctx, append(slices.Clone(baseArgs), "-list-only"))
-						stage1Mu.Lock()
-						if errors.Is(serr, archive.ErrBlocked) {
-							stage1BlockErr = serr
+						e, err := getEnv()
+						if err != nil {
+							return err
 						}
-						if sctx.Err() == nil && (serr == nil || errors.Is(serr, archive.ErrBlocked)) {
-							stage1Done.Store(true)
-						}
-						stage1Mu.Unlock()
-						return serr
+						_, err = e.Run(sctx, archive.ModeListOnly)
+						return err
 					}
 				case *archiveFallback:
 					ho.Fallback = run
@@ -607,7 +629,9 @@ func runCrawl(args []string) error {
 					return engine.SPABoot(ctx, c, origins)
 				}
 			}
-			if _, err := engine.RunHTTP(ctx, c, ho); err != nil {
+			_, err := engine.RunHTTP(ctx, c, ho)
+			closeEnv() // RunHTTP has joined stage 1 and run stage 2: the lock goes now, not after every target
+			if err != nil {
 				last = err
 				if ctx.Err() != nil {
 					break

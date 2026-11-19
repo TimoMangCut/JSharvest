@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -93,8 +94,11 @@ func TestOTXSection(t *testing.T) {
 		}
 	}
 	var asked string
+	var askedMu sync.Mutex
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		askedMu.Lock()
 		asked = r.URL.Path
+		askedMu.Unlock()
 		io.WriteString(w, `{"url_list":[{"url":"https://a.b.test/x.js","date":"2024-01-02T03:04:05","httpcode":200}],"has_next":false}`)
 	}))
 	defer srv.Close()

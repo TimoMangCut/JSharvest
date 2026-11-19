@@ -123,9 +123,21 @@ type SourceMap struct {
 	ScriptURL string
 	Body      []byte
 	Parsed    *sourcemap.Map
-	OwnFiles  []sourcemap.File
+	OwnFiles  []sourcemap.File // the app's own sources, with their content (a map fetched)
 	SourcesN  int
-	Reused    bool
+	// Reused: the same bundle's map was fetched on another host already
+	// and its sources stored; OwnRefs name them, by their SHA-256, for the
+	// store to note this script as their page too (round 37.1, D). Body,
+	// Parsed and OwnFiles are empty.
+	Reused  bool
+	OwnRefs []SourceRef
+}
+
+// SourceRef is one source of a map already stored: its path in the map and
+// the SHA-256 (hex) of its content, the store's key.
+type SourceRef struct {
+	Path   string
+	SHA256 string
 }
 
 // Page is one page the crawl visited, or found and did not.
@@ -176,6 +188,9 @@ type Stats struct {
 	Stopped        string         `json:"stopped,omitempty"`
 	// Capped: the script budget (-resolve-max) was spent; the pages went on.
 	Capped string `json:"capped,omitempty"`
+	// HeldByBreaker: requests the dial or origin breaker held, never sent
+	// (round 37.1, F4).
+	HeldByBreaker int `json:"held_by_breaker,omitempty"`
 }
 
 // Result is what a crawl found out, past the scripts it handed on.
@@ -260,7 +275,16 @@ type crawler struct {
 	// example.com) is another app: its pages are visited until it shows
 	// the same (round 18). Only the crawl's loop touches them.
 	prints map[string]string
-	spa    map[string]bool
+	// settled says what the crawl knows of an origin's shell: a 2xx HTML
+	// page (its print in prints), or an answer that was none (round 37.1,
+	// A1). The loop holds a second page of an unsettled origin. Only the
+	// crawl's loop touches it.
+	settled map[string]settleKind
+	// origins: each origin's answers, for the origin breaker (A3); any
+	// goroutine, under originMu.
+	originMu sync.Mutex
+	origins  map[string]*originHealth
+	spa      map[string]bool
 	// apiOrigins are the target's API hosts the scripts name, asked for
 	// their API's description once the pages are done (PIP-03).
 	specBlocked  map[string]string
@@ -445,6 +469,8 @@ func Crawl(ctx context.Context, o Options) (*Result, error) {
 		hosts:       map[string]*hostState{},
 		specBlocked: map[string]string{},
 		prints:      map[string]string{},
+		settled:     map[string]settleKind{},
+		origins:     map[string]*originHealth{},
 		spa:         map[string]bool{},
 		skel:        newSkeletonController()}
 	cr.cancel = cancel
@@ -575,9 +601,30 @@ func (cr *crawler) fetch(ctx context.Context, raw, referer string, k kind, rtype
 	return cr.fetchWithHeaders(ctx, raw, referer, k, rtype, nil)
 }
 
-func (cr *crawler) fetchWithHeaders(ctx context.Context, raw, referer string, k kind, rtype string, extra []jsapi.Header) answer {
+func (cr *crawler) fetchWithHeaders(ctx context.Context, raw, referer string, k kind, rtype string, extra []jsapi.Header) (a answer) {
+	// The breakers first, before a -http-rate turn is spent: a request
+	// they hold never leaves, so it is neither logged nor counted a request
+	// (round 37.1, A3 and F4).
+	if cr.c.dialHeld(raw) {
+		cr.count(func(st *Stats) { st.HeldByBreaker++ })
+		return answer{URL: raw, Err: errDialBreaker}
+	}
+	turn, err := cr.originEnter(ctx, raw)
+	if err != nil {
+		if heldByBreaker(err) {
+			cr.count(func(st *Stats) { st.HeldByBreaker++ })
+		}
+		return answer{URL: raw, Err: err}
+	}
+	defer func() { cr.originLeave(ctx, turn, a) }()
 	for try := 0; ; try++ {
-		a := cr.c.getWithHeaders(ctx, raw, referer, k, extra)
+		a = cr.c.getWithHeaders(ctx, raw, referer, k, extra)
+		if heldByBreaker(a.Err) {
+			// Held at the dial after the check above (another request
+			// opened the breaker meanwhile): nothing was sent.
+			cr.count(func(st *Stats) { st.HeldByBreaker++ })
+			return a
+		}
 		rt := rtype
 		if rtype == "Document" && apiAnswer(a) {
 			// A page the crawl asked for that is an API's answer (JSON):
@@ -728,6 +775,8 @@ type fetchedPage struct {
 	it      frontier.Item
 	start   time.Time
 	givenUp bool
+	// held: a breaker held the page; nothing was sent (round 37.1, F4).
+	held    bool
 	ans     answer
 	isHTML  bool
 	scan    htmlscan.Page
@@ -755,7 +804,7 @@ func (cr *crawler) fetchPage(ctx context.Context, it frontier.Item, first bool) 
 	if first && cr.seedActive != nil {
 		cr.seedActive.Store(false)
 	}
-	fp := fetchedPage{it: it, start: start, ans: a}
+	fp := fetchedPage{it: it, start: start, ans: a, held: heldByBreaker(a.Err)}
 	if a.Err != nil || (first && a.Status >= 300 && a.Status < 400) {
 		return fp
 	}
@@ -790,6 +839,14 @@ func (cr *crawler) commitPage(fp fetchedPage, first bool, b *bucket) ([]job, []f
 		cr.mu.Unlock()
 		cr.o.Page(Page{URL: it.URL, How: it.How, From: it.From, Depth: it.Depth, Reason: ChallengedHost})
 		return nil, nil, "", true
+	}
+	if fp.held {
+		// Not sent: neither a visit nor a request (round 37.1, F4).
+		cr.mu.Lock()
+		cr.res.Listed[OriginUnreachable]++
+		cr.mu.Unlock()
+		cr.o.Page(Page{URL: it.URL, How: it.How, From: it.From, Depth: it.Depth, Reason: OriginUnreachable, Error: fp.ans.Err.Error()})
+		return nil, nil, "", false
 	}
 	a := fp.ans
 	cr.q.Visited(a.URL)
@@ -893,12 +950,40 @@ func (cr *crawler) commitPage(fp fetchedPage, first bool, b *bucket) ([]job, []f
 			b.inlineSigs = append(b.inlineSigs, sha256.Sum256(a.Body))
 		}
 	}
+	// The origin answered: it is settled (round 37.1, A1), the asked one
+	// and the one a redirect landed on alike. Only a 2xx HTML page is a
+	// shell; a redirect's page (nginx's "302 Found") is not one, though
+	// what it names is still followed, its Location first.
+	reqOrigin, finalOrigin := originOf(it.URL), originOf(a.URL)
+	redirect := a.Status >= 300 && a.Status < 400
+	if !isHTML || a.Status >= 300 {
+		cr.settle(reqOrigin, settledNoShell)
+		cr.settle(finalOrigin, settledNoShell)
+	} else {
+		cr.settle(reqOrigin, settledNoShell)
+		cr.settle(finalOrigin, settledShell)
+	}
+	var located []frontier.Found
+	if redirect {
+		if loc := strings.TrimSpace(a.Header.Get("Location")); loc != "" {
+			if base, err := url.Parse(a.URL); err == nil {
+				if u, err := base.Parse(loc); err == nil && (u.Scheme == "http" || u.Scheme == "https") {
+					u.Fragment = ""
+					located = append(located, frontier.Found{URL: u.String(), How: frontier.Redirect, Visit: true})
+				}
+			}
+		}
+	}
 	if !isHTML || a.Status >= 400 {
+		pg.Discovered = len(located)
 		cr.o.Page(pg)
-		return nil, nil, "", false
+		return nil, located, "", false
 	}
 	toCheck := ""
-	if print, origin := shellPrint(p), originOf(a.URL); cr.prints[origin] == "" {
+	if redirect {
+		// Its links and scripts are read below; it teaches nothing of the
+		// origin's shell.
+	} else if print, origin := shellPrint(p), finalOrigin; cr.prints[origin] == "" {
 		cr.prints[origin] = print
 		toCheck = a.URL
 	} else if print == cr.prints[origin] {
@@ -940,6 +1025,7 @@ func (cr *crawler) commitPage(fp fetchedPage, first bool, b *bucket) ([]job, []f
 		jobs = append(jobs, job{url: m, page: a.URL, how: "next-build-id", from: a.URL, depth: it.Depth, tags: resolvedTags("build-manifest"), b: b})
 	}
 	links := frontier.FromHTML(string(a.Body), a.URL)
+	links = append(located, links...)
 	pg.Discovered = len(links)
 	cr.o.Page(pg)
 	return jobs, links, toCheck, false
@@ -1889,7 +1975,7 @@ func (cr *crawler) pages(ctx context.Context) {
 		orig := originOf(nx.URL)
 		// Hold a second request to an origin whose first shell print / SPA
 		// check has not settled yet, or that has challenged before.
-		if cr.prints[orig] == "" || hostChallenged {
+		if cr.settled[orig] == unsettled || hostChallenged {
 			return originInFlight[orig] == 0
 		}
 		return true

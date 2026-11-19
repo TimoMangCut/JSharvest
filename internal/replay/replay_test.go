@@ -213,8 +213,11 @@ func TestIdentity(t *testing.T) {
 
 func TestSender(t *testing.T) {
 	var hits []string
+	var hitsMu sync.Mutex
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hitsMu.Lock()
 		hits = append(hits, r.Method+" "+r.URL.Path+" "+r.Header.Get("Cookie"))
+		hitsMu.Unlock()
 		if r.URL.Path == "/slow-down" {
 			w.Header().Set("Retry-After", "1")
 			w.WriteHeader(429)

@@ -91,7 +91,7 @@ func (r *runner) listWayback(ctx context.Context) error {
 	if r.st.Wayback.Done {
 		return nil
 	}
-	if r.o.Stage2 {
+	if r.o.Mode == ModeResume {
 		r.mu.Lock()
 		r.partial = true
 		if r.st.Wayback.NumPages > 0 {
@@ -238,7 +238,7 @@ func (r *runner) listWaybackSharded(ctx context.Context, numPages int) error {
 
 		var prefetchWG sync.WaitGroup
 		var prefetchCh chan *group
-		if !r.o.DisablePrefetch && r.o.MaxFiles == 0 && r.store != nil && r.cur != nil {
+		if r.o.Mode != ModeListOnly && r.o.MaxFiles == 0 && r.store != nil && r.cur != nil {
 			prefetchCh = make(chan *group, 512)
 			r.mu.Lock()
 			r.prefetchCh = prefetchCh
@@ -449,7 +449,7 @@ func (r *runner) listCC(ctx context.Context) error {
 	if cc.Done {
 		return nil
 	}
-	if r.o.Stage2 {
+	if r.o.Mode == ModeResume {
 		r.mu.Lock()
 		r.partial = true
 		r.mu.Unlock()

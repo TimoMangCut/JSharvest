@@ -116,6 +116,9 @@ type Canary struct {
 
 	ready   chan struct{}
 	optOnce sync.Once
+	// uncounted: asked by rootCanary, outside -max-prefixes' budget; the
+	// first draft whose own prefix it is counts it (round 37.1, C2).
+	uncounted bool
 }
 
 // Report is verify.json.
@@ -199,6 +202,7 @@ func Run(ctx context.Context, o Options) (*Report, error) {
 	} else {
 		v.byHost(ctx, order, results)
 	}
+	v.rejudgeShells(o.Drafts, results)
 	// verify.json lists the drafts in their own order, whatever order they
 	// were sent in.
 	for i, d := range all {
@@ -293,10 +297,16 @@ type verifier struct {
 
 type hostSlotPool struct {
 	mu        sync.Mutex
-	limit     int
-	inFlight  int
+	limit    int
+	inFlight int
+	// throttled: a 429 (or a rate block) was met: one at a time from then on.
 	throttled bool
-	wake      chan struct{}
+	// gateSer: the host may be gated (a probe answered as its canary with a
+	// gate's status): one at a time while the gate is counted, so that it
+	// counts probes in a row as -host-inflight 1 does; off again once the
+	// host answers otherwise (round 37.1, C4).
+	gateSer bool
+	wake    chan struct{}
 }
 
 func newHostSlotPool(limit int) *hostSlotPool {
@@ -310,7 +320,7 @@ func (p *hostSlotPool) acquire(ctx context.Context) (func(), bool) {
 	for {
 		p.mu.Lock()
 		lim := p.limit
-		if p.throttled || lim < 1 {
+		if p.throttled || p.gateSer || lim < 1 {
 			lim = 1
 		}
 		if p.inFlight < lim {
@@ -340,6 +350,21 @@ func (p *hostSlotPool) stepDown() {
 	p.mu.Lock()
 	p.throttled = true
 	p.mu.Unlock()
+}
+
+// setGateSerial turns the gate's one-at-a-time on or off; off wakes the
+// probes that waited for it.
+func (p *hostSlotPool) setGateSerial(on bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.gateSer == on {
+		return
+	}
+	p.gateSer = on
+	if !on {
+		close(p.wake)
+		p.wake = make(chan struct{})
+	}
 }
 
 func (v *verifier) hostMaxInFlight() int {
@@ -454,14 +479,21 @@ func (v *verifier) noteGate(host string, sig Sig, r *Result, asCanary bool) {
 	if g.broken || g.why != "" {
 		return
 	}
+	pool := v.hostPools[host] // under v.mu, as poolForHost reads it
 	if !asCanary || !gateStatus[sig.Status] || (r.Verdict != DeadOrFP && r.Verdict != AuthWall) || g.first != nil && !Same(sig, *g.first) {
 		g.broken = true
+		if pool != nil {
+			pool.setGateSerial(false) // no gate: back to -host-inflight
+		}
 		return
 	}
 	if g.first == nil {
 		s := sig
 		g.first = &s
 		g.prefixes = map[string]bool{}
+		if pool != nil && v.hostMaxInFlight() > 1 {
+			pool.setGateSerial(true) // a gate may be there: count it one probe at a time
+		}
 	}
 	g.prefixes[r.Prefix] = true
 	if g.n++; g.n >= v.o.GateAfter && len(g.prefixes) >= min(gatePrefixes, max(1, v.hostPrefixes[host])) {
@@ -763,9 +795,14 @@ func (v *verifier) judge(ctx context.Context, r *Result, d Draft, sig Sig, body 
 		r.Verdict, r.Reason = DeadOrFP, "answers as any path does (the canary)"
 	case st >= 200 && st < 300:
 		if sig.Shell != "" && strings.Contains(sig.Type, "html") {
-			if !v.matchesKnownHTMLShell(hostOf(target), sig) && v.hostMaxInFlight() > 1 {
+			if !v.matchesKnownHTMLShell(hostOf(target), sig) {
+				// An HTML page no canary has shown yet, under a prefix of
+				// its own: the origin's root may answer every path with it
+				// (an SPA's fallback). Asked once per origin, at any
+				// -host-inflight, so that the verdict is the same at all
+				// of them (round 37.1, C2).
 				if origin, _ := GatewayPrefix(target); origin != "" && c.Prefix != origin+"/" {
-					v.ensureRootCanary(ctx, d, origin)
+					v.rootCanary(ctx, d, origin)
 				}
 			}
 			if v.matchesKnownHTMLShell(hostOf(target), sig) {
@@ -811,6 +848,37 @@ func (v *verifier) judge(ctx context.Context, r *Result, d Draft, sig Sig, body 
 	}
 	if r.VerifiedMethod == "" && r.Verdict == Alive && r.Sent == d.Method {
 		r.VerifiedMethod = d.Method
+	}
+}
+
+// rejudgeShells judges again, with every canary's shell now known, the 2xx
+// HTML answers that were judged routes (round 37.1, C1). judge tells a
+// catch-all shell by the shells the canaries asked so far showed; which
+// had been asked when depended on the order the probes ran in (the hosts
+// run at once, and so do a host's probes with -host-inflight). The rule is
+// judge's own first one for a 2xx HTML answer, so this is the verdict judge
+// would have given knowing them all: it sends nothing, it only ever turns
+// a route into a catch-all (never the other way), and the result is the
+// same whatever the order or the concurrency.
+func (v *verifier) rejudgeShells(ds []Draft, results []*Result) {
+	for i, r := range results {
+		if r == nil || r.Verdict != Alive || r.Answer == nil {
+			continue
+		}
+		sig := *r.Answer
+		if sig.Status < 200 || sig.Status >= 300 || sig.Shell == "" || !strings.Contains(sig.Type, "html") || r.URL == "" {
+			continue
+		}
+		if !v.matchesKnownHTMLShell(hostOf(r.URL), sig) {
+			continue
+		}
+		d := ds[i]
+		if d.Confidence == "string" && d.Method == "" {
+			r.Verdict, r.Reason = ClientRoute, "bare string answered with a catch-all HTML shell (judged again with every canary known)"
+		} else {
+			r.Verdict, r.Reason = DeadOrFP, "answers with a catch-all/WAF HTML shell seen on canaries (judged again with every canary known)"
+		}
+		r.VerifiedMethod = ""
 	}
 }
 
@@ -916,8 +984,52 @@ func (v *verifier) canary(ctx context.Context, d Draft, target string) *Canary {
 	return v.canaryAnswer(c, ans, err)
 }
 
-func (v *verifier) ensureRootCanary(ctx context.Context, d Draft, origin string) {
-	_ = v.canary(ctx, d, origin+"/")
+// rootCanary asks the origin's root for a path that cannot exist, once (the
+// other probes wait for its answer), to learn the HTML shell an SPA answers
+// every path with. It is not one of -max-prefixes' canaries: it does not
+// count toward the origin's prefixes until a draft of the root prefix
+// itself uses it (canaryFor), so that the fallback of later prefixes is
+// what it was without it (round 37.1, C2).
+func (v *verifier) rootCanary(ctx context.Context, d Draft, origin string) {
+	key := origin + "/"
+	ck := key
+	if hk := canaryHeaderKey(d, v.o.Identity == nil); hk != "" {
+		ck += "\x00" + hk
+	}
+	v.mu.Lock()
+	if c := v.canaries[ck]; c != nil {
+		v.mu.Unlock()
+		if c.ready != nil {
+			select {
+			case <-c.ready:
+			case <-ctx.Done():
+			}
+		}
+		return
+	}
+	cu := strings.TrimRight(key, "/") + "/" + marker.Slug()
+	c := &Canary{Prefix: key, URL: cu, ready: make(chan struct{}), uncounted: true}
+	v.canaries[ck] = c
+	v.mu.Unlock()
+	defer close(c.ready)
+	cd := Draft{ID: "canary", Method: "GET", Headers: d.Headers, SampleHeaders: d.SampleHeaders}
+	raw, err := cd.raw(cu, v.o.Identity == nil)
+	if err != nil {
+		c.Err = err.Error()
+		return
+	}
+	ans, err := v.send(ctx, raw, cu, "canary", key)
+	v.canaryAnswer(c, ans, err)
+}
+
+// claimCanary is a cache hit of canaryFor, under v.mu: a canary rootCanary
+// asked counts toward the origin's prefixes when a draft first uses it.
+func (v *verifier) claimCanary(c *Canary, origin string) {
+	c.Drafts++
+	if c.uncounted {
+		c.uncounted = false
+		v.perOrigin[origin]++
+	}
 }
 
 // canaryFor is the canary a target is judged against: one already asked
@@ -936,7 +1048,7 @@ func (v *verifier) canaryFor(d Draft, target string) (c *Canary, cu, key string)
 		return p + "\x00" + hk
 	}
 	if c := v.canaries[cacheKey(key)]; c != nil {
-		c.Drafts++
+		v.claimCanary(c, origin)
 		return c, "", key
 	}
 	limit := v.o.MaxPrefixes
@@ -951,7 +1063,7 @@ func (v *verifier) canaryFor(d Draft, target string) (c *Canary, cu, key string)
 		if rest := strings.TrimPrefix(prefix, "/"); strings.Contains(rest, "/") {
 			seg, _, _ := strings.Cut(rest, "/")
 			if c := v.canaries[cacheKey(origin+"/"+seg)]; c != nil {
-				c.Drafts++
+				v.claimCanary(c, origin)
 				return c, "", key
 			}
 			if v.parents[origin] < limit {
@@ -963,7 +1075,7 @@ func (v *verifier) canaryFor(d Draft, target string) (c *Canary, cu, key string)
 			prefix = "/"
 			key = origin + prefix
 			if c := v.canaries[cacheKey(key)]; c != nil {
-				c.Drafts++
+				v.claimCanary(c, origin)
 				return c, "", key
 			}
 		}

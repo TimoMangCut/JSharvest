@@ -75,10 +75,22 @@ func CrawlHosts(root string, inScope func(string) bool) (map[string]bool, map[st
 	return hosts, recorded
 }
 
-// CrawlHostsWithUA scans <root>/<host>/<role> once in a single streaming pass,
-// collecting reached hosts, recorded remote IPs, and the observed User-Agent
-// (preferring roleDir's browser/engine UA, then targetHostPrefix role dirs, with
-// Chrome's real UA always prioritized ahead of the HTTP engine's UA).
+// CrawlHostsWithUA is CrawlHosts and the User-Agent the crawls presented,
+// read in one pass over each requests.jsonl (round 37; verify's pickUA and
+// archive's observedUA before it read them again). The UA, in this order
+// (round 37.1, F1):
+//
+//  1. roleDir's requests, when roleDir is given (verify: the role's own);
+//  2. else the requests of every role of the target's directories:
+//     targetHostPrefix itself and its host_port siblings (example.com and
+//     example.com_8443);
+//  3. within either, a browser's UA before the HTTP engine's (tag http),
+//     the one sent most, ties to the greater string;
+//  4. never a request the crawl made for itself (tag jsharvest), one that
+//     answered a challenge (tag challenge), a headless or library UA.
+//
+// Directories outside the scope are read for the UA only when they are the
+// target's or the role's.
 func CrawlHostsWithUA(root, targetHostPrefix, roleDir string, inScope func(string) bool) (map[string]bool, map[string]string, string) {
 	hosts, recorded := map[string]bool{}, map[string]string{}
 	cleanRole := ""

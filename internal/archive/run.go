@@ -21,6 +21,23 @@ import (
 	"github.com/TimoMangCut/JSharvest/internal/store"
 )
 
+// Mode is what a Run does.
+type Mode uint8
+
+const (
+	// ModeFull lists the archives, then reads old pages, fetches old
+	// scripts and writes the history.
+	ModeFull Mode = iota
+	// ModeListOnly is a crawl's stage 1: the public indexes only (Wayback
+	// CDX, Common Crawl, OTX and urlscan of the target's own host), run
+	// while the crawl runs: no request to the target, no memento.
+	ModeListOnly
+	// ModeResume is a crawl's stage 2, after a stage 1 in the same process:
+	// the indexes stage 1 listed are not listed again; OTX and urlscan are
+	// asked of the hosts the crawl found, then pages, fetch and history.
+	ModeResume
+)
+
 // Options configure a run of archive.
 type Options struct {
 	Dir     string // <out>/<host>/archive
@@ -49,15 +66,10 @@ type Options struct {
 	Vendor  bool // fetch vendor libraries too
 	MaxBody int
 	Workers int // concurrent listing/fetch workers (0: default 8)
-	// ListOnly runs Stage 1 index listing only (no live checks, no memento
-	// prefetch, no ExtraHosts, no pages/fetch/history) concurrently with crawl.
-	ListOnly bool
-	// Stage2 resumes immediately after an in-process Stage 1 listing in the
-	// same crawl: skips re-running Wayback/CC shard budgets and runs only
-	// delta ExtraHosts listing plus pages/fetch/history.
-	Stage2          bool
-	DisablePrefetch bool
-	Wayback         *Wayback
+	// Mode: a whole run, or one of the two stages a crawl runs in process
+	// (round 37, 37.1 B).
+	Mode    Mode
+	Wayback *Wayback
 	OTX     *OTX
 	CC      *CommonCrawl
 	URLScan *URLScan
@@ -250,6 +262,11 @@ func (r *runner) flushFilesLocked() {
 // history calls. It resumes where a run stopped, when the query is the
 // same.
 func Run(ctx context.Context, o Options) (*Summary, error) {
+	if o.Mode == ModeListOnly {
+		// The public indexes only: never the target (no live check, so no
+		// prefetch either), whatever the caller set.
+		o.Live, o.Sender = false, nil
+	}
 	if err := os.MkdirAll(o.Dir, 0o700); err != nil {
 		return nil, err
 	}
@@ -343,9 +360,7 @@ func Run(ctx context.Context, o Options) (*Summary, error) {
 		r.cred[c] = true
 	}
 
-	if o.ListOnly {
-		o.DisablePrefetch = true
-		o.Live = false
+	if o.Mode == ModeListOnly {
 		if !r.st.Listed {
 			err := r.list(ctx)
 			r.flushFiles()
@@ -409,10 +424,10 @@ func Run(ctx context.Context, o Options) (*Summary, error) {
 	if ferr := r.store.Flush(); err == nil {
 		err = ferr
 	}
-	r.mu.Lock()
-	hasBlock := r.blockErr != nil
-	r.mu.Unlock()
-	if err == nil && (r.store.Len() > 0 || !hasBlock) {
+	// The history always, a block or not, an empty store or not: it
+	// rewrites historical.jsonl, which would otherwise be the last run's
+	// beside this run's archive.json (round 37.1, F3).
+	if err == nil {
 		err = r.history(ctx)
 	}
 	r.save()

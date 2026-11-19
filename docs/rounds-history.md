@@ -42,3 +42,14 @@
 - **Đợt 33 (`2026-11-17`, [plan-33.md](plan-33.md), `jsapi v39` → `v40`):**
   - **(B1–B2 — Mở toàn bộ giới hạn cứng & Cô lập lỗi theo host):** Đặt mặc định `0` (không giới hạn) cho `crawl`, `frontier`/`specprobe`, `archive` và `verify`/`authz`; cô lập lỗi WAF/challenge theo từng host (`specBlocked`) trong Spec Probe để bảo vệ `specProbePhase2`; lọc sourcemap thư viện vendor tự host độc lập (`FilesFor`) và chặn trang lỗi mềm XHTML (`<?xml`, cửa sổ 4 KB) lọt vào kho `.js`.
   - **(B3–B4 — Verify Canary Parity, Archive Origin & `jsapi` v40):** Đồng bộ header giữa probe và `canaryOptions` để triệt tiêu dương tính giả `verified_alive` trên tường xác thực AJAX `401/403`; bảo toàn & khôi phục `Origin` trong `historical.jsonl`, cô lập `client_headers` theo script/origin, suy luận mã ngôn ngữ i18n cho slot đường dẫn, khử nhân bản đường dẫn OpenAPI export; bổ sung giải mã module nội bộ Webpack 4/5 (`req.d`, `module.exports`), `JSON.parse('{...}')`, trích xuất `Keys` trên gán thuộc tính/class field và sửa lệch slot `pathNames` trước `?`/`#`.
+- **Đợt 37 (`2026-11-19`, `d917bd2`) & 37.1 (`2026-11-19`, [plan-37.1.md](plan-37.1.md)):**
+  - **(37 — Tốc độ):**
+    - archive chạy hai stage (Stage 1 chồng lên crawl), AIMD và stride cho CDX, WARC fallback;
+    - crawl trả worker sớm, có breaker dial, dedup sourcemap;
+    - `verify -host-inflight`.
+  - **(37.1 — Sửa gốc sau review):**
+    - crawl: thêm trạng thái "đã ổn định" cho origin (không còn khoá 1 request vĩnh viễn; 3xx không là shell, `Location` được thu); breaker theo origin; request bị giữ không vào `requests.jsonl`;
+    - archive: `archiveEnv`/`archive.Mode` dùng chung giữa hai stage (bỏ `ExitOnError` trong crawl và cờ nội bộ); chỉ truyền chặn mức IP từ CDX sang Memento;
+    - verify: re-judge shell, root canary ở mọi N, `gateSer` tự nhả;
+    - sourcemap: cache tham chiếu SHA, công bố sau khi lưu;
+    - `internal/testlint` cùng 11 race trong test.

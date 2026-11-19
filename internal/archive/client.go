@@ -102,6 +102,18 @@ func (b *Budget) noteThrottle(waitDur time.Duration) {
 	}
 }
 
+// cooldown holds every request of the budget for d from now.
+func (b *Budget) cooldown(d time.Duration) {
+	if b == nil || d <= 0 {
+		return
+	}
+	b.mu.Lock()
+	if until := time.Now().Add(d); until.After(b.cooldownUntil) {
+		b.cooldownUntil = until
+	}
+	b.mu.Unlock()
+}
+
 func (b *Budget) SetOnThrottle(fn func()) {
 	if b == nil {
 		return
@@ -214,6 +226,14 @@ func (c *Client) recordConnTrouble() bool {
 		return true
 	}
 	return false
+}
+
+// suspect readies the client to give up at the first refusal: another
+// client of the same archive saw the address blocked (round 37.1, B5).
+func (c *Client) suspect() {
+	c.mu.Lock()
+	c.refused = max(c.refused, 8)
+	c.mu.Unlock()
 }
 
 func (c *Client) isBlocked() bool {
