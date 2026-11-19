@@ -1,6 +1,6 @@
-# Trạng thái Hiện hành (`jsharvest` — Sau Đợt 38)
+# Trạng thái Hiện hành (`jsharvest` — Sau Đợt 39)
 
-Tài liệu nhập ngữ cảnh nhanh cho session mới (~5 KB). Đọc cùng [CLAUDE.md](../CLAUDE.md) (bất biến & quy trình gate); chỉ mở [rounds-history.md](rounds-history.md), [plan-38.md](plan-38.md), [plan-37.1.md](plan-37.1.md) hoặc [plan-34.md](plan-34.md) khi cần chi tiết lịch sử/thiết kế cũ.
+Tài liệu nhập ngữ cảnh nhanh cho session mới (~5 KB). Đọc cùng [CLAUDE.md](../CLAUDE.md) (bất biến & quy trình gate); chỉ mở [rounds-history.md](rounds-history.md), [plan-39.md](plan-39.md), [plan-38.md](plan-38.md) hoặc [plan-34.md](plan-34.md) khi cần chi tiết lịch sử/thiết kế cũ.
 
 ## 1. Quy mô & Trạng thái Mốc Đợt 34
 
@@ -12,28 +12,29 @@ Tài liệu nhập ngữ cảnh nhanh cho session mới (~5 KB). Đọc cùng [C
   - Kiểm tra hygiene đường dẫn & dữ liệu sạch (`.github/workflows/ci.yml`): **`0` vi phạm**.
 - **Phiên bản extractor:** `jsapi.Version = 45`.
 
-## 1b. Đợt 37, 37.1 & 38 (tốc độ, giữ chất lượng; [plan-38.md](plan-38.md), [plan-37.1.md](plan-37.1.md), [research-2026-11-19-speed-plan-review.md](research-2026-11-19-speed-plan-review.md))
+## 1b. Đợt 37, 37.1, 38 & 39 (tốc độ & độ phủ pre-auth; [plan-39.md](plan-39.md), [plan-38.md](plan-38.md), [plan-37.1.md](plan-37.1.md))
 
 Đợt 35–36 xem `git log` (`f9725e0`, `db98e0d`, `2e5c5fc`).
 
-- **Crawl HTTP:**
-  - Worker được trả khi tải xong, commit vẫn đúng thứ tự heap.
+- **Crawl HTTP & Pre-Auth Discovery:**
+  - Worker được trả khi tải xong, commit vẫn đúng thứ tự heap; khử trùng dòng RSC Flight (`self.__next_f.push`) không mất dữ liệu theo từng origin (`htmlscan.RSCDeduper`, giảm `~98.8%` phình đĩa/AST trên Next.js App Router, kèm trích chunk RSC/Turbopack bị escape).
   - Origin **ổn định** ở mọi câu trả lời HTTP, gán cho cả origin yêu cầu lẫn origin cuối. Trang 3xx không bao giờ là shell, nhưng link của nó (kể cả `Location`) vẫn được thu.
   - Hai breaker:
     - **dial** theo `host:port`: First-Dial Gate, 2–3 strike, half-open 3 phút;
     - **origin** theo `scheme://host:port`: 3 lỗi sau khi đã kết nối, chỉ với origin chưa từng trả lời.
   - Request bị giữ **không gửi**: không vào `requests.jsonl`, không tính lượt thăm (`pages.jsonl` `reason: origin-unreachable`, `stats.held_by_breaker`), không tốn hạn mức `-http-rate`.
-  - Probe dịch vụ (spec probe) song song theo host; sub-path base trên origin SPA có **guarded SPA brake** (sau 3 probe thực gửi + `/v3/api-docs` trùng shell gốc thì phanh và truyền `spaBraked` sang `plan.Services`; giữ nguyên 100% `SpecPaths` ở origin root và bảo vệ OIDC sub-path).
-  - Dedup sourcemap theo `(sha256 script, loại thư viện, ref tương đối)`: map tải 1 lần; host sau ghi sighting theo SHA (`store_errors.sighting_missing` nếu hụt).
-- **Archive & Endpoints:**
+  - Mở rộng Build Manifests pre-auth cho cả live & archive: `/mix-manifest.json` (Laravel Mix), `/build/.vite/manifest.json` + fallback `/build/manifest.json` (Laravel Vite), `/build/entrypoints.json` (Symfony Encore); đọc thêm `<link rel="manifest">`, `/.well-known/apple-app-site-association` và `/.well-known/assetlinks.json`.
+  - Probe dịch vụ (spec probe) song song theo host (`/swagger/v1/swagger.json` trong `SpecPaths` + `OriginSpecPaths` chỉ hỏi 1 lần ở origin root + bóc URL spec động từ HTML Swagger UI `SwaggerUIURLs`); lọc CDN cookie (`onetrust.com`...); sub-path base trên origin SPA có **guarded SPA brake** (sau 3 probe thực gửi + `/v3/api-docs` trùng shell gốc thì phanh và truyền `spaBraked` sang `plan.Services`; giữ nguyên 100% ở origin root và bảo vệ OIDC sub-path).
+  - Dedup sourcemap theo `(sha256 script, loại thư viện, ref tương đối)` (nhận diện thêm `adminlte`, `apexcharts`, `echarts`...): map tải 1 lần; host sau ghi sighting theo SHA (`store_errors.sighting_missing` nếu hụt).
+- **Archive, Intel & Endpoints:**
   - Gap CDX 2,5 s (Internet Archive giới hạn ~30 req/phút), AIMD lên tối đa 10 s; duyệt shard theo stride, có `wayback_listed_pct`.
   - Lỗi được cô lập theo nguồn: `ErrBlocked` của Wayback không hủy CC/OTX/URLScan; Memento bị chặn thì chuyển sang WARC của CC; `history()` luôn chạy (log timing từng pha `archive` + 4 chặng `history`, kèm harness offline `JSH_HISTORY_BENCH`).
   - `crawl -archive`: Stage 1 (`ModeListOnly`, 0 request tới target) chạy cùng crawl và **nhận streaming subdomain mới qua `ExtraHostCh`** (fan-out hàng đợi độc lập cho OTX & URLScan); Stage 2 (`ModeResume`) chạy sau Escalate/SPABoot chỉ hỏi delta host còn sót. Cả hai dùng chung một `archiveEnv` (khoá, client, budget); trần `-archive-max-pages 150`.
   - CDX bị **từ chối kết nối** thì Memento chờ và dừng ngay ở lần từ chối đầu; 429 của CDX không truyền sang Memento.
-  - `endpoints.ExtractCached` có singleflight theo SHA-256 và khoá trần `extractHeavySem` cho script lớn.
+  - `endpoints.ExtractCached` có singleflight theo SHA-256 và khoá trần `extractHeavySem` cho script lớn; `SaveIntel` quét cả `pages.jsonl` để bắt `AuthFlows` từ trang Login HTML, thăng cấp route sạch từ `redirect_uri` in-scope vào `intel.Routes`/`CrawlHosts`, và nhận diện framework qua tên cookie/header (`Laravel`, `ASP.NET`, `Drupal`...).
 - **Verify:**
   - `-host-inflight N` (mặc định 1, chỉ có lợi khi `-rate` lớn hơn 1/RTT). Singleflight cho canary, sub-canary, OPTIONS và root canary.
-  - Root canary chạy ở **mọi** N.
+  - Root canary chạy ở **mọi** N; chặn cả Soft-`200` HTML mang đúng `Shell` của canary `404` thuộc cùng prefix.
   - **Re-judge** 2xx-HTML với mọi shell canary đã biết: 0 request thêm, chỉ hạ `verified_alive` (xoá sạch cả `verified_method` lẫn `verified_base`), tất định theo thứ tự.
   - Host hạ về 1 khi gặp 429 (một chiều), hoặc khi đang đếm gate (tự nhả khi host trả lời khác).
 - **Test:** `internal/testlint` chặn handler test ghi biến capture (kể cả ghi vào map/slice/field/pointer, `delete()`, hoặc chỉ giữ `RLock()`).

@@ -68,6 +68,78 @@ func SwaggerResources(body []byte) []string {
 	return out
 }
 
+// SwaggerConfigURLs parses a Springdoc / Swagger-UI swagger-config JSON object
+// ({"url":"/v3/api-docs","urls":[{"url":"/docs/api-docs.json"}]}) fetched via
+// a SwaggerUI configUrl reference.
+func SwaggerConfigURLs(body []byte) []string {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 || trimmed[0] != '{' || len(trimmed) > 1<<20 {
+		return nil
+	}
+	var cfg struct {
+		URL  string `json:"url"`
+		URLs []struct {
+			URL string `json:"url"`
+		} `json:"urls"`
+	}
+	if json.Unmarshal(trimmed, &cfg) != nil {
+		return nil
+	}
+	var out []string
+	push := func(raw string) {
+		if len(out) >= MaxSwaggerResources {
+			return
+		}
+		clean := cleanSwaggerResource(strings.TrimSpace(raw))
+		if clean != "" && !slices.Contains(out, clean) {
+			out = append(out, clean)
+		}
+	}
+	push(cfg.URL)
+	for _, u := range cfg.URLs {
+		push(u.URL)
+	}
+	return out
+}
+
+var (
+	swaggerUIInitRe = regexp.MustCompile(`(?i)(?:SwaggerUIBundle|SwaggerUIStandalonePreset|swagger-ui|Redoc\.init|<redoc\b|api-reference)`)
+	swaggerUIURLRe  = regexp.MustCompile(`(?i)(?:\b(?:configUrl|spec-url|data-url|url)\s*[:=]\s*["']([^"'<>\s]+)["'])`)
+	nonSpecAssetRe  = regexp.MustCompile(`(?i)\.(?:css|m?js|png|jpe?g|svg|ico|woff2?|ttf|html?)$`)
+)
+
+// SwaggerUIURLs extracts up to MaxSwaggerResources OpenAPI document or
+// swagger-config references from a Swagger UI / Redoc / Scalar HTML wrapper.
+func SwaggerUIURLs(htmlBody []byte) []string {
+	if len(htmlBody) == 0 || len(htmlBody) > 1<<20 || !swaggerUIInitRe.Match(htmlBody) {
+		return nil
+	}
+	var out []string
+	for _, m := range swaggerUIURLRe.FindAllSubmatch(htmlBody, 24) {
+		raw := strings.TrimSpace(string(m[1]))
+		if raw == "" || strings.Contains(strings.ToLower(raw), "petstore.swagger.io") {
+			continue
+		}
+		u, err := url.Parse(raw)
+		if err != nil || u.User != nil {
+			continue
+		}
+		if u.Scheme != "" && u.Scheme != "http" && u.Scheme != "https" {
+			continue
+		}
+		if nonSpecAssetRe.MatchString(u.Path) {
+			continue
+		}
+		if !slices.Contains(out, raw) {
+			out = append(out, raw)
+			if len(out) >= MaxSwaggerResources {
+				break
+			}
+		}
+	}
+	return out
+}
+
 func cleanSwaggerResource(raw string) string {
 	if !strings.HasPrefix(raw, "/") || strings.HasPrefix(raw, "//") || strings.Contains(raw, "://") ||
 		strings.ContainsAny(raw, " \t\r\n\\") {

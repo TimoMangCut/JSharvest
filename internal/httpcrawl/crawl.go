@@ -1030,6 +1030,9 @@ func (cr *crawler) commitPage(fp fetchedPage, first bool, b *bucket) ([]job, []f
 	for _, m := range p.NextManifests() {
 		jobs = append(jobs, job{url: m, page: a.URL, how: "next-build-id", from: a.URL, depth: it.Depth, tags: resolvedTags("build-manifest"), b: b})
 	}
+	if cr.o.Probe && cr.o.Depth > 0 && p.ManifestURL != "" {
+		jobs = append(jobs, job{url: p.ManifestURL, page: a.URL, how: "web-manifest", from: a.URL, depth: it.Depth, b: b})
+	}
 	links := frontier.FromHTML(string(a.Body), a.URL)
 	links = append(located, links...)
 	pg.Discovered = len(links)
@@ -1204,6 +1207,21 @@ func (cr *crawler) claim(raw string) (ok bool, why string) {
 
 func (cr *crawler) script(ctx context.Context, j job) []job {
 	if !j.admitted && !cr.admit(j) {
+		return nil
+	}
+	if j.how == "web-manifest" {
+		a := cr.fetch(ctx, j.url, j.page, dataReq, "Other")
+		cr.politeAt(a, j.page, j.depth)
+		if a.Err == nil && a.Status == 200 && !htmlLike(a.Body) && j.b != nil {
+			fs := frontier.FromWebManifest(a.Body, a.URL)
+			if len(fs) > 0 {
+				cr.mu.Lock()
+				for _, f := range fs {
+					j.b.found = append(j.b.found, found{f: f, from: a.URL, depth: j.depth + 1})
+				}
+				cr.mu.Unlock()
+			}
+		}
 		return nil
 	}
 	a := cr.fetch(ctx, j.url, j.page, scriptReq, "Script")
@@ -1388,6 +1406,12 @@ func (cr *crawler) probe(ctx context.Context, seed string) ([]job, []frontier.Fo
 	if a, ok := get("/build/entrypoints.json"); ok {
 		add(resolve.EncoreEntrypoints(a.Body, root+"/build/entrypoints.json"), "encore-entrypoints")
 	}
+	if a, ok := get("/.well-known/apple-app-site-association"); ok {
+		links = append(links, frontier.FromAppleAppSiteAssociation(a.Body, root)...)
+	}
+	if a, ok := get("/.well-known/assetlinks.json"); ok {
+		links = append(links, frontier.FromAssetLinks(a.Body)...)
+	}
 	// Service workers: a Workbox precache list names the whole app.
 	for _, p := range []string{"/service-worker.js", "/sw.js"} {
 		jobs = append(jobs, job{url: root + p, page: seed, how: "probe", from: seed})
@@ -1571,7 +1595,47 @@ func (cr *crawler) specProbeWithScope(ctx context.Context, base, referer string,
 	triedV3 := false
 	triedOIDC := false
 
-	for _, p := range frontier.SpecPaths {
+	probePaths := frontier.SpecPaths
+	if (u.Path == "" || u.Path == "/") && !cr.spa[orig] {
+		probePaths = make([]string, 0, len(frontier.SpecPaths)+len(frontier.OriginSpecPaths))
+		probePaths = append(probePaths, frontier.SpecPaths...)
+		probePaths = append(probePaths, frontier.OriginSpecPaths...)
+	}
+
+	followSwaggerRefs := func(parentURL string, refs []string, allowConfigHop bool) {
+		parentBase, err := url.Parse(parentURL)
+		if err != nil {
+			return
+		}
+		for _, raw := range refs {
+			if cr.stop() != "" || cr.specHostBlocked(base) || ctx.Err() != nil || specBudgetExhausted(budget) {
+				break
+			}
+			var docURL string
+			if strings.HasPrefix(raw, "/") && !strings.HasPrefix(raw, "//") {
+				docURL = frontier.JoinSpecBase(base, raw)
+			} else if du, err := parentBase.Parse(raw); err == nil && (du.Scheme == "http" || du.Scheme == "https") {
+				du.Fragment = ""
+				docURL = du.String()
+			}
+			if docURL == "" || cr.specPolicy.Check(docURL) != resolve.Allow {
+				continue
+			}
+			ca, cStored, cSent := fetchSpec(docURL, raw)
+			if !cStored && cSent && allowConfigHop && ca.Err == nil && ca.Status == 200 && !htmlLike(ca.Body) {
+				if sub := jsapi.SwaggerConfigURLs(ca.Body); len(sub) > 0 {
+					for _, srel := range sub {
+						if cr.stop() != "" || cr.specHostBlocked(base) || ctx.Err() != nil || specBudgetExhausted(budget) {
+							break
+						}
+						fetchSpec(frontier.JoinSpecBase(base, srel), srel)
+					}
+				}
+			}
+		}
+	}
+
+	for _, p := range probePaths {
 		if cr.stop() != "" || cr.specHostBlocked(base) || ctx.Err() != nil || specBudgetExhausted(budget) {
 			return false
 		}
@@ -1583,13 +1647,16 @@ func (cr *crawler) specProbeWithScope(ctx context.Context, base, referer string,
 		}
 		targetURL := frontier.JoinSpecBase(base, p)
 		a, stored, sent := fetchSpec(targetURL, p)
-		if !stored && sent && p == "/swagger-resources" && a.Err == nil && a.Status == 200 && !htmlLike(a.Body) {
-			for _, rel := range jsapi.SwaggerResources(a.Body) {
-				if cr.stop() != "" || cr.specHostBlocked(base) || ctx.Err() != nil || specBudgetExhausted(budget) {
-					break
+		if !stored && sent && a.Err == nil && a.Status == 200 {
+			switch {
+			case p == "/swagger-resources" && !htmlLike(a.Body):
+				if refs := jsapi.SwaggerResources(a.Body); len(refs) > 0 {
+					followSwaggerRefs(a.URL, refs, false)
 				}
-				docURL := frontier.JoinSpecBase(base, rel)
-				fetchSpec(docURL, rel)
+			case htmlLike(a.Body) && !matchesOriginSPAShell(a):
+				if refs := jsapi.SwaggerUIURLs(a.Body); len(refs) > 0 {
+					followSwaggerRefs(a.URL, refs, true)
+				}
 			}
 		}
 		if !spaOrigin || !sent {

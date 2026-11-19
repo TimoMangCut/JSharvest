@@ -34,6 +34,8 @@ type Page struct {
 	NextBuildID string
 	// NextAssetPrefix is the asset prefix __NEXT_DATA__ names, when set.
 	NextAssetPrefix string
+	// ManifestURL is the first valid http(s) <link rel="manifest" href="..."> URL on the page.
+	ManifestURL string
 }
 
 // jsTypes are the type attributes a browser runs as a classic script.
@@ -123,6 +125,13 @@ func Scan(body []byte, pageURL string) Page {
 					add(attr["href"], "modulepreload", true)
 				case hasToken(rel, "preload") && as == "script", hasToken(rel, "prefetch") && as == "script":
 					add(attr["href"], "preload", false)
+				case hasToken(rel, "manifest"):
+					if p.ManifestURL == "" {
+						if u, err := base.Parse(strings.TrimSpace(attr["href"])); err == nil && (u.Scheme == "http" || u.Scheme == "https") {
+							u.Fragment = ""
+							p.ManifestURL = u.String()
+						}
+					}
 				}
 			}
 		}

@@ -409,7 +409,11 @@ func templatePath(p string) bool {
 // Springfox (/v2/api-docs, /swagger-resources), swaggo, and an OpenID
 // Provider's configuration.
 var SpecPaths = []string{"/openapi.json", "/openapi.yaml", "/api-json", "/docs-json", "/v3/api-docs", "/v2/api-docs",
-	"/swagger-resources", "/swagger/doc.json", "/.well-known/openid-configuration"}
+	"/swagger-resources", "/swagger/doc.json", "/swagger/v1/swagger.json", "/.well-known/openid-configuration"}
+
+// OriginSpecPaths are additional OpenAPI and Swagger UI paths probed once on
+// origin roots only (never multiplied across sub-path gateway bases).
+var OriginSpecPaths = []string{"/swagger.json", "/swagger.yaml", "/docs/api-docs.json", "/storage/api-docs/api-docs.json", "/api/documentation"}
 
 // MaxAPIOrigins bounds the API hosts a crawl asks SpecPaths of (0: unlimited).
 const MaxAPIOrigins = 0

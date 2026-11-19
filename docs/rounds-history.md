@@ -59,3 +59,8 @@
   - Streaming subdomain mới từ `httpcrawl` vào Stage 1 (`ExtraHostCh` fan-out độc lập cho OTX/URLScan) + debounce `saveMaybeLocked`;
   - Guarded Sub-Path SPA Brake trong `specProbeWithScope` kèm `spaBraked` cho `plan.Services` (giữ nguyên origin root & OIDC sub-path);
   - Singleflight theo SHA-256 + `extractHeavySem` trong `endpoints.ExtractCached`.
+- **Đợt 39 (`2026-11-19`, [plan-39.md](plan-39.md)):**
+  - Khử trùng dòng RSC Flight (`htmlscan.RSCDeduper`, `-98.8%` dung lượng đĩa/AST lặp trên Next.js App Router) + trích chunk RSC/Turbopack escape + chặn FP Soft-`200` HTML trùng shell Canary `404` + bổ sung vendor `adminlte` & lọc CDN `onetrust.com`;
+  - Bổ sung build manifest Pre-Auth cho SSR/Full-stack (`/mix-manifest.json`, `/build/.vite/manifest.json` + fallback `/build/manifest.json`, `/build/entrypoints.json`) cho cả live & archive;
+  - Quét `pages.jsonl` bắt `AuthFlows` trên trang Login HTML, thăng cấp route sạch từ `redirect_uri` in-scope vào `intel.Routes`/`CrawlHosts`, nhận diện framework qua tên cookie/header (`Laravel`, `ASP.NET`, `Drupal`...);
+  - Phân tầng `/swagger/v1/swagger.json` (`SpecPaths`) vs `OriginSpecPaths` (chỉ ở Origin Root), giải mã `SwaggerUIURLs` từ HTML wrapper, và khai thác `<link rel="manifest">`, `apple-app-site-association`, `assetlinks.json`.

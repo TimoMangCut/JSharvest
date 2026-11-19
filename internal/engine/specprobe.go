@@ -226,18 +226,52 @@ func (e *engine) specFilesWithHeaders(ctx context.Context, c *crawl, base, page 
 		return r, true
 	}
 
-	for _, p := range frontier.SpecPaths {
+	bu, _ := url.Parse(base)
+	probePaths := frontier.SpecPaths
+	if bu != nil && (bu.Path == "" || bu.Path == "/") {
+		probePaths = make([]string, 0, len(frontier.SpecPaths)+len(frontier.OriginSpecPaths))
+		probePaths = append(probePaths, frontier.SpecPaths...)
+		probePaths = append(probePaths, frontier.OriginSpecPaths...)
+	}
+
+	for _, p := range probePaths {
 		if ctx.Err() != nil || (budget != nil && *budget <= 0) {
 			return
 		}
 		targetURL := frontier.JoinSpecBase(base, p)
 		r, stored := fetchOne(targetURL, p)
-		if !stored && p == "/swagger-resources" && r.Status == 200 && r.Text != "" && !r.Challenge {
-			for _, rel := range jsapi.SwaggerResources([]byte(r.Text)) {
-				if ctx.Err() != nil || (budget != nil && *budget <= 0) {
-					break
+		if !stored && r.Status == 200 && r.Text != "" && !r.Challenge {
+			rawBody := []byte(r.Text)
+			if p == "/swagger-resources" {
+				for _, rel := range jsapi.SwaggerResources(rawBody) {
+					if ctx.Err() != nil || (budget != nil && *budget <= 0) {
+						break
+					}
+					fetchOne(frontier.JoinSpecBase(base, rel), rel)
 				}
-				fetchOne(frontier.JoinSpecBase(base, rel), rel)
+			}
+			if parentU, err := url.Parse(targetURL); err == nil {
+				for _, uiRef := range jsapi.SwaggerUIURLs(rawBody) {
+					if ctx.Err() != nil || (budget != nil && *budget <= 0) {
+						break
+					}
+					du, err := parentU.Parse(uiRef)
+					if err != nil || (du.Scheme != "http" && du.Scheme != "https") {
+						continue
+					}
+					du.Fragment = ""
+					if pol.Check(du.String()) == resolve.Allow {
+						cr, cStored := fetchOne(du.String(), du.Path)
+						if !cStored && cr.Status == 200 && cr.Text != "" && !cr.Challenge {
+							for _, srel := range jsapi.SwaggerConfigURLs([]byte(cr.Text)) {
+								if ctx.Err() != nil || (budget != nil && *budget <= 0) {
+									break
+								}
+								fetchOne(frontier.JoinSpecBase(base, srel), srel)
+							}
+						}
+					}
+				}
 			}
 		}
 	}
