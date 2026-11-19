@@ -1362,6 +1362,9 @@ func (cr *crawler) probe(ctx context.Context, seed string) ([]job, []frontier.Fo
 	if a, ok := get("/asset-manifest.json"); ok {
 		add(resolve.AssetManifest(a.Body, root+"/asset-manifest.json"), "asset-manifest")
 	}
+	if a, ok := get("/mix-manifest.json"); ok {
+		add(resolve.AssetManifest(a.Body, root+"/mix-manifest.json"), "mix-manifest")
+	}
 	if a, ok := get("/ngsw.json"); ok {
 		for _, c := range resolve.NgswURLs(a.Body, root+"/ngsw.json") {
 			jobs = append(jobs, job{url: c.URL, page: seed, how: "ngsw", from: root + "/ngsw.json", tags: resolvedTags("ngsw")})
@@ -1369,6 +1372,21 @@ func (cr *crawler) probe(ctx context.Context, seed string) ([]job, []frontier.Fo
 	}
 	if a, ok := get("/.vite/manifest.json"); ok {
 		add(resolve.ViteManifest(a.Body, root+"/"), "vite-manifest")
+	}
+	buildViteLoaded := false
+	if a, ok := get("/build/.vite/manifest.json"); ok {
+		if urls := resolve.ViteManifest(a.Body, root+"/build/"); len(urls) > 0 {
+			add(urls, "vite-manifest")
+			buildViteLoaded = true
+		}
+	}
+	if !buildViteLoaded {
+		if a, ok := get("/build/manifest.json"); ok {
+			add(resolve.ViteManifest(a.Body, root+"/build/"), "vite-manifest")
+		}
+	}
+	if a, ok := get("/build/entrypoints.json"); ok {
+		add(resolve.EncoreEntrypoints(a.Body, root+"/build/entrypoints.json"), "encore-entrypoints")
 	}
 	// Service workers: a Workbox precache list names the whole app.
 	for _, p := range []string{"/service-worker.js", "/sw.js"} {
