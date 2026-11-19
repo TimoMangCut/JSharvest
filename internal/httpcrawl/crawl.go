@@ -1678,26 +1678,9 @@ type inflight struct {
 type pageSlot struct {
 	it      frontier.Item
 	origin  string
-	section string
 	skipped bool
 	done    chan struct{}
 	fp      fetchedPage
-}
-
-func sectionKeyOf(raw string) string {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return raw
-	}
-	orig := strings.ToLower(u.Scheme + "://" + u.Host)
-	p := strings.Trim(u.Path, "/")
-	if p == "" {
-		return orig + "/"
-	}
-	if i := strings.IndexByte(p, '/'); i >= 0 {
-		return orig + "/" + p[:i]
-	}
-	return orig + "/"
 }
 
 func (cr *crawler) pages(ctx context.Context) {
@@ -1806,12 +1789,12 @@ func (cr *crawler) pages(ctx context.Context) {
 	}
 
 	var win []*pageSlot
+	maxWin := max(pageWorkers*2, 8)
 	activeWorkers := 0
 	originInFlight := map[string]int{}
-	sectionInFlight := map[string]int{}
 
 	canDispatch := func(nx frontier.Item) bool {
-		if activeWorkers >= pageWorkers || ctx.Err() != nil || cr.stop() != "" {
+		if activeWorkers >= pageWorkers || len(win) >= maxWin || ctx.Err() != nil || cr.stop() != "" {
 			return false
 		}
 		if len(level) > 0 && nx.Depth != level[0].it.Depth {
@@ -1834,18 +1817,12 @@ func (cr *crawler) pages(ctx context.Context) {
 		if cr.prints[orig] == "" || hostChallenged {
 			return originInFlight[orig] == 0
 		}
-		sec := sectionKeyOf(nx.URL)
-		if originInFlight[orig] == 0 {
-			return true
-		}
-		return originInFlight[orig] < 2 && sectionInFlight[sec] == 0
+		return true
 	}
 
 	commitSlot := func(slot *pageSlot) {
 		if slot.skipped || (cr.skel != nil && cr.skel.shouldSkip(slot.it.URL)) {
-			if slot.skipped {
-				cr.q.Refund()
-			}
+			cr.q.Refund()
 			cr.mu.Lock()
 			cr.res.Listed[frontier.TemplateSaturated]++
 			cr.mu.Unlock()
@@ -1865,7 +1842,6 @@ func (cr *crawler) pages(ctx context.Context) {
 				if !slot.skipped {
 					activeWorkers--
 					originInFlight[slot.origin]--
-					sectionInFlight[slot.section]--
 				}
 				commitSlot(slot)
 				progressed = true
@@ -1900,11 +1876,9 @@ func (cr *crawler) pages(ctx context.Context) {
 				continue
 			}
 			orig := originOf(it.URL)
-			sec := sectionKeyOf(it.URL)
-			slot := &pageSlot{it: it, origin: orig, section: sec, done: make(chan struct{})}
+			slot := &pageSlot{it: it, origin: orig, done: make(chan struct{})}
 			activeWorkers++
 			originInFlight[orig]++
-			sectionInFlight[sec]++
 			win = append(win, slot)
 			go func(s *pageSlot) {
 				defer close(s.done)

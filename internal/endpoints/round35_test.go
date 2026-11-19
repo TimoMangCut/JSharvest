@@ -27,6 +27,7 @@ var Routes = class {
   static JOB_LIST = "jobs/published";
   static JOB_DETAIL = "jobs/detail";
   static DEACTIVATE_REMINDER = "candidate/deactivateReminder";
+  static PERMS = { AUDIT_READ: "audit:read" };
 };
 var HttpWrapper = class w {
   constructor(http) { this.http = http; }
@@ -86,6 +87,11 @@ export class DirectFeature {
   }
 }
 `
+	// Consumer chunk 3: SPA router referencing static class nested dict through barrel re-export.
+	consumer3 := `
+import { zc as R } from "./chunk-barrel.js";
+const routes = [{ path: "/admin/audit", data: { permissions: [R.PERMS.AUDIT_READ] } }];
+`
 
 	scripts := []Script{
 		makeTestScript("sha-core", "https://app.portal.test/chunk-core.js", coreCode),
@@ -93,11 +99,16 @@ export class DirectFeature {
 		makeTestScript("sha-barrel", "https://app.portal.test/chunk-barrel.js", barrelCode),
 		makeTestScript("sha-c1", "https://app.portal.test/chunk-jobs.js", consumer1),
 		makeTestScript("sha-c2", "https://app.portal.test/chunk-direct.js", consumer2),
+		makeTestScript("sha-c3", "https://app.portal.test/chunk-routes.js", consumer3),
 	}
 	inScope := func(h string) bool {
 		return h == "portal.test" || strings.HasSuffix(h, ".portal.test")
 	}
 	eps := Build(scripts, nil, inScope)
+	authz := MergeClientAuthz(scripts)
+	if authz == nil || !slices.Contains(authz.Permissions, "audit:read") {
+		t.Fatalf("expected barrel ReExport + nested static field authz permission 'audit:read', got %+v", authz)
+	}
 
 	got := map[string]Endpoint{}
 	for _, ep := range eps {

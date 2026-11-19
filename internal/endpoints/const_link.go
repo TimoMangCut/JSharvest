@@ -117,9 +117,20 @@ func resolveScriptAuthzConsts(scripts []Script) map[int]*resolvedScriptAuthz {
 		table[tk] = constSlot{val: val}
 	}
 
+	reExportsByESM := map[string][]jsapi.ReExport{}
 	for i := range scripts {
 		s := &scripts[i]
-		if len(s.ConstExports) == 0 || isTrackerScript(*s) {
+		if isTrackerScript(*s) {
+			continue
+		}
+		if len(s.ReExports) > 0 {
+			for _, rawU := range s.URLs {
+				if nu := normalizeESMURL(rawU); nu != "" {
+					reExportsByESM[nu] = s.ReExports
+				}
+			}
+		}
+		if len(s.ConstExports) == 0 {
 			continue
 		}
 		origs := scriptOrigins(s.URLs)
@@ -188,6 +199,45 @@ func resolveScriptAuthzConsts(scripts []Script) map[int]*resolvedScriptAuthz {
 		return "", false
 	}
 
+	var lookupESM func(modURL, exp, key string, hop int) (string, bool)
+	lookupESM = func(modURL, exp, key string, hop int) (string, bool) {
+		if hop > 4 || modURL == "" || exp == "" {
+			return "", false
+		}
+		if v, ok := lookupInScope("esm:"+modURL, "", exp, key); ok {
+			return v, true
+		}
+		base, err := url.Parse(modURL)
+		if err != nil {
+			return "", false
+		}
+		var resolved string
+		for _, re := range reExportsByESM[modURL] {
+			nextExp := ""
+			if re.All {
+				nextExp = exp
+			} else if re.Name == exp && re.Target != "" && re.Target != "*" {
+				nextExp = re.Target
+			}
+			if nextExp == "" {
+				continue
+			}
+			rel, rerr := base.Parse(re.Module)
+			if rerr != nil {
+				continue
+			}
+			sub, sok := lookupESM(normalizeESMURL(rel.String()), nextExp, key, hop+1)
+			if !sok {
+				continue
+			}
+			if resolved != "" && resolved != sub {
+				return "", false
+			}
+			resolved = sub
+		}
+		return resolved, resolved != ""
+	}
+
 	lookup := func(s *Script, ref *jsapi.ConstRef) (string, bool) {
 		if ref == nil {
 			return "", false
@@ -206,7 +256,7 @@ func resolveScriptAuthzConsts(scripts []Script) map[int]*resolvedScriptAuthz {
 				if err != nil {
 					continue
 				}
-				v, ok := lookupInScope("esm:"+normalizeESMURL(rel.String()), "", ref.Export, ref.Key)
+				v, ok := lookupESM(normalizeESMURL(rel.String()), ref.Export, ref.Key, 0)
 				if !ok {
 					continue
 				}

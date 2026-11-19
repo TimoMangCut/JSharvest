@@ -15,6 +15,7 @@ var cfg = {
   BASE_URL: "https://api.portal.test",
   ENCRIPTION_KEY: "krxYt78-d*5kYaxT",
   ENCRIPTION_LOGIN_KEY: "t3x/ztr*d*5kY2xT",
+  APP_PORTAL_ENCRYPTION_KEY: "m2p_aes256_998877",
   encryptionSessionKey: "99aabbccddeeff00",
   privateApiKey: "priv_9876543210",
   CURRENT_USER_TOKEN_KEY: "currentUser",
@@ -29,6 +30,7 @@ var Routes = class {
   static LOGIN = "edevlet-login";
   static LIST_ITEMS = "catalog/publishedItems";
   static ARCHIVE_ITEM = "catalog/archiveItem";
+  static AUTH = { VERIFY_OTP: "sso/verifyOtp" };
   static \u0275fac = function(t) { return new (t || Routes)(); };
 };
 var ApiService = class s {
@@ -56,7 +58,7 @@ export { Routes as zc, ApiService as Bc };
 	if routeDict == nil {
 		t.Fatalf("missing ConstDict for exported static class zc; got %+v", res.ConstExports)
 	}
-	if routeDict.Values["LIST_ITEMS"] != "catalog/publishedItems" || routeDict.Values["LOGIN"] != "edevlet-login" {
+	if routeDict.Values["LIST_ITEMS"] != "catalog/publishedItems" || routeDict.Values["LOGIN"] != "edevlet-login" || routeDict.Values["AUTH.VERIFY_OTP"] != "sso/verifyOtp" {
 		t.Fatalf("unexpected static class ConstDict values: %+v", routeDict.Values)
 	}
 	for k := range routeDict.Values {
@@ -85,7 +87,7 @@ export { Routes as zc, ApiService as Bc };
 	for _, k := range res.Keys {
 		gotKeyNames = append(gotKeyNames, k.Name)
 	}
-	for _, wantKey := range []string{"ENCRIPTION_KEY", "ENCRIPTION_LOGIN_KEY", "encryptionSessionKey", "privateApiKey"} {
+	for _, wantKey := range []string{"ENCRIPTION_KEY", "ENCRIPTION_LOGIN_KEY", "APP_PORTAL_ENCRYPTION_KEY", "encryptionSessionKey", "privateApiKey"} {
 		if !slices.Contains(gotKeyNames, wantKey) {
 			t.Errorf("missing expected crypto/auth key %q in %v", wantKey, gotKeyNames)
 		}

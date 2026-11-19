@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -17,13 +18,25 @@ import (
 func TestParallelPagesDeterministicOrder(t *testing.T) {
 	delays := map[string]time.Duration{
 		"/":      5 * time.Millisecond,
-		"/slow1": 65 * time.Millisecond,
-		"/fast2": 5 * time.Millisecond,
-		"/mid3":  35 * time.Millisecond,
-		"/fast4": 8 * time.Millisecond,
+		"/slow1": 80 * time.Millisecond,
+		"/fast2": 45 * time.Millisecond,
+		"/mid3":  65 * time.Millisecond,
+		"/fast4": 50 * time.Millisecond,
 	}
+	var inFlight atomic.Int32
+	var peakInFlight atomic.Int32
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" && !strings.HasPrefix(r.URL.Path, "/__") {
+			cur := inFlight.Add(1)
+			for {
+				prev := peakInFlight.Load()
+				if cur <= prev || peakInFlight.CompareAndSwap(prev, cur) {
+					break
+				}
+			}
+			defer inFlight.Add(-1)
+		}
 		if d := delays[r.URL.Path]; d > 0 {
 			time.Sleep(d)
 		}
@@ -76,9 +89,20 @@ func TestParallelPagesDeterministicOrder(t *testing.T) {
 		return pageOrder, scripts, res
 	}
 
+	peakInFlight.Store(0)
 	order1, scripts1, res1 := runWithWorkers(1)
-	order6, scripts6, res6 := runWithWorkers(6)
+	peak1 := peakInFlight.Load()
 
+	peakInFlight.Store(0)
+	order6, scripts6, res6 := runWithWorkers(6)
+	peak6 := peakInFlight.Load()
+
+	if peak1 != 1 {
+		t.Fatalf("expected peak in-flight == 1 for PageWorkers=1, got %d", peak1)
+	}
+	if peak6 < 3 {
+		t.Fatalf("expected true single-origin parallel dispatch (>=3 in-flight) for PageWorkers=6, got %d", peak6)
+	}
 	if !slices.Equal(order1, order6) {
 		t.Fatalf("non-deterministic Page commit order:\n  pw=1: %v\n  pw=6: %v", order1, order6)
 	}

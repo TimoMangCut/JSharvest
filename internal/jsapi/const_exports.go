@@ -117,8 +117,41 @@ func (x *extractor) extractConstDictExpr(e js.IExpr) (vals map[string]string, sc
 				if k == "" || len(out) >= maxConstKeysPerDict {
 					continue
 				}
-				if s, sok := x.evalConstScalar(info.staticFields[k]); sok {
+				ve := info.staticFields[k]
+				if s, sok := x.evalConstScalar(ve); sok {
 					out[k] = s
+					continue
+				}
+				if subEv := x.enumVar(ve, 1); subEv != nil {
+					subKeys := make([]string, 0, len(x.enumProps[subEv]))
+					for sk := range x.enumProps[subEv] {
+						subKeys = append(subKeys, sk)
+					}
+					sort.Strings(subKeys)
+					for _, sk := range subKeys {
+						if sk == "" || len(out) >= maxConstKeysPerDict {
+							break
+						}
+						if s, sok := x.evalConstScalar(x.enumProps[subEv][sk]); sok {
+							out[k+"."+sk] = s
+						}
+					}
+					continue
+				}
+				if subObj, subOK := x.objectN(ve, 1); subOK && subObj != nil && !isSchemaOrUIDescriptor(subObj) && len(subObj.List) <= 64 {
+					for j := range subObj.List {
+						sp := &subObj.List[j]
+						if sp.Spread || sp.Name == nil || sp.Value == nil || len(out) >= maxConstKeysPerDict {
+							continue
+						}
+						sk := propKey(sp)
+						if sk == "" {
+							continue
+						}
+						if s, sok := x.evalConstScalar(sp.Value); sok {
+							out[k+"."+sk] = s
+						}
+					}
 				}
 			}
 			if len(out) > 0 {

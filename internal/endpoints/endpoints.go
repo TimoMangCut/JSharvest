@@ -245,7 +245,7 @@ func analyzeDir(dir string, workers int, skip map[string]bool, slim bool) ([]Scr
 	return out, nil
 }
 
-const heavyScriptBytes = 192 << 10
+const heavyScriptBytes = 320 << 10
 
 func extractJS(src []byte, hint string, heavySem chan struct{}) jsapi.Result {
 	// Clip slice capacity so tdewolff/parse/v2.NewInputBytes (which appends a

@@ -22,7 +22,7 @@ import (
 
 // Version changes when what Extract finds changes, so that cached results
 // are made again.
-const Version = 43
+const Version = 44
 
 // Endpoint is one call to a URL that a script makes.
 type Endpoint struct {
@@ -297,7 +297,7 @@ var (
 
 // keyNameRe names a setting whose value is a key, an id or a secret.
 var (
-	keyNameRe            = regexp.MustCompile(`(?i:(?:^|[_-]|[a-z])(?:api[_-]?key|secret|access[_-]?key|client[_-]?id|app[_-]?id|project[_-]?id|sender[_-]?id|measurement[_-]?id|auth[_-]?domain|storage[_-]?bucket|dsn|site[_-]?key|tenant[_-]?id|database[_-]?url|vapid[_-]?key|public[_-]?key|token)$|^(?:apiKey|appId|projectId|dsn)$|^(?:[A-Z0-9]+[_-])?(?:ENCRYPT(?:ION)?|ENCRIPT(?:ION)?|DECRYPT(?:ION)?|PRIVATE|SIGNING|HMAC|AES|CRYPTO|CIPHER|MASTER|JWT|BEARER|LICENSE)(?:[_-][A-Z0-9]{1,16}){0,2}[_-]?KEY$)|(?:^|[a-z0-9])(?:encrypt(?:ion)?|encript(?:ion)?|decrypt(?:ion)?|private|signing|hmac|aes|crypto|cipher|master|jwt|bearer|license|Encrypt(?:ion)?|Encript(?:ion)?|Decrypt(?:ion)?|Private|Signing|Hmac|HMAC|Aes|AES|Crypto|Cipher|Master|Jwt|JWT|Bearer|License)(?:[A-Z][a-z0-9]{1,15}|[A-Z0-9]{2,15}|[0-9]{2,4})?Key$`)
+	keyNameRe            = regexp.MustCompile(`(?i:(?:^|[_-]|[a-z])(?:api[_-]?key|secret|access[_-]?key|client[_-]?id|app[_-]?id|project[_-]?id|sender[_-]?id|measurement[_-]?id|auth[_-]?domain|storage[_-]?bucket|dsn|site[_-]?key|tenant[_-]?id|database[_-]?url|vapid[_-]?key|public[_-]?key|token)$|^(?:apiKey|appId|projectId|dsn)$|^(?:[A-Z0-9]+[_-])*(?:ENCRYPT(?:ION)?|ENCRIPT(?:ION)?|DECRYPT(?:ION)?|PRIVATE|SIGNING|HMAC|AES|CRYPTO|CIPHER|MASTER|JWT|BEARER|LICENSE)(?:[_-][A-Z0-9]{1,16}){0,2}[_-]?KEY$)|(?:^|[a-z0-9])(?:encrypt(?:ion)?|encript(?:ion)?|decrypt(?:ion)?|private|signing|hmac|aes|crypto|cipher|master|jwt|bearer|license|Encrypt(?:ion)?|Encript(?:ion)?|Decrypt(?:ion)?|Private|Signing|Hmac|HMAC|Aes|AES|Crypto|Cipher|Master|Jwt|JWT|Bearer|License)(?:[A-Z][a-z0-9]{1,15}|[A-Z0-9]{2,15}|[0-9]{2,4})?Key$`)
 	nonSecretKeySuffixRe = regexp.MustCompile(`(?i)(?:^|[_-]|[a-z])(?:storage|cache|header|cookie|param|query|sort|row|primary|foreign)[_-]?key$`)
 )
 
