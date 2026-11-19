@@ -531,7 +531,7 @@ func runCrawl(args []string) error {
 		for _, t := range targets {
 			c := cfg
 			c.Target = t
-			ho.Fallback, ho.Archive, ho.ArchiveStage1 = nil, nil, nil
+			ho.Fallback, ho.Archive, ho.ArchiveStage1, ho.ArchiveStage1Stream = nil, nil, nil, nil
 			closeEnv := func() {}
 			if *archiveFallback || *archiveAfter {
 				baseArgs := []string{"-o", *out, "-target", t.Hostname(), "-scope", *scopeMode, "-sources", archiveSources,
@@ -606,13 +606,24 @@ func runCrawl(args []string) error {
 					// Once a host in a list: the archive is the host's.
 					archived[t.Hostname()] = true
 					ho.Archive = run
-					ho.ArchiveStage1 = func(sctx context.Context) error {
-						e, err := getEnv()
-						if err != nil {
+					if *scopeMode == "rdn" {
+						ho.ArchiveStage1Stream = func(sctx context.Context, extraHosts <-chan string) error {
+							e, err := getEnv()
+							if err != nil {
+								return err
+							}
+							_, err = e.RunListOnly(sctx, extraHosts)
 							return err
 						}
-						_, err = e.Run(sctx, archive.ModeListOnly)
-						return err
+					} else {
+						ho.ArchiveStage1 = func(sctx context.Context) error {
+							e, err := getEnv()
+							if err != nil {
+								return err
+							}
+							_, err = e.Run(sctx, archive.ModeListOnly)
+							return err
+						}
 					}
 				case *archiveFallback:
 					ho.Fallback = run

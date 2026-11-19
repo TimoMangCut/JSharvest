@@ -55,6 +55,11 @@ type HTTPOptions struct {
 	// multi-page HTTP crawling once the seed page commits cleanly (0 target
 	// requests, no memento prefetch); RunHTTP joins it before Stage 2 Archive.
 	ArchiveStage1 func(ctx context.Context) error
+	// ArchiveStage1Stream is ArchiveStage1 with a live channel of newly
+	// discovered in-scope hosts (for -scope rdn OTX/URLScan streaming); when
+	// set, it takes precedence over ArchiveStage1 and extraHosts is closed as
+	// soon as httpcrawl.Crawl returns.
+	ArchiveStage1Stream func(ctx context.Context, extraHosts <-chan string) error
 	// Escalate takes the pages the crawl met a challenge on to a browser
 	// (crawl -engine auto: Escalate in Chrome), after the crawl and its
 	// catalog, before the archives.
@@ -162,6 +167,23 @@ func RunHTTP(ctx context.Context, cfg Config, ho HTTPOptions) (Record, error) {
 		cancelStage1()
 		stage1WG.Wait()
 	}()
+	var extraMu sync.Mutex
+	var extraCh chan string
+	var extraClosed bool
+	var seenHosts map[string]bool
+	if ho.ArchiveStage1Stream != nil && ho.Archive != nil && cfg.Depth > 0 {
+		extraCh = make(chan string, 256)
+		seenHosts = map[string]bool{strings.ToLower(cfg.Target.Hostname()): true}
+	}
+	closeExtra := func() {
+		extraMu.Lock()
+		if extraCh != nil && !extraClosed {
+			extraClosed = true
+			close(extraCh)
+		}
+		extraMu.Unlock()
+	}
+	defer closeExtra()
 	o := httpcrawl.Options{
 		Proxy:  proxyURL,
 		Target: cfg.Target, InScope: cfg.InScope, PageScope: pageScope, Depth: cfg.Depth, MaxPages: cfg.MaxPages, Rate: ho.Rate, PageRate: ho.PageRate,
@@ -176,12 +198,16 @@ func RunHTTP(ctx context.Context, cfg Config, ho HTTPOptions) (Record, error) {
 			return endpoints.ExtractCached(st.Dir(), body, urlHint)
 		},
 		OnSeedReady: func() {
-			if ho.ArchiveStage1 != nil && ho.Archive != nil && cfg.Depth > 0 {
+			if (ho.ArchiveStage1Stream != nil || ho.ArchiveStage1 != nil) && ho.Archive != nil && cfg.Depth > 0 {
 				stage1Once.Do(func() {
 					stage1WG.Add(1)
 					go func() {
 						defer stage1WG.Done()
-						_ = ho.ArchiveStage1(stage1Ctx)
+						if ho.ArchiveStage1Stream != nil {
+							_ = ho.ArchiveStage1Stream(stage1Ctx, extraCh)
+						} else {
+							_ = ho.ArchiveStage1(stage1Ctx)
+						}
 					}()
 				})
 			}
@@ -258,6 +284,21 @@ func RunHTTP(ctx context.Context, cfg Config, ho HTTPOptions) (Record, error) {
 			slog.Info("source map", "url", where, "sources", sourcesN, "own", n)
 		},
 		Request: func(e traffic.Entry) {
+			if extraCh != nil && e.Response != nil && e.Response.Status > 0 {
+				if u, err := url.Parse(e.URL); err == nil {
+					if h := strings.ToLower(u.Hostname()); h != "" && cfg.InScope(h) {
+						extraMu.Lock()
+						if !extraClosed && !seenHosts[h] {
+							seenHosts[h] = true
+							select {
+							case extraCh <- h:
+							default:
+							}
+						}
+						extraMu.Unlock()
+					}
+				}
+			}
 			if tw == nil || !cfg.Record.Wants(e.ResourceType) {
 				return
 			}
@@ -278,6 +319,7 @@ func RunHTTP(ctx context.Context, cfg Config, ho HTTPOptions) (Record, error) {
 		},
 	}
 	res, cerr := httpcrawl.Crawl(ctx, o)
+	closeExtra()
 	if res != nil {
 		run.HTTP = &res.Stats
 		run.Blocked = res.Blocked

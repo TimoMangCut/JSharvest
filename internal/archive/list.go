@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/TimoMangCut/JSharvest/internal/resolve"
@@ -26,10 +27,150 @@ import (
 // they share (the state, the files) is r.mu's. Only parent cancellation
 // (SIGINT) ends them all; a blocked or failed source records its place so
 // pages/fetch/history still process everything collected so far.
+type hostQueue struct {
+	mu      sync.Mutex
+	buf     []string
+	closed  bool
+	dropped bool
+	ready   chan struct{}
+	done    chan struct{}
+}
+
+func newHostQueue() *hostQueue {
+	return &hostQueue{
+		ready: make(chan struct{}, 1),
+		done:  make(chan struct{}),
+	}
+}
+
+func (q *hostQueue) push(h string) {
+	if q == nil {
+		return
+	}
+	q.mu.Lock()
+	if q.closed || q.dropped {
+		q.mu.Unlock()
+		return
+	}
+	q.buf = append(q.buf, h)
+	select {
+	case q.ready <- struct{}{}:
+	default:
+	}
+	q.mu.Unlock()
+}
+
+func (q *hostQueue) close() {
+	if q == nil {
+		return
+	}
+	q.mu.Lock()
+	if !q.closed {
+		q.closed = true
+		close(q.done)
+	}
+	q.mu.Unlock()
+}
+
+func (q *hostQueue) drop() {
+	if q == nil {
+		return
+	}
+	q.mu.Lock()
+	q.dropped = true
+	q.buf = nil
+	if !q.closed {
+		q.closed = true
+		close(q.done)
+	}
+	q.mu.Unlock()
+}
+
+func (q *hostQueue) pop(ctx context.Context) (string, bool) {
+	if q == nil {
+		return "", false
+	}
+	for {
+		q.mu.Lock()
+		if q.dropped {
+			q.mu.Unlock()
+			return "", false
+		}
+		if len(q.buf) > 0 {
+			h := q.buf[0]
+			q.buf[0] = ""
+			q.buf = q.buf[1:]
+			if len(q.buf) > 0 {
+				select {
+				case q.ready <- struct{}{}:
+				default:
+				}
+			}
+			q.mu.Unlock()
+			return h, true
+		}
+		if q.closed {
+			q.mu.Unlock()
+			return "", false
+		}
+		q.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return "", false
+		case <-q.done:
+		case <-q.ready:
+		}
+	}
+}
+
 func (r *runner) list(ctx context.Context) error {
 	lctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	var otxStream, urlscanStream *hostQueue
+	if r.o.ExtraHostCh != nil {
+		for _, src := range r.o.Sources {
+			switch src {
+			case "otx":
+				if otxStream == nil {
+					otxStream = newHostQueue()
+				}
+			case "urlscan":
+				if urlscanStream == nil {
+					urlscanStream = newHostQueue()
+				}
+			}
+		}
+	}
 	var wg sync.WaitGroup
+	if r.o.ExtraHostCh != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer otxStream.close()
+			defer urlscanStream.close()
+			seen := map[string]bool{strings.ToLower(strings.TrimSpace(r.o.Host)): true}
+			for {
+				select {
+				case <-lctx.Done():
+					return
+				case raw, ok := <-r.o.ExtraHostCh:
+					if !ok {
+						return
+					}
+					h := strings.ToLower(strings.TrimSpace(raw))
+					if h == "" || seen[h] {
+						continue
+					}
+					if r.o.InScope != nil && !r.o.InScope(h) {
+						continue
+					}
+					seen[h] = true
+					otxStream.push(h)
+					urlscanStream.push(h)
+				}
+			}
+		}()
+	}
 	var fatal error
 	for _, src := range r.o.Sources {
 		var list func(context.Context) error
@@ -37,11 +178,13 @@ func (r *runner) list(ctx context.Context) error {
 		case "wayback":
 			list = r.listWayback
 		case "otx":
-			list = r.listOTX
+			q := otxStream
+			list = func(sctx context.Context) error { return r.listOTX(sctx, q) }
 		case "commoncrawl":
 			list = r.listCC
 		case "urlscan":
-			list = r.listURLScan
+			q := urlscanStream
+			list = func(sctx context.Context) error { return r.listURLScan(sctx, q) }
 		default:
 			continue
 		}
@@ -336,7 +479,10 @@ func (r *runner) listWaybackSharded(ctx context.Context, numPages int) error {
 	return nil
 }
 
-func (r *runner) listOTX(ctx context.Context) error {
+func (r *runner) listOTX(ctx context.Context, stream *hostQueue) error {
+	if stream != nil {
+		defer stream.drop()
+	}
 	for !r.st.OTX.Done {
 		page := r.st.OTX.Page + 1
 		caps, more, err := r.o.OTX.Page(ctx, r.o.Host, page)
@@ -345,7 +491,7 @@ func (r *runner) listOTX(ctx context.Context) error {
 		}
 		r.took(caps, func() { r.st.OTX.Page, r.st.OTX.Done = page, !more })
 	}
-	return r.extra(ctx, "otx", func(hctx context.Context, host string) error {
+	return r.extra(ctx, "otx", stream, func(hctx context.Context, host string) error {
 		for page := 1; page <= extraPages; page++ {
 			caps, more, err := r.o.OTX.Page(hctx, host, page)
 			if err != nil {
@@ -368,22 +514,32 @@ const (
 )
 
 // extra lists a source's captures of each other host not listed yet,
-// running multiple subdomains concurrently within the source's rate budget.
-func (r *runner) extra(ctx context.Context, src string, list func(ctx context.Context, host string) error) error {
+// running multiple subdomains concurrently within the source's rate budget,
+// reading static ExtraHosts first and then optional streamed hosts.
+func (r *runner) extra(ctx context.Context, src string, stream *hostQueue, list func(ctx context.Context, host string) error) error {
+	if stream != nil {
+		defer stream.drop()
+	}
 	var todo []string
+	seenTodo := map[string]bool{strings.ToLower(strings.TrimSpace(r.o.Host)): true}
 	r.mu.Lock()
-	for i, h := range r.o.ExtraHosts {
-		if MaxExtraHosts > 0 && i >= MaxExtraHosts {
+	for _, raw := range r.o.ExtraHosts {
+		h := strings.ToLower(strings.TrimSpace(raw))
+		if h == "" || seenTodo[h] {
+			continue
+		}
+		seenTodo[h] = true
+		if MaxExtraHosts > 0 && len(todo) >= MaxExtraHosts {
 			break
 		}
 		key := src + " " + h
-		if r.st.Extra[key] || strings.EqualFold(h, r.o.Host) {
+		if r.st.Extra[key] {
 			continue
 		}
 		todo = append(todo, h)
 	}
 	r.mu.Unlock()
-	if len(todo) == 0 {
+	if len(todo) == 0 && stream == nil {
 		return nil
 	}
 
@@ -391,26 +547,66 @@ func (r *runner) extra(ctx context.Context, src string, list func(ctx context.Co
 	defer cancel()
 
 	workers := min(max(r.workers()/2, 2), 4)
-	if workers > len(todo) {
+	if stream == nil && workers > len(todo) {
 		workers = len(todo)
 	}
-	ch := make(chan string, len(todo))
-	for _, h := range todo {
-		ch <- h
-	}
-	close(ch)
 
+	var nextStatic atomic.Int64
+	var processed atomic.Int64
+	var dirty atomic.Bool
 	var wg sync.WaitGroup
 	var errMu sync.Mutex
 	var fatal error
 	var firstErr error
 
+	nextHost := func() (string, bool) {
+		for {
+			if ectx.Err() != nil {
+				return "", false
+			}
+			if MaxExtraHosts > 0 && int(processed.Load()) >= MaxExtraHosts {
+				if stream != nil {
+					stream.drop()
+				}
+				return "", false
+			}
+			if i := int(nextStatic.Add(1) - 1); i < len(todo) {
+				processed.Add(1)
+				return todo[i], true
+			}
+			if stream == nil {
+				return "", false
+			}
+			h, ok := stream.pop(ectx)
+			if !ok {
+				return "", false
+			}
+			h = strings.ToLower(strings.TrimSpace(h))
+			if h == "" || strings.EqualFold(h, r.o.Host) {
+				continue
+			}
+			key := src + " " + h
+			r.mu.Lock()
+			already := r.st.Extra[key]
+			r.mu.Unlock()
+			if already {
+				continue
+			}
+			if MaxExtraHosts > 0 && int(processed.Add(1)) > MaxExtraHosts {
+				stream.drop()
+				return "", false
+			}
+			return h, true
+		}
+	}
+
 	for range workers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for h := range ch {
-				if ectx.Err() != nil {
+			for {
+				h, ok := nextHost()
+				if !ok {
 					return
 				}
 				if err := list(ectx, h); err != nil {
@@ -418,6 +614,9 @@ func (r *runner) extra(ctx context.Context, src string, list func(ctx context.Co
 					if errors.Is(err, ErrBlocked) || ctx.Err() != nil {
 						if fatal == nil {
 							fatal = fmt.Errorf("%s: %w", h, err)
+						}
+						if stream != nil {
+							stream.drop()
 						}
 						cancel()
 					} else if firstErr == nil {
@@ -432,12 +631,16 @@ func (r *runner) extra(ctx context.Context, src string, list func(ctx context.Co
 					r.st.Extra = map[string]bool{}
 				}
 				r.st.Extra[key] = true
-				r.saveLocked()
+				dirty.Store(true)
+				r.saveMaybeLocked()
 				r.mu.Unlock()
 			}
 		}()
 	}
 	wg.Wait()
+	if dirty.Load() {
+		r.save()
+	}
 	if fatal != nil {
 		return fatal
 	}

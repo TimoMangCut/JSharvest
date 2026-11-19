@@ -51,6 +51,9 @@ type Options struct {
 	// most MaxExtraHosts. The Wayback and Common Crawl list the domain's
 	// subdomains already.
 	ExtraHosts []string
+	// ExtraHostCh optionally streams newly discovered in-scope hosts into
+	// Stage 1 (ModeListOnly) OTX and urlscan listing while httpcrawl runs.
+	ExtraHostCh <-chan string
 	// Live checks whether an old script's URL still serves it, through
 	// Sender, on LiveHosts only (the hosts the crawls reached, unless
 	// named): an old subdomain may point at someone else now.

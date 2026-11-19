@@ -3,6 +3,7 @@ package archive
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -146,7 +147,10 @@ func status(v any) string {
 
 // listURLScan searches the scans of the target, then reads the newest
 // scans of its own pages for the URLs they loaded.
-func (r *runner) listURLScan(ctx context.Context) error {
+func (r *runner) listURLScan(ctx context.Context, stream *hostQueue) error {
+	if stream != nil {
+		defer stream.drop()
+	}
 	st := &r.st.URLScan
 	for pages := 0; !st.Searched; pages++ {
 		if r.o.URLScan.Pages > 0 && pages >= r.o.URLScan.Pages {
@@ -169,7 +173,7 @@ func (r *runner) listURLScan(ctx context.Context) error {
 			st.After, st.Searched = next, next == ""
 		})
 	}
-	err := r.extra(ctx, "urlscan", func(hctx context.Context, host string) error {
+	extraErr := r.extra(ctx, "urlscan", stream, func(hctx context.Context, host string) error {
 		after := ""
 		for page := 0; page < 2; page++ {
 			caps, scans, next, err := r.o.URLScan.Search(hctx, host, after)
@@ -189,8 +193,8 @@ func (r *runner) listURLScan(ctx context.Context) error {
 		}
 		return nil
 	})
-	if err != nil {
-		return err
+	if extraErr != nil && (errors.Is(extraErr, ErrBlocked) || ctx.Err() != nil) {
+		return extraErr
 	}
 	for st.Read < len(st.Scans) {
 		id, ts, _ := strings.Cut(st.Scans[st.Read], " ")
@@ -201,5 +205,5 @@ func (r *runner) listURLScan(ctx context.Context) error {
 		}
 		r.took(caps, func() { st.Read++ })
 	}
-	return nil
+	return extraErr
 }

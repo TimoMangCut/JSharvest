@@ -360,21 +360,30 @@ func (e *archiveEnv) Stage1Ran() bool {
 	return e.stage1Ran
 }
 
+// RunListOnly runs Stage 1 index listing, optionally streaming newly
+// discovered in-scope subdomains into OTX and urlscan when -scope rdn is set.
+func (e *archiveEnv) RunListOnly(ctx context.Context, extraHosts <-chan string) (*archive.Summary, error) {
+	o := e.opts
+	o.Mode = archive.ModeListOnly
+	if e.cfg.scopeMode == "rdn" {
+		o.ExtraHostCh = extraHosts
+	}
+	sum, err := archive.Run(ctx, o)
+	e.mu.Lock()
+	if ctx.Err() == nil && (err == nil || errors.Is(err, archive.ErrBlocked)) {
+		e.stage1Ran = true
+		if err != nil {
+			e.stage1Err = err
+		}
+	}
+	e.mu.Unlock()
+	return sum, err
+}
+
 // Run is one run of the archive work in mode.
 func (e *archiveEnv) Run(ctx context.Context, mode archive.Mode) (*archive.Summary, error) {
 	if mode == archive.ModeListOnly {
-		o := e.opts
-		o.Mode = archive.ModeListOnly
-		sum, err := archive.Run(ctx, o)
-		e.mu.Lock()
-		if ctx.Err() == nil && (err == nil || errors.Is(err, archive.ErrBlocked)) {
-			e.stage1Ran = true
-			if err != nil {
-				e.stage1Err = err
-			}
-		}
-		e.mu.Unlock()
-		return sum, err
+		return e.RunListOnly(ctx, nil)
 	}
 	if err := e.prepare(ctx); err != nil {
 		return nil, err
