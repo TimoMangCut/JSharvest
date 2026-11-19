@@ -273,8 +273,8 @@ Unit test: `TestCommonCrawlCollections`, `TestCommonCrawlFetch`, `TestURLScan`; 
 **Cô lập lỗi.** `ErrBlocked`/`ErrExcluded` của một nguồn chỉ dừng nguồn đó; chỉ `ctx` bị hủy mới dừng tất cả. Memento bị chặn thì `pages()` bỏ phần Memento và `fetch()` chuyển sang WARC của CC; mục chưa xong không đánh dấu done. `history()` luôn chạy. Mã thoát 3 giữ nguyên, `run.json` giữ `summary` khi có lỗi.
 
 **Hai stage trong crawl (`archive.Mode`).**
-- `ModeListOnly`: chỉ index công khai, `Live`/`Sender` bị bỏ ngay tại `Run`. Không gửi request tới target, không prefetch. Chạy khi seed đã sống, chồng lên crawl.
-- `ModeResume`: chạy sau barrier (Escalate, SPABoot, `writeEndpoints`). Không liệt kê lại; hỏi OTX/URLScan cho delta `ExtraHosts`; rồi `pages` → `fetch` → `history`.
+- `ModeListOnly`: chỉ index công khai, `Live`/`Sender` bị bỏ ngay tại `Run`. Không gửi request tới target, không prefetch. Chạy khi seed đã sống, chồng lên crawl; với `-scope rdn`, `httpcrawl` stream các subdomain mới phát hiện qua `ExtraHostCh` vào bộ fan-out độc lập cho OTX và URLScan ngay trong lúc crawl đang chạy (Đợt 38, [plan-38.md](plan-38.md)).
+- `ModeResume`: chạy sau barrier (Escalate, SPABoot, `writeEndpoints`). Không liệt kê lại; hỏi OTX/URLScan cho delta `ExtraHosts` còn sót (`intel.json`, Escalate/SPABoot); rồi `pages` → `fetch` → `history` (có log timing từng pha và 4 chặng `history`, kèm harness offline `JSH_HISTORY_BENCH`).
 - `ModeFull`: khi không có Stage 1 (`-depth 0`, hoặc Stage 1 bị dừng sớm).
 - Cả hai stage chạy trên **một** `archiveEnv` (`cmd/jsharvest/archive.go`). Env giữ khoá `archive/` liên tục, giữ client và budget (AIMD của OTX/URLScan được giữ), và được đóng ngay sau mỗi target.
 - Cờ được parse bằng `ContinueOnError`, nên không bao giờ `os.Exit` trong tiến trình crawl.

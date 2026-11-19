@@ -53,3 +53,9 @@
     - verify: re-judge shell, root canary ở mọi N, `gateSer` tự nhả;
     - sourcemap: cache tham chiếu SHA, công bố sau khi lưu;
     - `internal/testlint` cùng 11 race trong test.
+- **Đợt 38 (`2026-11-19`, [plan-38.md](plan-38.md)):**
+  - Đóng `T1` (xoá `VerifiedBase` khi `rejudgeShells` hạ verdict) và `T3` (`testlint` bỏ `RLock`, bắt ghi map/slice/field/pointer và `delete()` kèm `testdata`);
+  - Bổ sung log timing `archive`/`history` + harness đo offline `JSH_HISTORY_BENCH`;
+  - Streaming subdomain mới từ `httpcrawl` vào Stage 1 (`ExtraHostCh` fan-out độc lập cho OTX/URLScan) + debounce `saveMaybeLocked`;
+  - Guarded Sub-Path SPA Brake trong `specProbeWithScope` kèm `spaBraked` cho `plan.Services` (giữ nguyên origin root & OIDC sub-path);
+  - Singleflight theo SHA-256 + `extractHeavySem` trong `endpoints.ExtractCached`.

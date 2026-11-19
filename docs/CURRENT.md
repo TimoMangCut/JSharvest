@@ -1,6 +1,6 @@
-# Trạng thái Hiện hành (`jsharvest` — Sau Đợt 37.1)
+# Trạng thái Hiện hành (`jsharvest` — Sau Đợt 38)
 
-Tài liệu nhập ngữ cảnh nhanh cho session mới (~5 KB). Đọc cùng [CLAUDE.md](../CLAUDE.md) (bất biến & quy trình gate); chỉ mở [rounds-history.md](rounds-history.md), [plan-34.md](plan-34.md), [plan-33.md](plan-33.md) hoặc [plan-32.md](plan-32.md) khi cần chi tiết lịch sử/thiết kế cũ.
+Tài liệu nhập ngữ cảnh nhanh cho session mới (~5 KB). Đọc cùng [CLAUDE.md](../CLAUDE.md) (bất biến & quy trình gate); chỉ mở [rounds-history.md](rounds-history.md), [plan-38.md](plan-38.md), [plan-37.1.md](plan-37.1.md) hoặc [plan-34.md](plan-34.md) khi cần chi tiết lịch sử/thiết kế cũ.
 
 ## 1. Quy mô & Trạng thái Mốc Đợt 34
 
@@ -10,9 +10,9 @@ Tài liệu nhập ngữ cảnh nhanh cho session mới (~5 KB). Đọc cùng [C
   - `bin/testbed perfgate` (2.000 script, `43.1 MB`): `~2.5 s` trên macOS ARM64 / `~8.6 s` trên Linux x86_64, peak RSS `~278–282 MB` (trần cứng: `<= 15.0 s`, `<= 500.0 MB`).
   - Gate tích hợp `verify-check.sh`, `archive-check.sh`, `pipeline-check.sh`, `frontier-check.sh`, `frontier-tabs-check.sh`: **PASS 100%** (`precision 1.000`, `recall 1.000`, kể cả tạm dừng `SIGINT` & resume, `-tabs 1 == -tabs 3`).
   - Kiểm tra hygiene đường dẫn & dữ liệu sạch (`.github/workflows/ci.yml`): **`0` vi phạm**.
-- **Phiên bản extractor:** `jsapi.Version = 42`.
+- **Phiên bản extractor:** `jsapi.Version = 45`.
 
-## 1b. Đợt 37 & 37.1 (tốc độ, giữ chất lượng; [plan-37.1.md](plan-37.1.md), [research-2026-11-19-speed-plan-review.md](research-2026-11-19-speed-plan-review.md))
+## 1b. Đợt 37, 37.1 & 38 (tốc độ, giữ chất lượng; [plan-38.md](plan-38.md), [plan-37.1.md](plan-37.1.md), [research-2026-11-19-speed-plan-review.md](research-2026-11-19-speed-plan-review.md))
 
 Đợt 35–36 xem `git log` (`f9725e0`, `db98e0d`, `2e5c5fc`).
 
@@ -23,20 +23,20 @@ Tài liệu nhập ngữ cảnh nhanh cho session mới (~5 KB). Đọc cùng [C
     - **dial** theo `host:port`: First-Dial Gate, 2–3 strike, half-open 3 phút;
     - **origin** theo `scheme://host:port`: 3 lỗi sau khi đã kết nối, chỉ với origin chưa từng trả lời.
   - Request bị giữ **không gửi**: không vào `requests.jsonl`, không tính lượt thăm (`pages.jsonl` `reason: origin-unreachable`, `stats.held_by_breaker`), không tốn hạn mức `-http-rate`.
-  - Probe dịch vụ (spec probe) song song theo host.
+  - Probe dịch vụ (spec probe) song song theo host; sub-path base trên origin SPA có **guarded SPA brake** (sau 3 probe thực gửi + `/v3/api-docs` trùng shell gốc thì phanh và truyền `spaBraked` sang `plan.Services`; giữ nguyên 100% `SpecPaths` ở origin root và bảo vệ OIDC sub-path).
   - Dedup sourcemap theo `(sha256 script, loại thư viện, ref tương đối)`: map tải 1 lần; host sau ghi sighting theo SHA (`store_errors.sighting_missing` nếu hụt).
-- **Archive:**
+- **Archive & Endpoints:**
   - Gap CDX 2,5 s (Internet Archive giới hạn ~30 req/phút), AIMD lên tối đa 10 s; duyệt shard theo stride, có `wayback_listed_pct`.
-  - Lỗi được cô lập theo nguồn: `ErrBlocked` của Wayback không hủy CC/OTX/URLScan; Memento bị chặn thì chuyển sang WARC của CC; `history()` luôn chạy.
-  - `crawl -archive`: Stage 1 (`ModeListOnly`, 0 request tới target) chạy cùng crawl; Stage 2 (`ModeResume`) chạy sau Escalate/SPABoot. Cả hai dùng chung một `archiveEnv` (khoá, client, budget); trần `-archive-max-pages 150`.
+  - Lỗi được cô lập theo nguồn: `ErrBlocked` của Wayback không hủy CC/OTX/URLScan; Memento bị chặn thì chuyển sang WARC của CC; `history()` luôn chạy (log timing từng pha `archive` + 4 chặng `history`, kèm harness offline `JSH_HISTORY_BENCH`).
+  - `crawl -archive`: Stage 1 (`ModeListOnly`, 0 request tới target) chạy cùng crawl và **nhận streaming subdomain mới qua `ExtraHostCh`** (fan-out hàng đợi độc lập cho OTX & URLScan); Stage 2 (`ModeResume`) chạy sau Escalate/SPABoot chỉ hỏi delta host còn sót. Cả hai dùng chung một `archiveEnv` (khoá, client, budget); trần `-archive-max-pages 150`.
   - CDX bị **từ chối kết nối** thì Memento chờ và dừng ngay ở lần từ chối đầu; 429 của CDX không truyền sang Memento.
-  - Cờ nội bộ `-list-only`/`-stage2` đã bỏ.
+  - `endpoints.ExtractCached` có singleflight theo SHA-256 và khoá trần `extractHeavySem` cho script lớn.
 - **Verify:**
   - `-host-inflight N` (mặc định 1, chỉ có lợi khi `-rate` lớn hơn 1/RTT). Singleflight cho canary, sub-canary, OPTIONS và root canary.
   - Root canary chạy ở **mọi** N.
-  - **Re-judge** 2xx-HTML với mọi shell canary đã biết: 0 request thêm, chỉ hạ `verified_alive`, tất định theo thứ tự.
+  - **Re-judge** 2xx-HTML với mọi shell canary đã biết: 0 request thêm, chỉ hạ `verified_alive` (xoá sạch cả `verified_method` lẫn `verified_base`), tất định theo thứ tự.
   - Host hạ về 1 khi gặp 429 (một chiều), hoặc khi đang đếm gate (tự nhả khi host trả lời khác).
-- **Test:** `internal/testlint` chặn handler test ghi biến capture mà không khoá.
+- **Test:** `internal/testlint` chặn handler test ghi biến capture (kể cả ghi vào map/slice/field/pointer, `delete()`, hoặc chỉ giữ `RLock()`).
 
 ## 2. Năng lực Mới từ Đợt 34 / 34.1 / 34.2 ([plan-34.md](plan-34.md)), Đợt 33 ([plan-33.md](plan-33.md)) & Đợt 32 ([plan-32.md](plan-32.md))
 
@@ -69,7 +69,7 @@ Tài liệu nhập ngữ cảnh nhanh cho session mới (~5 KB). Đọc cùng [C
 
 ## 4. Lộ trình Dài hạn (chưa thực hiện, chỉ mở khi có nhu cầu thực tế)
 
-0. **Tồn đọng nhỏ sau Đợt 37.1** (`T1` `verified_base` sau re-judge, `T2` candidate chưa thử và thống kê base đầu cơ, `T3` mở rộng `testlint`): dấu hiệu khi vướng, cách xử lý và test ở [plan-37.1.md](plan-37.1.md), mục "Tồn đọng nhỏ".
+0. **Tồn đọng nhỏ còn defer (`T2`):** thử lại candidate thứ 2 và hiệu chỉnh thống kê base đầu cơ sau `rejudgeShells` (chỉ xảy ra khi shell học muộn từ host khác `*`; đã đóng `T1` và `T3` ở Đợt 38): xem [plan-37.1.md](plan-37.1.md).
 
 1. **Tách dần module nội bộ theo thay đổi tính năng:** thu gọn dần sự phụ thuộc `x.cursor` trong `internal/jsapi` và cấu trúc `Config` trong `internal/engine` theo từng tính năng chạm tới (không đại phẫu tách rời).
 2. **Tùy chọn Stealth nâng cao:** `-stealth` với `uTLS` + HTTP/2 fingerprint chuẩn Chrome / Isolated World hooks nếu gặp WAF kiểm tra JA4/H2 frame ở pha HTTP pre-auth.

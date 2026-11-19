@@ -403,11 +403,11 @@ Test mới: `httpcrawl/round37_1_test.go` (5), `engine/round37_1_test.go` (1), `
 
 ---
 
-## Tồn đọng nhỏ sau `4cf1475` (ghi nhận, chưa sửa)
+## Tồn đọng nhỏ sau Round 37.1
 
-Theo review sau commit, đã kiểm lại với mã. Không cái nào là blocker. Mỗi mục ghi: **dấu hiệu khi vướng**, **cách xử lý**, **test**.
+Theo review sau commit, đã kiểm lại với mã. `T1` và `T3` đã được đóng ở **Đợt 38** ([plan-38.md](plan-38.md)); `T2` giữ defer vì phạm vi cực hiếm.
 
-### T1. `rejudgeShells` không xoá `VerifiedBase`
+### T1. `rejudgeShells` không xoá `VerifiedBase` *(Đã đóng ở Đợt 38)*
 
 - **Hiện trạng:** `one()` gán `res.VerifiedBase = candBase` cho kết quả `Alive` của candidate đầu cơ ([verify.go:546–548](../internal/verify/verify.go)). `rejudgeShells` hạ verdict và xoá `VerifiedMethod` nhưng không xoá `VerifiedBase`.
 - **Dấu hiệu khi vướng:** `verify.json` có kết quả `dead_or_fp`/`client_route` mà vẫn mang `verified_base`. Tiêu thụ nào tin `verified_base` mà không xét verdict (ví dụ `export -drafts` chọn base, hay MCP liệt kê base đã xác nhận) sẽ nhận một base sai.
@@ -427,7 +427,7 @@ Theo review sau commit, đã kiểm lại với mã. Không cái nào là blocke
   3. **Sửa thống kê:** khi hạ, gọi bản đảo của `noteSpecBase` (trừ một lượt sống của base đó) trước khi chạy lại bước 2, để việc cắt tỉa của lượt thử lại dựa trên số liệu đúng.
 - **Test:** draft 2 candidate; base 1 trả shell `*` học muộn; base 2 là route thật. Kỳ vọng sau xử lý: verdict `verified_alive` với `verified_base` = base 2, và `Sent` tăng đúng 1 probe (cộng canary của base 2 nếu chưa có).
 
-### T3. `internal/testlint` tin `RLock()` và chưa bắt ghi vào phần tử map/slice
+### T3. `internal/testlint` tin `RLock()` và chưa bắt ghi vào phần tử map/slice *(Đã đóng ở Đợt 38)*
 
 - **Hiện trạng:** `callsLock` coi `RLock` như khoá ghi ([handler_race_test.go:110](../internal/testlint/handler_race_test.go)). `capturedWrites` chỉ xét `*ast.Ident`, không xét `m[k] = v`, `s[i] = v`, `x.f = v`, `delete(m, k)`, `append` vào trường.
 - **Dấu hiệu khi vướng:** một test chỉ fail với `-race` (hoặc chập chờn) trong khi lint vẫn pass, và handler của nó ghi vào map/slice/trường struct bị capture.
