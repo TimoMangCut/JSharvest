@@ -879,6 +879,7 @@ func (v *verifier) rejudgeShells(ds []Draft, results []*Result) {
 			r.Verdict, r.Reason = DeadOrFP, "answers with a catch-all/WAF HTML shell seen on canaries (judged again with every canary known)"
 		}
 		r.VerifiedMethod = ""
+		r.VerifiedBase = ""
 	}
 }
 

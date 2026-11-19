@@ -25,7 +25,16 @@ func TestNoUnsyncedWritesInHandlers(t *testing.T) {
 	var found []string
 	for _, dir := range []string{"internal", "cmd", "testbed"} {
 		_ = filepath.WalkDir(filepath.Join(root, dir), func(path string, d fs.DirEntry, err error) error {
-			if err != nil || d.IsDir() || !strings.HasSuffix(path, "_test.go") {
+			if err != nil {
+				return nil
+			}
+			if d.IsDir() {
+				if d.Name() == "testdata" {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if !strings.HasSuffix(path, "_test.go") {
 				return nil
 			}
 			found = append(found, scanFile(t, root, path)...)
@@ -107,7 +116,7 @@ func callsLock(body *ast.BlockStmt) bool {
 	locked := false
 	ast.Inspect(body, func(n ast.Node) bool {
 		if c, ok := n.(*ast.CallExpr); ok {
-			if s, ok := c.Fun.(*ast.SelectorExpr); ok && (s.Sel.Name == "Lock" || s.Sel.Name == "RLock") {
+			if s, ok := c.Fun.(*ast.SelectorExpr); ok && s.Sel.Name == "Lock" {
 				locked = true
 			}
 		}
@@ -116,8 +125,28 @@ func callsLock(body *ast.BlockStmt) bool {
 	return locked
 }
 
-// capturedWrites are the identifiers a literal writes (x++, x += …, x = …)
-// that it does not declare itself: variables of the enclosing test.
+func rootIdent(e ast.Expr) *ast.Ident {
+	for {
+		switch x := e.(type) {
+		case *ast.Ident:
+			return x
+		case *ast.IndexExpr:
+			e = x.X
+		case *ast.SelectorExpr:
+			e = x.X
+		case *ast.ParenExpr:
+			e = x.X
+		case *ast.StarExpr:
+			e = x.X
+		default:
+			return nil
+		}
+	}
+}
+
+// capturedWrites are the identifiers a literal writes (x++, x += …, x = …,
+// m[k] = v, s[i]++, obj.f = v, *p = v, delete(m, k)) that it does not declare
+// itself: variables of the enclosing test.
 func capturedWrites(lit *ast.FuncLit) []*ast.Ident {
 	local := map[string]bool{}
 	for _, fl := range lit.Type.Params.List {
@@ -162,7 +191,7 @@ func capturedWrites(lit *ast.FuncLit) []*ast.Ident {
 	ast.Inspect(lit.Body, func(n ast.Node) bool {
 		switch s := n.(type) {
 		case *ast.IncDecStmt:
-			if id, ok := s.X.(*ast.Ident); ok && !local[id.Name] {
+			if id := rootIdent(s.X); id != nil && id.Name != "_" && !local[id.Name] {
 				out = append(out, id)
 			}
 		case *ast.AssignStmt:
@@ -170,7 +199,13 @@ func capturedWrites(lit *ast.FuncLit) []*ast.Ident {
 				return true
 			}
 			for _, l := range s.Lhs {
-				if id, ok := l.(*ast.Ident); ok && id.Name != "_" && !local[id.Name] {
+				if id := rootIdent(l); id != nil && id.Name != "_" && !local[id.Name] {
+					out = append(out, id)
+				}
+			}
+		case *ast.CallExpr:
+			if fn, ok := s.Fun.(*ast.Ident); ok && fn.Name == "delete" && len(s.Args) >= 1 {
+				if id := rootIdent(s.Args[0]); id != nil && id.Name != "_" && !local[id.Name] {
 					out = append(out, id)
 				}
 			}
@@ -178,4 +213,24 @@ func capturedWrites(lit *ast.FuncLit) []*ast.Ident {
 		return true
 	})
 	return out
+}
+
+func TestHandlerLintFixtures(t *testing.T) {
+	root := repoRoot(t)
+	cases := []struct {
+		file    string
+		wantHit bool
+	}{
+		{"map_unlocked.go", true},
+		{"map_locked.go", false},
+		{"rlock_write.go", true},
+		{"atomic_safe.go", false},
+	}
+	for _, tc := range cases {
+		path := filepath.Join(root, "internal", "testlint", "testdata", tc.file)
+		got := scanFile(t, root, path)
+		if (len(got) > 0) != tc.wantHit {
+			t.Errorf("%s: got %v, wantHit=%v", tc.file, got, tc.wantHit)
+		}
+	}
 }
