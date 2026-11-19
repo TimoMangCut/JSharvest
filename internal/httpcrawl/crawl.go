@@ -1467,29 +1467,58 @@ func specBudgetExhausted(budget *atomic.Int64) bool {
 	return budget != nil && budget.Load() <= 0
 }
 
+func hasIdPSegment(rawPath string) bool {
+	for _, seg := range strings.Split(strings.ToLower(rawPath), "/") {
+		switch seg {
+		case "auth", "realms", "oauth", "oauth2", "oidc", "sso", "identity":
+			return true
+		}
+	}
+	return false
+}
+
 func (cr *crawler) specProbe(ctx context.Context, base, referer string, hdrs []jsapi.Header, budget *atomic.Int64) {
 	cr.specProbeWithScope(ctx, base, referer, hdrs, budget, false)
 }
 
-func (cr *crawler) specProbeWithScope(ctx context.Context, base, referer string, hdrs []jsapi.Header, budget *atomic.Int64, postPages bool) {
+func (cr *crawler) specProbeWithScope(ctx context.Context, base, referer string, hdrs []jsapi.Header, budget *atomic.Int64, postPages bool) bool {
 	base = strings.TrimRight(base, "/")
-	if _, err := url.Parse(base); err != nil || cr.specPolicy.Check(base+"/") != resolve.Allow || cr.specHostBlocked(base) {
-		return
+	u, err := url.Parse(base)
+	if err != nil || cr.specPolicy.Check(base+"/") != resolve.Allow || cr.specHostBlocked(base) {
+		return false
 	}
-	fetchSpec := func(targetURL, pathHint string) (answer, bool) {
+	isSubPath := postPages && u.Path != "" && u.Path != "/"
+	orig := originOf(base)
+	spaOrigin := isSubPath && cr.spa[orig] && cr.prints[orig] != ""
+
+	matchesOriginSPAShell := func(a answer) bool {
+		if !spaOrigin || a.Err != nil || a.Status != http.StatusOK || len(a.Body) == 0 {
+			return false
+		}
+		ct := strings.ToLower(strings.TrimSpace(strings.Split(a.Header.Get("Content-Type"), ";")[0]))
+		if !strings.Contains(ct, "html") && !htmlLike(a.Body) {
+			return false
+		}
+		return shellPrint(htmlscan.Scan(a.Body[:min(len(a.Body), 64<<10)], a.URL)) == cr.prints[orig]
+	}
+
+	fetchSpec := func(targetURL, pathHint string) (answer, bool, bool) {
 		if cr.stop() != "" || cr.specHostBlocked(targetURL) || ctx.Err() != nil {
-			return answer{}, false
+			return answer{}, false, false
 		}
 		if specBudgetExhausted(budget) {
-			return answer{}, false
+			return answer{}, false, false
 		}
 		if ok, _ := cr.claim(targetURL); !ok {
-			return answer{}, false
+			return answer{}, false, false
 		}
 		if !tryTakeSpecBudget(budget) {
-			return answer{}, false
+			return answer{}, false, false
 		}
 		a := cr.fetchWithHeaders(ctx, targetURL, referer, dataReq, "Other", hdrs)
+		if heldByBreaker(a.Err) {
+			return a, false, false
+		}
 		cr.politeSpecAt(a, base, referer, postPages)
 		key := strings.TrimPrefix(targetURL, cr.seedOrigin)
 		if key == targetURL || key == "" {
@@ -1497,7 +1526,7 @@ func (cr *crawler) specProbeWithScope(ctx context.Context, base, referer string,
 		}
 		cr.count(func(st *Stats) { st.Probes[key] = a.Status })
 		if a.Err != nil || a.Status != 200 || htmlLike(a.Body) || len(a.Body) == 0 {
-			return a, false
+			return a, false, true
 		}
 		tags := []string{"openapi"}
 		switch {
@@ -1505,22 +1534,32 @@ func (cr *crawler) specProbeWithScope(ctx context.Context, base, referer string,
 		case pathHint == "/.well-known/openid-configuration" && jsapi.IsOIDC(a.Body):
 			tags = append(tags, "oidc")
 		default:
-			return a, false
+			return a, false, true
 		}
 		cr.o.Script(Script{Body: a.Body, Kind: "file", URL: a.URL, Page: referer, Status: a.Status, MIME: a.Header.Get("Content-Type"),
 			Tags: tags, Found: "spec-probe", From: referer})
 		cr.count(func(st *Stats) { st.OpenAPI++ })
 		cr.o.Log("%s: an API description (%s)", a.URL, strings.Join(tags, ", "))
-		return a, true
+		return a, true, true
 	}
+
+	spaShellHits := 0
+	triedV3 := false
+	triedOIDC := false
 
 	for _, p := range frontier.SpecPaths {
 		if cr.stop() != "" || cr.specHostBlocked(base) || ctx.Err() != nil || specBudgetExhausted(budget) {
-			return
+			return false
+		}
+		if p == "/v3/api-docs" {
+			triedV3 = true
+		}
+		if p == "/.well-known/openid-configuration" {
+			triedOIDC = true
 		}
 		targetURL := frontier.JoinSpecBase(base, p)
-		a, stored := fetchSpec(targetURL, p)
-		if !stored && p == "/swagger-resources" && a.Err == nil && a.Status == 200 && !htmlLike(a.Body) {
+		a, stored, sent := fetchSpec(targetURL, p)
+		if !stored && sent && p == "/swagger-resources" && a.Err == nil && a.Status == 200 && !htmlLike(a.Body) {
 			for _, rel := range jsapi.SwaggerResources(a.Body) {
 				if cr.stop() != "" || cr.specHostBlocked(base) || ctx.Err() != nil || specBudgetExhausted(budget) {
 					break
@@ -1529,7 +1568,33 @@ func (cr *crawler) specProbeWithScope(ctx context.Context, base, referer string,
 				fetchSpec(docURL, rel)
 			}
 		}
+		if !spaOrigin || !sent {
+			continue
+		}
+		if stored || !matchesOriginSPAShell(a) {
+			spaShellHits = 0
+			continue
+		}
+		spaShellHits++
+		if spaShellHits >= 3 {
+			if !triedV3 {
+				triedV3 = true
+				v3URL := frontier.JoinSpecBase(base, "/v3/api-docs")
+				av3, storedV3, sentV3 := fetchSpec(v3URL, "/v3/api-docs")
+				if sentV3 && (storedV3 || !matchesOriginSPAShell(av3)) {
+					spaShellHits = 0
+					continue
+				}
+			}
+			if !triedOIDC && hasIdPSegment(u.Path) {
+				oidcURL := frontier.JoinSpecBase(base, "/.well-known/openid-configuration")
+				fetchSpec(oidcURL, "/.well-known/openid-configuration")
+			}
+			cr.o.Log("spec-probe auto-brake on %s after confirmed SPA shell", base)
+			return true
+		}
 	}
+	return false
 }
 
 // specProbePhase2 runs post-JS context-aware spec probing (3.1 + D3):
@@ -1550,6 +1615,8 @@ func (cr *crawler) specProbePhase2(ctx context.Context, referer string) {
 	}
 
 	// (a) Gateway / Base Spec Probe (concurrent across discovered bases).
+	var spaBrakedMu sync.Mutex
+	spaBraked := map[string]bool{}
 	if len(plan.Bases) > 0 {
 		baseWorkers := min(max(cr.o.Workers, 4), 8)
 		if baseWorkers > len(plan.Bases) {
@@ -1573,7 +1640,11 @@ func (cr *crawler) specProbePhase2(ctx context.Context, referer string) {
 						continue
 					}
 					hdrs := cr.specCtx.HeadersFor(base, cr.o.InScope)
-					cr.specProbeWithScope(ctx, base, referer, hdrs, budgetPtr, true)
+					if cr.specProbeWithScope(ctx, base, referer, hdrs, budgetPtr, true) {
+						spaBrakedMu.Lock()
+						spaBraked[strings.TrimRight(base, "/")] = true
+						spaBrakedMu.Unlock()
+					}
 				}
 			}()
 		}
@@ -1594,6 +1665,9 @@ func (cr *crawler) specProbePhase2(ctx context.Context, referer string) {
 		for _, svc := range svcs {
 			if cr.stop() != "" || ctx.Err() != nil || specBudgetExhausted(budgetPtr) {
 				return
+			}
+			if spaBraked[strings.TrimRight(svc.PrefixURL, "/")] {
+				continue
 			}
 			if cr.specPolicy.Check(svc.PrefixURL+"/") != resolve.Allow || cr.specHostBlocked(svc.PrefixURL) {
 				continue
