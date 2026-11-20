@@ -54,6 +54,7 @@ type AnalyzeStats struct {
 	SourceParseFallback   int      `json:"source_parse_fallbacks,omitempty"`
 	OversizeLooseFallback int      `json:"oversize_loose_fallback,omitempty"`
 	OversizeSkipped       int      `json:"oversize_skipped,omitempty"`
+	LooseTruncated        int      `json:"loose_truncated,omitempty"`
 	FailedBundles         []string `json:"failed_bundles,omitempty"`
 
 	// StaleCache counts the scripts read from a cache an older extractor
@@ -72,6 +73,9 @@ func SummarizeScripts(scripts []Script) AnalyzeStats {
 		if strings.HasPrefix(s.Error, "not analysed:") {
 			st.OversizeSkipped++
 			continue
+		}
+		if s.LooseTruncated {
+			st.LooseTruncated++
 		}
 		if strings.HasPrefix(s.ParseError, "oversize_ast_bypass:") {
 			st.OversizeLooseFallback++

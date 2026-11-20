@@ -3,7 +3,13 @@ package jsapi
 import (
 	"bytes"
 	"regexp"
+	"sort"
 	"strings"
+)
+
+const (
+	maxLooseMatches   = 50_000
+	maxLooseEndpoints = 20_000
 )
 
 // The loose reading is for code the parser does not take: the original
@@ -37,21 +43,33 @@ func ExtractLoose(src []byte) Result {
 			}
 			return
 		}
+		if len(res.Endpoints) >= maxLooseEndpoints {
+			res.LooseTruncated = true
+			return
+		}
 		seen[k] = len(res.Endpoints)
 		res.Endpoints = append(res.Endpoints, e)
 	}
+	var nl []int
 	lineCol := func(off int) (int, int) {
-		before := src[:off]
-		line := bytes.Count(before, []byte("\n")) + 1
-		col := off - (bytes.LastIndexByte(before, '\n') + 1)
-		return line, col
+		if nl == nil {
+			nl = lineStarts(src)
+		}
+		idx := sort.SearchInts(nl, off+1) - 1
+		return idx + 1, off - nl[idx]
 	}
 	snippet := func(a, b int) string {
 		s := string(src[a:min(b, a+160)])
 		return strings.Join(strings.Fields(s), " ")
 	}
 	called := map[int]bool{}
-	for _, m := range looseCallRe.FindAllSubmatchIndex(src, -1) {
+	calls := looseCallRe.FindAllSubmatchIndex(src, maxLooseMatches+1)
+	if len(calls) > maxLooseMatches {
+		calls = calls[:maxLooseMatches]
+		res.LooseTruncated = true
+	}
+	used := len(calls)
+	for _, m := range calls {
 		callee := string(src[m[2]:m[3]])
 		method := ""
 		kind := "client"
@@ -80,19 +98,39 @@ func ExtractLoose(src []byte) Result {
 		called[m[8]] = true
 		add(Endpoint{Method: method, URL: templateRe.ReplaceAllStringFunc(u, holeFor), Query: q, Kind: kind, Line: line, Col: col, Snippet: snippet(m[0], m[1])})
 	}
-	for _, m := range loosePathRe.FindAllSubmatchIndex(src, -1) {
-		if called[m[2]] {
-			continue
+	if rem := maxLooseMatches - used; rem > 0 {
+		paths := loosePathRe.FindAllSubmatchIndex(src, rem+1)
+		if len(paths) > rem {
+			paths = paths[:rem]
+			res.LooseTruncated = true
 		}
-		raw := string(src[m[2]:m[3]])
-		u, q := cutQuery(raw)
-		if staticExtRe.MatchString(u) {
-			continue // an asset or a module path, not an endpoint
+		for _, m := range paths {
+			if called[m[2]] {
+				continue
+			}
+			raw := string(src[m[2]:m[3]])
+			u, q := cutQuery(raw)
+			if staticExtRe.MatchString(u) {
+				continue // an asset or a module path, not an endpoint
+			}
+			line, col := lineCol(m[0])
+			add(Endpoint{URL: templateRe.ReplaceAllStringFunc(u, holeFor), Query: q, Kind: "string", Line: line, Col: col, Snippet: snippet(m[0], m[1])})
 		}
-		line, col := lineCol(m[0])
-		add(Endpoint{URL: templateRe.ReplaceAllStringFunc(u, holeFor), Query: q, Kind: "string", Line: line, Col: col, Snippet: snippet(m[0], m[1])})
 	}
 	return res
+}
+
+func lineStarts(src []byte) []int {
+	nl := make([]int, 1, bytes.Count(src, []byte("\n"))+1)
+	for off := 0; off < len(src); {
+		i := bytes.IndexByte(src[off:], '\n')
+		if i < 0 {
+			break
+		}
+		off += i + 1
+		nl = append(nl, off)
+	}
+	return nl
 }
 
 // holeFor keeps the slash of a ":id" parameter, and makes any hole {}.

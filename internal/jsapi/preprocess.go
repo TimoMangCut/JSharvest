@@ -130,6 +130,7 @@ func extractSFCSpans(src []byte, spans [][2]int, hint string, preferTSX bool) (R
 // Result goes here (TestMergeSpanCoversEverySlice).
 func (out *Result) mergeSpan(r Result) {
 	out.ASTLowered = out.ASTLowered || r.ASTLowered
+	out.LooseTruncated = out.LooseTruncated || r.LooseTruncated
 	out.Endpoints = append(out.Endpoints, r.Endpoints...)
 	out.Routes = append(out.Routes, r.Routes...)
 	out.RouteEntries = append(out.RouteEntries, r.RouteEntries...)

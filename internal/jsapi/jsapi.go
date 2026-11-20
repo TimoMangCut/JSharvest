@@ -124,9 +124,10 @@ type Result struct {
 	UnresolvedRoutePerms []UnresolvedRoutePerm `json:"unresolved_route_perms,omitempty"`
 	UnresolvedAuthzRules []UnresolvedAuthzRule `json:"unresolved_authz_rules,omitempty"`
 	ASTLowered           bool                  `json:"ast_lowered,omitempty"`
-	LooseFallback bool         `json:"loose_fallback,omitempty"`
-	ParseError    string       `json:"parse_error,omitempty"`
-	Error         string       `json:"error,omitempty"`
+	LooseFallback        bool                  `json:"loose_fallback,omitempty"`
+	LooseTruncated       bool                  `json:"loose_truncated,omitempty"`
+	ParseError           string                `json:"parse_error,omitempty"`
+	Error                string                `json:"error,omitempty"`
 }
 
 // Header is a header a client sets, and its value as a template ({} for
