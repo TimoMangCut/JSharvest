@@ -243,6 +243,208 @@ func (r *Redactor) URL(raw string) string {
 	return r.Text(raw)
 }
 
+var logQueryRedactor = NewRedactor()
+
+// LogURL scrubs a URL before it is written to a log line: userinfo and
+// fragments are removed, and sensitive or token-shaped query values are
+// replaced with "…" without reordering or re-encoding the rest of the query.
+func LogURL(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" {
+		return "(unparsable)"
+	}
+	if u.Host == "" && u.Path == "" {
+		switch strings.ToLower(u.Scheme) {
+		case "about":
+			if u.Opaque == "" {
+				return "(unparsable)"
+			}
+			return u.Scheme + ":" + u.Opaque
+		case "blob":
+			if u.Opaque == "" {
+				return "(unparsable)"
+			}
+			inner := u.Opaque
+			if u.RawQuery != "" {
+				inner += "?" + u.RawQuery
+			}
+			return u.Scheme + ":" + LogURL(inner)
+		case "data":
+			meta, _, ok := strings.Cut(u.Opaque, ",")
+			if !ok {
+				return u.Scheme + ":…"
+			}
+			return u.Scheme + ":" + meta + ",…"
+		case "javascript", "mailto":
+			return u.Scheme + ":…"
+		default:
+			return "(unparsable)"
+		}
+	}
+	u.User = nil
+	u.Fragment = ""
+	u.RawFragment = ""
+	if u.RawQuery != "" {
+		u.RawQuery = maskLogQuery(u.RawQuery)
+	}
+	u.ForceQuery = false
+	return u.String()
+}
+
+// LogURLs applies LogURL to a slice of URLs, returning a fresh slice.
+func LogURLs(list []string) []string {
+	if len(list) == 0 {
+		return nil
+	}
+	out := make([]string, len(list))
+	for i, s := range list {
+		out[i] = LogURL(s)
+	}
+	return out
+}
+
+// LogBundleLabels scrubs bundle labels (either script URLs or 12-hex SHA-256
+// prefixes for anonymous scripts) before logging.
+func LogBundleLabels(labels []string) []string {
+	if len(labels) == 0 {
+		return nil
+	}
+	out := make([]string, len(labels))
+	for i, s := range labels {
+		if isHexLabel(s) {
+			out[i] = s
+		} else {
+			out[i] = LogURL(s)
+		}
+	}
+	return out
+}
+
+func isHexLabel(s string) bool {
+	if len(s) == 0 || len(s) > 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+func maskLogQuery(raw string) string {
+	var b strings.Builder
+	b.Grow(len(raw))
+	for i := 0; i < len(raw); {
+		sep := strings.IndexAny(raw[i:], "&;")
+		var seg string
+		var delim byte
+		if sep < 0 {
+			seg = raw[i:]
+			i = len(raw)
+		} else {
+			seg = raw[i : i+sep]
+			delim = raw[i+sep]
+			i += sep + 1
+		}
+		b.WriteString(maskLogQuerySeg(seg))
+		if delim != 0 {
+			b.WriteByte(delim)
+		}
+	}
+	return b.String()
+}
+
+func maskLogQuerySeg(seg string) string {
+	if seg == "" {
+		return ""
+	}
+	rawK, rawV, hasEq := strings.Cut(seg, "=")
+	if !hasEq {
+		dec, err := url.QueryUnescape(rawK)
+		if err != nil || looksLikeLogToken(dec) || looksLikeLogToken(rawK) {
+			return "…"
+		}
+		return seg
+	}
+	if rawV == "" {
+		return seg
+	}
+	k, kErr := url.QueryUnescape(rawK)
+	v, vErr := url.QueryUnescape(rawV)
+	if kErr != nil {
+		return "…"
+	}
+	if vErr != nil || Sensitive(k) || Sensitive(rawK) || looksLikeLogToken(v) || looksLikeLogToken(rawV) {
+		return rawK + "=…"
+	}
+	if logQueryRedactor.Text(v) != v {
+		return rawK + "=…"
+	}
+	return seg
+}
+
+func looksLikeLogToken(v string) bool {
+	if v == "" {
+		return false
+	}
+	if jwtRe.MatchString(v) || len(secretsig.FindAll(v)) > 0 {
+		return true
+	}
+	trimmed := strings.TrimRight(v, "=")
+	pad := len(v) - len(trimmed)
+	if len(trimmed) < 24 || pad > 2 || strings.HasPrefix(trimmed, "/") {
+		return false
+	}
+	allHex := pad == 0
+	allB64URL := pad == 0
+	allB64Std := true
+	var hasDigit, hasUpper, hasLower, hasSlash bool
+	for i := 0; i < len(trimmed); i++ {
+		c := trimmed[i]
+		switch {
+		case c >= '0' && c <= '9':
+			hasDigit = true
+		case c >= 'a' && c <= 'f':
+			hasLower = true
+		case c >= 'A' && c <= 'F':
+			hasUpper = true
+		case c >= 'g' && c <= 'z':
+			allHex = false
+			hasLower = true
+		case c >= 'G' && c <= 'Z':
+			allHex = false
+			hasUpper = true
+		case c == '-' || c == '_':
+			allHex = false
+			allB64Std = false
+		case c == '+':
+			allHex = false
+			allB64URL = false
+		case c == '/':
+			allHex = false
+			allB64URL = false
+			hasSlash = true
+		default:
+			return false
+		}
+	}
+	if allHex {
+		return true
+	}
+	if allB64URL && hasDigit && (hasUpper || hasLower) {
+		return true
+	}
+	if allB64Std && (!hasSlash || (hasUpper && hasLower && hasDigit)) && hasDigit && (hasUpper || hasLower) {
+		return true
+	}
+	return false
+}
+
 // Headers returns a copy of h with credentials hidden. Cookie names are
 // kept, so that a fuzzer still knows which cookies a request needs.
 func (r *Redactor) Headers(h map[string]string) map[string]string {

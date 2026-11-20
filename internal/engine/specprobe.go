@@ -222,7 +222,7 @@ func (e *engine) specFilesWithHeaders(ctx context.Context, c *crawl, base, page 
 			return r, false
 		}
 		e.noteScript(key, isNew)
-		slog.Info("an API description", "url", targetURL, "tags", strings.Join(tags, ","))
+		slog.Info("an API description", "url", logURL(targetURL), "tags", strings.Join(tags, ","))
 		return r, true
 	}
 
@@ -343,7 +343,7 @@ func (e *engine) specFilesPhase2(ctx context.Context, c *crawl, page string) {
 					Target: "page", Page: page, Tags: []string{"openapi"}, Source: "live"})
 				if perr == nil {
 					e.noteScript(key, isNew)
-					slog.Info("an API description", "url", targetURL, "tags", "openapi")
+					slog.Info("an API description", "url", logURL(targetURL), "tags", "openapi")
 				}
 				gs.hadOpenAPI = true
 				gs.lastSig = ""

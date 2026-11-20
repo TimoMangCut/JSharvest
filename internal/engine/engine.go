@@ -468,7 +468,7 @@ func (e *engine) stopTabListeners() {
 // from now on (when there is a guard) and not visited again; when JS can
 // read the response the tab is also sent to about:blank at once.
 func (r *runState) privateHit(tab context.Context, h capture.PrivateHit) {
-	slog.Error("private address hit", "host", h.Host, "ip", h.IP, "url", h.URL, "origin", h.Origin, "same_origin", h.SameOrigin, "penalty", h.Penalty)
+	slog.Error("private address hit", "host", h.Host, "ip", h.IP, "url", logURL(h.URL), "origin", h.Origin, "same_origin", h.SameOrigin, "penalty", h.Penalty)
 	r.banMu.Lock()
 	if r.banned == nil {
 		r.banned = map[string]bool{}
@@ -891,7 +891,7 @@ func (e *engine) onEvent(ev flow.Event) {
 	}
 	e.mu.Unlock()
 	if ev.Trusted && (ev.Type == "click" || ev.Type == "submit") {
-		slog.Info("action", "type", ev.Type, "element", describeElement(ev.Element), "page", ev.URL)
+		slog.Info("action", "type", ev.Type, "element", describeElement(ev.Element), "page", logURL(ev.URL))
 	}
 }
 
@@ -1119,10 +1119,10 @@ func (e *engine) sink(s capture.Script) {
 	if err != nil {
 		if errors.Is(err, store.ErrTooLarge) {
 			e.storeError("too_large")
-			slog.Warn("script over -max-body, not kept", "url", s.URL, "size", len(s.Body))
+			slog.Warn("script over -max-body, not kept", "url", logURL(s.URL), "size", len(s.Body))
 		} else {
 			e.storeError("write")
-			slog.Error("store script", "url", s.URL, "err", err)
+			slog.Error("store script", "url", logURL(s.URL), "err", err)
 		}
 		return
 	}
@@ -1131,7 +1131,7 @@ func (e *engine) sink(s capture.Script) {
 		return
 	}
 	if isNew {
-		slog.Info("script", "target", s.Target, "kind", s.Kind, "size", len(s.Body), "url", s.URL)
+		slog.Info("script", "target", s.Target, "kind", s.Kind, "size", len(s.Body), "url", logURL(s.URL))
 	} else {
 		slog.Debug("script seen again", "target", s.Target, "url", s.URL)
 	}
@@ -1198,7 +1198,7 @@ func (e *engine) challengeGrace(ctx context.Context) {
 	if e.cfg.ChallengeWait <= 0 || !detect.Check(doc).Blocked {
 		return
 	}
-	slog.Info("the page is a challenge; waiting for it to pass on its own", "for", e.cfg.ChallengeWait, "url", doc.URL)
+	slog.Info("the page is a challenge; waiting for it to pass on its own", "for", e.cfg.ChallengeWait, "url", logURL(doc.URL))
 	deadline := time.Now().Add(e.cfg.ChallengeWait)
 	for time.Now().Before(deadline) {
 		select {
@@ -1207,7 +1207,7 @@ func (e *engine) challengeGrace(ctx context.Context) {
 		case <-time.After(250 * time.Millisecond):
 		}
 		if d := e.harvest.MainDocument(); !detect.Check(d).Blocked {
-			slog.Info("the challenge passed; the page is the site's", "url", d.URL)
+			slog.Info("the challenge passed; the page is the site's", "url", logURL(d.URL))
 			e.idle = e.quiet(ctx)
 			return
 		}
@@ -1220,7 +1220,7 @@ func (e *engine) quiet(ctx context.Context) capture.IdleResult {
 	res := e.harvest.WaitIdle(ctx, e.cfg.Idle, e.cfg.IdleMax, 2)
 	if res.Reason == "max" {
 		if len(res.Inflight) > 0 {
-			slog.Warn("network never went quiet; stopped at -idle-max", "open", res.Inflight)
+			slog.Warn("network never went quiet; stopped at -idle-max", "open", logInflight(res.Inflight))
 		} else {
 			slog.Warn("requests kept starting; stopped at -idle-max")
 		}
@@ -1510,7 +1510,7 @@ func (e *engine) writeEndpoints() {
 		"in_traffic_only", e.run.Endpoints[endpoints.ObservedOnly], "bundle_parse_errors", st.BundleParseErrors,
 		"bundle_ast_lowered", st.BundleASTLowered, "took", time.Since(started).Round(time.Millisecond))
 	if st.BundleParseErrors > 0 {
-		slog.Warn("bundle parse fallback to loose extraction", "count", st.BundleParseErrors, "bundles", strings.Join(st.FailedBundles, ","))
+		slog.Warn("bundle parse fallback to loose extraction", "count", st.BundleParseErrors, "bundles", strings.Join(traffic.LogBundleLabels(st.FailedBundles), ","))
 		wmsg := fmt.Sprintf("endpoints: %d bundle(s) failed AST parse and fell back to loose extraction", st.BundleParseErrors)
 		if !slices.Contains(e.run.Warnings, wmsg) {
 			e.warn(wmsg)
@@ -1615,4 +1615,30 @@ func toRecord(s capture.Script) store.Record {
 		r.Initiator = &store.Initiator{Type: s.Initiator.Type, URL: s.Initiator.URL, Line: s.Initiator.Line, Col: s.Initiator.Col}
 	}
 	return r
+}
+
+func logURL(raw string) string {
+	return traffic.LogURL(raw)
+}
+
+func logSourceMapURL(where string) string {
+	if base, ok := strings.CutSuffix(where, "#inline-map"); ok {
+		return traffic.LogURL(base) + "#inline-map"
+	}
+	return traffic.LogURL(where)
+}
+
+func logInflight(open []string) []string {
+	if len(open) == 0 {
+		return nil
+	}
+	out := make([]string, len(open))
+	for i, s := range open {
+		if kind, u, ok := strings.Cut(s, " "); ok && strings.Contains(u, ":") {
+			out[i] = kind + " " + traffic.LogURL(u)
+		} else {
+			out[i] = traffic.LogURL(s)
+		}
+	}
+	return out
 }

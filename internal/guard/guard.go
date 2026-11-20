@@ -387,7 +387,7 @@ func (g *Guard) NoteWebSocket(url string) {
 	g.mu.Lock()
 	g.stats.WebSocketsSeen++
 	g.mu.Unlock()
-	slog.Warn("guard: a WebSocket opened and could not be held back", "url", url)
+	slog.Warn("guard: a WebSocket opened and could not be held back", "url", traffic.LogURL(url))
 }
 
 // AddTab marks another tab as the tool's own, so that in attach mode its
@@ -610,7 +610,7 @@ func (g *Guard) record(ev *fetch.EventRequestPaused, headers map[string]string, 
 		FrameID: string(ev.FrameID), NetworkID: string(ev.NetworkID), Page: page, Opener: g.opener(string(ev.FrameID)),
 	})
 	g.mu.Unlock()
-	slog.Info("guard: held back", "reason", d.Reason, "method", req.Method, "url", req.URL)
+	slog.Info("guard: held back", "reason", d.Reason, "method", req.Method, "url", traffic.LogURL(req.URL))
 }
 
 // answerHeld gives a held-back request its made-up answer, or, if that

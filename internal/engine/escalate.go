@@ -132,7 +132,7 @@ func Escalate(ctx context.Context, cfg Config, pages []httpcrawl.Challenged, coo
 		if h == seedHost && ps[0].Depth == 0 {
 			c.PageScope = nil // the seed itself: HTTP read nothing of the site
 		}
-		slog.Info("a bot challenge HTTP could not pass: Chrome takes the host's pages", "host", h, "target", target.String(),
+		slog.Info("a bot challenge HTTP could not pass: Chrome takes the host's pages", "host", h, "target", logURL(target.String()),
 			"pages", len(ps), "depth", c.Depth)
 		rec, err := RunRecord(ctx, c)
 		r := EscalatedRun{Host: h, Target: target.String(), RunID: rec.RunID,

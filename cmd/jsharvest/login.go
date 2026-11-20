@@ -26,6 +26,7 @@ import (
 	"github.com/TimoMangCut/JSharvest/internal/guard"
 	"github.com/TimoMangCut/JSharvest/internal/scope"
 	"github.com/TimoMangCut/JSharvest/internal/session"
+	"github.com/TimoMangCut/JSharvest/internal/traffic"
 )
 
 // sessionNameRe names cookies that usually carry a session, for a login
@@ -256,7 +257,7 @@ func runLogin(args []string) error {
 	for o := range snap.Storage {
 		origins = append(origins, o)
 	}
-	slog.Info("login saved", "profile", dir, "cookies", len(after), "signs", snap.Signs.Cookies, "check_url", snap.Signs.CheckURL,
+	slog.Info("login saved", "profile", dir, "cookies", len(after), "signs", snap.Signs.Cookies, "check_url", traffic.LogURL(snap.Signs.CheckURL),
 		"storage", origins, "script", snap.Steps != "")
 	return nil
 }

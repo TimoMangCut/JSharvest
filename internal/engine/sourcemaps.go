@@ -96,7 +96,7 @@ func (e *engine) sourceMaps(ctx context.Context, refs []ref, policy *resolve.Pol
 			own++
 		}
 		stats.MapSources += own
-		slog.Info("source map", "url", where, "sources", len(sm.Sources), "own", own)
+		slog.Info("source map", "url", logSourceMapURL(where), "sources", len(sm.Sources), "own", own)
 	}
 	return true
 }

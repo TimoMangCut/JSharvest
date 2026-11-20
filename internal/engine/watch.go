@@ -113,7 +113,7 @@ func Watch(ctx context.Context, cfg Config, w WatchOptions) error {
 	// After finish has written flows.jsonl: until then, a reader goes by
 	// the snapshot.
 	defer results.RemoveLive(e.st.Dir())
-	slog.Info("watching; act in the tab, and stop with Ctrl-C", "tab", tabURL, "guard", g != nil)
+	slog.Info("watching; act in the tab, and stop with Ctrl-C", "tab", logURL(tabURL), "guard", g != nil)
 
 	why := e.watchUntil(ctx, id, w.Duration)
 	slog.Info("watch stopped", "why", why)

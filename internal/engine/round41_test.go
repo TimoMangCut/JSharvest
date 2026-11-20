@@ -2,8 +2,11 @@ package engine
 
 import (
 	"bytes"
+	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/chromedp/cdproto/network"
@@ -85,5 +88,32 @@ func TestRound41ReloginFailureKeepsSnapshotAndStorage(t *testing.T) {
 	}
 	if k.dirty || !k.stats.Saved {
 		t.Fatalf("expected dirty=false saved=true, got dirty=%v saved=%v", k.dirty, k.stats.Saved)
+	}
+}
+
+func TestRound41GuardAndSessionLogsMaskTokens(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	dir := t.TempDir()
+	k := testKeeper(dir)
+	tabCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	e := &engine{tab: tabCtx, lane: 1}
+
+	jwt := "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+	pageURL := "https://alice:topSecret@app.test/callback?code=oauth_code_xyz&id_token_hint=" + jwt + "&next=/dashboard#access_token=" + jwt
+	_ = k.recover(tabCtx, e, 0, "redirect to login", pageURL)
+
+	logs := buf.String()
+	for _, secret := range []string{"topSecret", "alice:", "oauth_code_xyz", "eyJhbGci"} {
+		if strings.Contains(logs, secret) {
+			t.Fatalf("session slog leaked %q:\n%s", secret, logs)
+		}
+	}
+	if !strings.Contains(logs, "session lost; restoring it") || !strings.Contains(logs, "next=/dashboard") {
+		t.Fatalf("unexpected session log output:\n%s", logs)
 	}
 }

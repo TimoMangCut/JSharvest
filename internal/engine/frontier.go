@@ -720,7 +720,7 @@ func (c *crawl) commit() {
 		c.enc.Encode(d.p)
 		c.stats.Visited++
 		if len(d.found) > 0 || d.p.Error == "" {
-			slog.Info("page", "url", d.it.URL, "status", d.p.Status, "depth", d.it.Depth, "new", d.p.Discovered, "queued", c.q.Len(), "tab", d.p.Tab)
+			slog.Info("page", "url", logURL(d.it.URL), "status", d.p.Status, "depth", d.it.Depth, "new", d.p.Discovered, "queued", c.q.Len(), "tab", d.p.Tab)
 		}
 	}
 	c.done = nil

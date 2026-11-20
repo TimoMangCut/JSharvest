@@ -106,7 +106,7 @@ func RunURLs(ctx context.Context, cfg Config, urls []*url.URL, rate float64) err
 	pages := make([]*PageResult, len(urls))
 	var mu sync.Mutex // batch's counts
 	one := func(i int, u *url.URL) {
-		slog.Info("page", "n", i+1, "of", len(urls), "url", u.String())
+		slog.Info("page", "n", i+1, "of", len(urls), "url", logURL(u.String()))
 		pc := cfg
 		pc.Target = u
 		pc.InScope = nil
@@ -125,13 +125,13 @@ func RunURLs(ctx context.Context, cfg Config, urls []*url.URL, rate float64) err
 			batch.Blocked++
 		case errors.Is(err, ErrSessionLost):
 			batch.SessionLost++
-			slog.Warn("page lost its session", "url", u.String())
+			slog.Warn("page lost its session", "url", logURL(u.String()))
 		case err != nil && ctx.Err() != nil:
 			batch.Canceled = true
 		case err != nil:
 			res.Error, res.ExitCode = err.Error(), 1
 			batch.Failed++
-			slog.Warn("page failed", "url", u.String(), "err", err)
+			slog.Warn("page failed", "url", logURL(u.String()), "err", err)
 		}
 		pages[i] = &res
 	}

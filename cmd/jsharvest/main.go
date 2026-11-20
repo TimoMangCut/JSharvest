@@ -924,7 +924,7 @@ func runEndpoints(args []string) error {
 		fmt.Fprintf(os.Stderr, "scripts analysed: %d (bundle parse fallbacks: %d, AST lowered: %d, source fallbacks: %d)\n",
 			st.Total, st.BundleParseErrors, st.BundleASTLowered, st.SourceParseFallback)
 		if len(st.FailedBundles) > 0 {
-			fmt.Fprintf(os.Stderr, "warning: bundle parse fallback to ExtractLoose: %s\n", strings.Join(st.FailedBundles, ", "))
+			fmt.Fprintf(os.Stderr, "warning: bundle parse fallback to ExtractLoose: %s\n", strings.Join(traffic.LogBundleLabels(st.FailedBundles), ", "))
 		}
 	}
 	if err := endpoints.Write(dir, eps); err != nil {

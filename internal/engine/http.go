@@ -134,7 +134,7 @@ func RunHTTP(ctx context.Context, cfg Config, ho HTTPOptions) (Record, error) {
 				run.StoreErrors["too_large"]++
 			} else {
 				run.StoreErrors["write"]++
-				slog.Error("store script", "url", r.URL, "err", err)
+				slog.Error("store script", "url", logURL(r.URL), "err", err)
 			}
 			return ""
 		}
@@ -144,7 +144,7 @@ func RunHTTP(ctx context.Context, cfg Config, ho HTTPOptions) (Record, error) {
 		scripts[key] = true
 		if isNew {
 			newScripts++
-			slog.Info(label, "kind", r.Kind, "size", len(r.Body), "url", r.URL)
+			slog.Info(label, "kind", r.Kind, "size", len(r.Body), "url", logURL(r.URL))
 		}
 		return key
 	}
@@ -278,10 +278,10 @@ func RunHTTP(ctx context.Context, cfg Config, ho HTTPOptions) (Record, error) {
 					mu.Lock()
 					run.StoreErrors["sighting_missing"]++
 					mu.Unlock()
-					slog.Warn("source map: a reused source is not in the store", "url", where+"#"+r.Path, "sha256", r.SHA256)
+					slog.Warn("source map: a reused source is not in the store", "url", logSourceMapURL(where)+"#"+r.Path, "sha256", r.SHA256)
 				}
 			}
-			slog.Info("source map", "url", where, "sources", sourcesN, "own", n)
+			slog.Info("source map", "url", logSourceMapURL(where), "sources", sourcesN, "own", n)
 		},
 		Request: func(e traffic.Entry) {
 			if extraCh != nil && e.Response != nil && e.Response.Status > 0 {
@@ -310,7 +310,7 @@ func RunHTTP(ctx context.Context, cfg Config, ho HTTPOptions) (Record, error) {
 			defer mu.Unlock()
 			if p.Visited {
 				visited++
-				slog.Info("page", "url", p.URL, "status", p.Status, "found", p.Discovered)
+				slog.Info("page", "url", logURL(p.URL), "status", p.Status, "found", p.Discovered)
 			} else {
 				listedN++
 			}
@@ -345,7 +345,7 @@ func RunHTTP(ctx context.Context, cfg Config, ho HTTPOptions) (Record, error) {
 			w += " (-insecure accepts any certificate, for a lab or staging target)"
 		}
 		run.Warnings = append(run.Warnings, w)
-		slog.Warn("the first page could not be fetched", "url", cfg.Target.String(), "err", res.SeedError)
+		slog.Warn("the first page could not be fetched", "url", logURL(cfg.Target.String()), "err", res.SeedError)
 	}
 	if tw != nil {
 		run.Requests, run.InternalRequests = tw.Count(), tw.Internal()

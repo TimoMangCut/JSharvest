@@ -422,7 +422,7 @@ func (x *explorer) page(ctx context.Context, it frontier.Item) []frontier.Found 
 			e.timedOut = true
 		}
 		x.stats.Errors++
-		slog.Warn("explore", "page", pageURL, "err", err)
+		slog.Warn("explore", "page", logURL(pageURL), "err", err)
 		return nil
 	}
 	if x.scroll(ctx) {
@@ -480,7 +480,7 @@ func (x *explorer) page(ctx context.Context, it frontier.Item) []frontier.Found 
 				e.timedOut = true
 			}
 			x.stats.Errors++
-			slog.Warn("explore: the page stopped taking input; leaving it", "page", pageURL, "element", c.Selector)
+			slog.Warn("explore: the page stopped taking input; leaving it", "page", logURL(pageURL), "element", c.Selector)
 			break
 		}
 		if outcome == "covered" {
@@ -533,7 +533,7 @@ func (x *explorer) page(ctx context.Context, it frontier.Item) []frontier.Found 
 		if n := x.dialogs.Load() - before; n > maxDialogs {
 			// A storm of alerts, perhaps without end: a fresh page stops it.
 			x.stats.Skipped["dialogs"]++
-			slog.Warn("explore: the action kept opening dialogs; loading the page again", "page", pageURL, "element", c.Selector, "dialogs", n)
+			slog.Warn("explore: the action kept opening dialogs; loading the page again", "page", logURL(pageURL), "element", c.Selector, "dialogs", n)
 			if !reload() {
 				break
 			}

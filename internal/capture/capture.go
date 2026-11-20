@@ -738,7 +738,7 @@ func (s *session) start() error {
 	}
 	if o := s.c.opts; o.Actions && o.OnEvent != nil && isActionTarget(s.kind) {
 		if err := s.installActions(); err != nil {
-			slog.Warn("capture: cannot record actions here; its requests will be grouped by time only", "target", s.kind, "url", s.targetURL, "err", err)
+			slog.Warn("capture: cannot record actions here; its requests will be grouped by time only", "target", s.kind, "url", traffic.LogURL(s.targetURL), "err", err)
 		}
 	}
 	s.c.mu.Lock()

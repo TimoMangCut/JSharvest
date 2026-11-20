@@ -490,7 +490,7 @@ func (k *keeper) recover(ctx context.Context, e *engine, ep int64, cause, pageUR
 		ev.Outcome, ev.Detail = "failed", fmt.Sprintf("%d recoveries in this run already", maxRecoveries)
 		return false
 	}
-	slog.Warn("session lost; restoring it", "cause", cause, "page", pageURL, "tab", e.lane)
+	slog.Warn("session lost; restoring it", "cause", cause, "page", logURL(pageURL), "tab", e.lane)
 	if err := k.setCookies(e); err != nil {
 		ev.Outcome, ev.Detail = "failed", err.Error()
 		return false
