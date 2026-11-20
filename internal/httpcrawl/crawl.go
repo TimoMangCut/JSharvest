@@ -171,7 +171,9 @@ type Stats struct {
 	Scripts    int            `json:"scripts"`
 	Inline     int            `json:"inline"`
 	Found      map[string]int `json:"found"`  // scripts by how they were found
-	Probes     map[string]int `json:"probes"` // well-known file -> status
+	Probes         map[string]int `json:"probes"`                     // well-known file -> status
+	SoftProbes     []string       `json:"soft_probes,omitempty"`      // Probes keys whose 2xx response was a soft-200 SPA/HTML fallback
+	SoftProbesMore int            `json:"soft_probes_more,omitempty"` // soft-200 probes beyond SoftProbes cap
 	SourceMaps int            `json:"source_maps,omitempty"`
 	// MapGuessesHeld: <script>.map guesses not made, their origin having
 	// missed sourcemap.GuessMisses with no map found.
@@ -1322,6 +1324,64 @@ func apiAnswer(a answer) bool {
 	return !jsapi.IsOpenAPI(a.Body)
 }
 
+const maxSoftProbes = 64
+
+func expectsNonHTMLProbe(pathHint, targetURL string) bool {
+	p := strings.ToLower(strings.TrimSpace(pathHint))
+	if p == "" {
+		if u, err := url.Parse(targetURL); err == nil {
+			p = strings.ToLower(u.Path)
+		}
+	}
+	if i := strings.IndexAny(p, "?#"); i >= 0 {
+		p = p[:i]
+	}
+	for _, ext := range []string{".json", ".yaml", ".yml", ".xml", ".txt"} {
+		if strings.HasSuffix(p, ext) {
+			return true
+		}
+	}
+	if strings.Contains(p, "/.well-known/") {
+		return true
+	}
+	for _, suf := range []string{"/v2/api-docs", "/v3/api-docs", "/api-json", "/docs-json", "/swagger-resources"} {
+		if strings.HasSuffix(p, suf) {
+			return true
+		}
+	}
+	return false
+}
+
+func (cr *crawler) recordProbeStatus(key, targetURL, pathHint string, a answer) {
+	isSoftSPA := false
+	if a.Err == nil && a.Status >= 200 && a.Status < 300 && len(a.Body) > 0 {
+		ct := strings.ToLower(strings.TrimSpace(strings.Split(a.Header.Get("Content-Type"), ";")[0]))
+		if strings.Contains(ct, "html") || htmlLike(a.Body) {
+			// Real Swagger UI / Redoc / Scalar wrapper HTML is not a soft-200 SPA fallback.
+			isSwaggerUI := strings.HasSuffix(strings.ToLower(pathHint), "/documentation") && len(jsapi.SwaggerUIURLs(a.Body)) > 0
+			if !isSwaggerUI {
+				orig := originOf(targetURL)
+				if cr.spa[orig] && cr.prints[orig] != "" &&
+					shellPrint(htmlscan.Scan(a.Body[:min(len(a.Body), 64<<10)], a.URL)) == cr.prints[orig] {
+					isSoftSPA = true
+				} else if expectsNonHTMLProbe(pathHint, targetURL) {
+					isSoftSPA = true
+				}
+			}
+		}
+	}
+	cr.count(func(st *Stats) {
+		st.Probes[key] = a.Status
+		if isSoftSPA && !slices.Contains(st.SoftProbes, key) {
+			if len(st.SoftProbes) < maxSoftProbes {
+				st.SoftProbes = append(st.SoftProbes, key)
+			} else {
+				st.SoftProbesMore++
+			}
+		}
+	})
+}
+
 // --- the well-known files ---
 
 // probe reads the well-known files of the seed's origin: the pages
@@ -1344,7 +1404,7 @@ func (cr *crawler) probe(ctx context.Context, seed string) ([]job, []frontier.Fo
 		}
 		a := cr.fetch(ctx, root+p, seed, dataReq, "Other")
 		cr.politeAt(a, seed, 0)
-		cr.count(func(st *Stats) { st.Probes[p] = a.Status })
+		cr.recordProbeStatus(p, root+p, p, a)
 		return a, a.Err == nil && a.Status == 200 && len(a.Body) > 0
 	}
 	get := func(p string) (answer, bool) {
@@ -1572,7 +1632,7 @@ func (cr *crawler) specProbeWithScope(ctx context.Context, base, referer string,
 		if key == targetURL || key == "" {
 			key = targetURL
 		}
-		cr.count(func(st *Stats) { st.Probes[key] = a.Status })
+		cr.recordProbeStatus(key, targetURL, pathHint, a)
 		if a.Err != nil || a.Status != 200 || htmlLike(a.Body) || len(a.Body) == 0 {
 			return a, false, true
 		}
@@ -1596,7 +1656,7 @@ func (cr *crawler) specProbeWithScope(ctx context.Context, base, referer string,
 	triedOIDC := false
 
 	probePaths := frontier.SpecPaths
-	if (u.Path == "" || u.Path == "/") && !cr.spa[orig] {
+	if (u.Path == "" || u.Path == "/") && !cr.spa[orig] && (cr.o.InScope == nil || cr.o.InScope(u.Hostname())) {
 		probePaths = make([]string, 0, len(frontier.SpecPaths)+len(frontier.OriginSpecPaths))
 		probePaths = append(probePaths, frontier.SpecPaths...)
 		probePaths = append(probePaths, frontier.OriginSpecPaths...)
@@ -1789,7 +1849,7 @@ func (cr *crawler) specProbePhase2(ctx context.Context, referer string) {
 				if key == targetURL || key == "" {
 					key = targetURL
 				}
-				cr.count(func(st *Stats) { st.Probes[key] = a.Status })
+				cr.recordProbeStatus(key, targetURL, p, a)
 
 				if a.Err == nil && a.Status == 200 && !htmlLike(a.Body) && len(a.Body) > 0 && jsapi.IsOpenAPI(a.Body) {
 					cr.o.Script(Script{Body: a.Body, Kind: "file", URL: a.URL, Page: referer, Status: a.Status,

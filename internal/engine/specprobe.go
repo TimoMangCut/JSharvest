@@ -228,7 +228,7 @@ func (e *engine) specFilesWithHeaders(ctx context.Context, c *crawl, base, page 
 
 	bu, _ := url.Parse(base)
 	probePaths := frontier.SpecPaths
-	if bu != nil && (bu.Path == "" || bu.Path == "/") {
+	if bu != nil && (bu.Path == "" || bu.Path == "/") && (e.cfg.InScope == nil || e.cfg.InScope(bu.Hostname())) {
 		probePaths = make([]string, 0, len(frontier.SpecPaths)+len(frontier.OriginSpecPaths))
 		probePaths = append(probePaths, frontier.SpecPaths...)
 		probePaths = append(probePaths, frontier.OriginSpecPaths...)

@@ -361,17 +361,23 @@ func (sc *SpecCollector) Plan(seedOrigin string, inScope func(string) bool) Spec
 		inScope  bool
 		freq     int
 	}
+	urlInScope := func(raw string) bool {
+		if inScope == nil {
+			return true
+		}
+		u, err := url.Parse(raw)
+		return err == nil && u != nil && u.Hostname() != "" && inScope(u.Hostname())
+	}
+
 	baseMap := map[string]*baseStat{}
 	noteBase := func(raw, defOrigin string, explicit bool) {
 		norm, orig, bp, ok := normalizeSpecBase(raw, defOrigin)
-		if !ok || bp == "" {
+		if !ok || bp == "" || !urlInScope(norm) {
 			return
 		}
 		st := baseMap[norm]
 		if st == nil {
-			u, _ := url.Parse(norm)
-			inS := inScope == nil || (u != nil && inScope(u.Hostname()))
-			st = &baseStat{url: norm, origin: orig, path: bp, explicit: explicit, inScope: inS}
+			st = &baseStat{url: norm, origin: orig, path: bp, explicit: explicit, inScope: true}
 			baseMap[norm] = st
 		}
 		if explicit {
@@ -459,6 +465,9 @@ func (sc *SpecCollector) Plan(seedOrigin string, inScope func(string) bool) Spec
 	}
 	svcMap := map[string]*svcStat{}
 	addSvc := func(gateway, svc string) {
+		if !urlInScope(gateway) {
+			return
+		}
 		prefix := strings.TrimRight(gateway, "/") + "/" + svc
 		if st := svcMap[prefix]; st != nil {
 			st.freq++
