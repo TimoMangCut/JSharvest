@@ -136,21 +136,39 @@ func loopback(h string) bool {
 
 // Pending keeps a payload the webhook did not take, for the next run.
 func Pending(dir string, p *Payload) error {
-	b, _ := json.Marshal(p)
-	return os.WriteFile(filepath.Join(dir, "pending-webhook.json"), b, 0o600)
+	b, err := json.Marshal(p)
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(filepath.Join(dir, "pending-webhook.json"), b)
 }
 
-// TakePending returns the payload left by a failed send, and forgets it.
-func TakePending(dir string) *Payload {
+// ReadPending returns the payload left by a failed send without removing it,
+// so a crash during retry does not lose the pending notification.
+func ReadPending(dir string) *Payload {
 	f := filepath.Join(dir, "pending-webhook.json")
 	b, err := os.ReadFile(f)
 	if err != nil {
 		return nil
 	}
-	os.Remove(f)
 	var p Payload
 	if json.Unmarshal(b, &p) != nil {
+		_ = os.Remove(f)
 		return nil
 	}
 	return &p
+}
+
+// ClearPending removes a pending webhook payload after it has been delivered.
+func ClearPending(dir string) {
+	_ = os.Remove(filepath.Join(dir, "pending-webhook.json"))
+}
+
+// TakePending returns the payload left by a failed send, and forgets it.
+func TakePending(dir string) *Payload {
+	p := ReadPending(dir)
+	if p != nil {
+		ClearPending(dir)
+	}
+	return p
 }

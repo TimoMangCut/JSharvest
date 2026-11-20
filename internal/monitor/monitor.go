@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -41,13 +42,14 @@ type Options struct {
 
 // Result is a run of monitor.
 type Result struct {
-	Snapshot *Snapshot
-	Changes  []Change
+	Snapshot         *Snapshot
+	Changes          []Change
 	// Baseline says the snapshot is the first of some role: nothing to
 	// compare that role with yet.
-	Baseline []string
-	Nothing  bool // no new run since the last snapshot
-	Notes    []string
+	Baseline         []string
+	Nothing          bool // no new run since the last snapshot
+	SkippedSnapshots int
+	Notes            []string
 }
 
 func (o Options) dir() string { return filepath.Join(o.Root, "monitor") }
@@ -61,7 +63,7 @@ func Run(o Options) (*Result, error) {
 	if o.Known <= 0 {
 		o.Known = 3
 	}
-	snaps, err := loadSnapshots(o.dir())
+	snaps, skipped, err := loadSnapshots(o.dir(), o.DryRun)
 	if err != nil {
 		return nil, err
 	}
@@ -76,7 +78,7 @@ func Run(o Options) (*Result, error) {
 			}
 		}
 	}
-	res := &Result{}
+	res := &Result{SkippedSnapshots: skipped}
 	cur := &Snapshot{Taken: o.Now}
 	ents, err := os.ReadDir(o.Root)
 	if err != nil {
@@ -164,36 +166,78 @@ func baselines(snaps []*Snapshot, role string, n int) (*Snapshot, []*Snapshot) {
 	return out[0], out
 }
 
-func loadSnapshots(dir string) ([]*Snapshot, error) {
+func loadSnapshots(dir string, dryRun bool) ([]*Snapshot, int, error) {
 	files, err := filepath.Glob(filepath.Join(dir, "snapshots", "*.json"))
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	var out []*Snapshot
+	skipped := 0
 	for _, f := range files {
 		b, err := os.ReadFile(f)
 		if err != nil {
-			return nil, err
+			slog.Warn("monitor: skipping unreadable snapshot", "file", f, "err", err)
+			skipped++
+			continue
 		}
 		var s Snapshot
 		if err := json.Unmarshal(b, &s); err != nil {
-			return nil, fmt.Errorf("%s: %w", f, err)
+			slog.Warn("monitor: skipping corrupt snapshot", "file", f, "err", err)
+			skipped++
+			if !dryRun {
+				_ = os.Rename(f, f+".corrupt")
+			}
+			continue
 		}
 		out = append(out, &s)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Taken.Before(out[j].Taken) })
-	return out, nil
+	return out, skipped, nil
+}
+
+func writeFileAtomic(path string, b []byte) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".snap-*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	cleanup := func() {
+		tmp.Close()
+		_ = os.Remove(name)
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		cleanup()
+		return err
+	}
+	if _, err := tmp.Write(b); err != nil {
+		cleanup()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		cleanup()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(name)
+		return err
+	}
+	if err := os.Rename(name, path); err != nil {
+		_ = os.Remove(name)
+		return err
+	}
+	return nil
 }
 
 func save(dir string, s *Snapshot) error {
-	if err := os.MkdirAll(filepath.Join(dir, "snapshots"), 0o700); err != nil {
-		return err
-	}
 	b, err := json.MarshalIndent(s, "", " ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, "snapshots", s.ID+".json"), append(b, '\n'), 0o600)
+	return writeFileAtomic(filepath.Join(dir, "snapshots", s.ID+".json"), append(b, '\n'))
 }
 
 // prune keeps the newest keep snapshots, and every role's baseline and

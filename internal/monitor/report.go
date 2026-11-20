@@ -33,7 +33,7 @@ func (r *Result) Write(root, target string) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, "latest.md"), []byte(r.Markdown(target)), 0o600)
+	return writeFileAtomic(filepath.Join(dir, "latest.md"), []byte(r.Markdown(target)))
 }
 
 // md quotes text of the target's (an endpoint's path) in Markdown: a code

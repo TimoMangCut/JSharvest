@@ -21,7 +21,7 @@ func waitLockFlag(fs *flag.FlagSet) *time.Duration {
 
 // lockDirs takes the write lock of the directories a command is about to
 // write, and returns what releases it. Only the commands that write take it
-// (crawl, watch, login, archive, endpoints); mcp, diff and export read, and
+// (crawl, watch, login, archive, endpoints, monitor); mcp, diff and export read, and
 // a watch writes while they do. Only the command takes it, never a library
 // function it calls (endpoints.Analyze at the end of a crawl).
 func lockDirs(cmd string, wait time.Duration, dirs ...string) (func(), error) {

@@ -33,11 +33,20 @@ func runMonitor(args []string) error {
 	webhookMin := fs.String("webhook-min", "medium", "send the webhook for changes of this severity or above")
 	webhookDetail := fs.String("webhook-detail", "counts", "counts, or keys: the endpoints too (they tell a chat the target's paths)")
 	dryRun := fs.Bool("dry-run", false, "compare and print; write nothing, send nothing")
+	waitLock := waitLockFlag(fs)
 	fs.Parse(args)
 	if *target == "" {
 		return errors.New("monitor: -target is required")
 	}
 	root := filepath.Join(*out, targetDir(*target))
+	monDir := filepath.Join(root, "monitor")
+	if !*dryRun {
+		unlock, err := lockDirs("monitor", *waitLock, monDir)
+		if err != nil {
+			return err
+		}
+		defer unlock()
+	}
 	in, err := scope.New(hostOnly(*target), results.ScopeMode(root))
 	if err != nil {
 		return err
@@ -64,11 +73,16 @@ func runMonitor(args []string) error {
 		}
 	}
 	if hook != "" && !*dryRun {
-		// A payload the webhook did not take last time goes first.
-		if p := monitor.TakePending(filepath.Join(root, "monitor")); p != nil {
-			if err := monitor.SendWith(ctx, hook, p, hookProxy); err != nil {
+		// A payload the webhook did not take last time goes first; keep the
+		// file on disk until delivery succeeds so a crash never drops it.
+		if p := monitor.ReadPending(monDir); p != nil {
+			sctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			err := monitor.SendWith(sctx, hook, p, hookProxy)
+			cancel()
+			if err != nil {
 				fmt.Fprintln(os.Stderr, "webhook (the last run's):", err)
-				monitor.Pending(filepath.Join(root, "monitor"), p)
+			} else {
+				monitor.ClearPending(monDir)
 			}
 		}
 	}
