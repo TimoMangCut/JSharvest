@@ -1,18 +1,18 @@
-# Trạng thái Hiện hành (`jsharvest` — Sau Đợt 39)
+# Trạng thái Hiện hành (`jsharvest` — Sau Đợt 40)
 
-Tài liệu nhập ngữ cảnh nhanh cho session mới (~5 KB). Đọc cùng [CLAUDE.md](../CLAUDE.md) (bất biến & quy trình gate); chỉ mở [rounds-history.md](rounds-history.md), [plan-39.md](plan-39.md), [plan-38.md](plan-38.md) hoặc [plan-34.md](plan-34.md) khi cần chi tiết lịch sử/thiết kế cũ.
+Tài liệu nhập ngữ cảnh nhanh cho session mới (~5–9 KB). Đọc cùng [CLAUDE.md](../CLAUDE.md) (bất biến & quy trình gate); chỉ mở [rounds-history.md](rounds-history.md), [plan-40.md](plan-40.md), [plan-39.md](plan-39.md), [plan-38.md](plan-38.md) hoặc [plan-34.md](plan-34.md) khi cần chi tiết lịch sử/thiết kế cũ.
 
 ## 1. Quy mô & Trạng thái Mốc Đợt 34
 
 - **Mã nguồn:** Go 1.25.4 (`CGO_ENABLED=0`, single binary, không thêm phụ thuộc ngoài); Đợt 34 bổ sung bộ điều khiển Độ lợi Thông tin Biên (`ΔInformation`), kiến trúc Streaming Archive DAG + Bộ nhớ đệm RAM có trần (`-mem-cache-mb`), lập lịch công bằng Weighted DRR đa tầng, nén Gzip chỉ mục CDX và hiệu chuẩn sâu `verify`/`detect`.
 - **Trạng thái kiểm định:**
   - `go vet ./...` (trên cả `darwin/arm64` và `linux/amd64`) & `go test -race ./...`: **100% PASS** toàn bộ package.
-  - `bin/testbed perfgate` (2.000 script, `43.1 MB`): `~2.5 s` trên macOS ARM64 / `~8.6 s` trên Linux x86_64, peak RSS `~278–282 MB` (trần cứng: `<= 15.0 s`, `<= 500.0 MB`).
-  - Gate tích hợp `verify-check.sh`, `archive-check.sh`, `pipeline-check.sh`, `frontier-check.sh`, `frontier-tabs-check.sh`: **PASS 100%** (`precision 1.000`, `recall 1.000`, kể cả tạm dừng `SIGINT` & resume, `-tabs 1 == -tabs 3`).
+  - `bin/testbed perfgate` (2.000 script, `43.1 MB`): `~1.6–2.5 s` trên macOS ARM64 / `~9.2–11.7 s` trên Linux x86_64, peak RSS `~354–364 MB` (trần cứng: `<= 15.0 s`, `<= 500.0 MB`).
+  - Gate tích hợp `endpoints-check.sh`, `verify-check.sh`, `crosscheck-check.sh`, `archive-check.sh`, `pipeline-check.sh`, `waf-check.sh`, `frontier-check.sh`, `frontier-tabs-check.sh`, `monitor-check.sh`: **PASS 100%** (`precision 1.000`, `recall 1.000`, kể cả tạm dừng `SIGINT` & resume, `-tabs 1 == -tabs 3`).
   - Kiểm tra hygiene đường dẫn & dữ liệu sạch (`.github/workflows/ci.yml`): **`0` vi phạm**.
-- **Phiên bản extractor:** `jsapi.Version = 45`.
+- **Phiên bản extractor:** `jsapi.Version = 46`.
 
-## 1b. Đợt 37, 37.1, 38 & 39 (tốc độ & độ phủ pre-auth; [plan-39.md](plan-39.md), [plan-38.md](plan-38.md), [plan-37.1.md](plan-37.1.md))
+## 1b. Đợt 37, 37.1, 38, 39 & 40 (tốc độ, độ phủ pre-auth & decoupled SPA; [plan-40.md](plan-40.md), [plan-39.md](plan-39.md), [plan-38.md](plan-38.md), [plan-37.1.md](plan-37.1.md))
 
 Đợt 35–36 xem `git log` (`f9725e0`, `db98e0d`, `2e5c5fc`).
 
@@ -24,17 +24,19 @@ Tài liệu nhập ngữ cảnh nhanh cho session mới (~5 KB). Đọc cùng [C
     - **origin** theo `scheme://host:port`: 3 lỗi sau khi đã kết nối, chỉ với origin chưa từng trả lời.
   - Request bị giữ **không gửi**: không vào `requests.jsonl`, không tính lượt thăm (`pages.jsonl` `reason: origin-unreachable`, `stats.held_by_breaker`), không tốn hạn mức `-http-rate`.
   - Mở rộng Build Manifests pre-auth cho cả live & archive: `/mix-manifest.json` (Laravel Mix), `/build/.vite/manifest.json` + fallback `/build/manifest.json` (Laravel Vite), `/build/entrypoints.json` (Symfony Encore); đọc thêm `<link rel="manifest">`, `/.well-known/apple-app-site-association` và `/.well-known/assetlinks.json`.
-  - Probe dịch vụ (spec probe) song song theo host (`/swagger/v1/swagger.json` trong `SpecPaths` + `OriginSpecPaths` chỉ hỏi 1 lần ở origin root + bóc URL spec động từ HTML Swagger UI `SwaggerUIURLs`); lọc CDN cookie (`onetrust.com`...); sub-path base trên origin SPA có **guarded SPA brake** (sau 3 probe thực gửi + `/v3/api-docs` trùng shell gốc thì phanh và truyền `spaBraked` sang `plan.Services`; giữ nguyên 100% ở origin root và bảo vệ OIDC sub-path).
+  - Probe dịch vụ (spec probe) song song theo host (`/swagger/v1/swagger.json` trong `SpecPaths`, bóc URL spec động từ HTML Swagger UI `SwaggerUIURLs`, đánh dấu phản hồi soft-200 SPA vào `http.soft_probes` trong khi giữ nguyên `http.probes`); **khoá phạm vi `inScope`** cho `SpecCollector.Plan` (`plan.Bases`/`plan.Services`) và `OriginSpecPaths` trên cả HTTP lẫn CDP (lớp phụ `nonAPIInfraDomains` lọc SDK/IdP/bản đồ/schema XML như `microsoftonline.*`, `openstreetmap.org`, `reactrouter.com`, `adobe.com`, `xfa.org`...; **đánh đổi `-scope fqdn`**: gateway của host anh em ngoài scope chỉ còn probe gốc D2, muốn probe đủ sub-path/service hãy chạy `-scope rdn`); sub-path base trên origin SPA có **guarded SPA brake** (sau 3 probe thực gửi + `/v3/api-docs` trùng shell gốc thì phanh và truyền `spaBraked` sang `plan.Services`; giữ nguyên 100% ở origin root và bảo vệ OIDC sub-path).
+  - Trong `run.json`, số liệu `requests`/`page_requests`/`internal_requests`/`scripts`/`new_scripts` của run HTTP luôn là **của riêng run HTTP** (không cộng đè để tránh đếm trùng `runs.jsonl` hay đổi baseline `monitor`); khi có run Chrome follow-up (`Escalated`/`SPABoot`), `EscalatedRun` ghi đủ bộ đếm request, `run.json` bổ sung khối `totals` cộng gộp toàn bộ và cập nhật `unique_scripts = st.Len() + Σ er.NewScripts`.
   - Dedup sourcemap theo `(sha256 script, loại thư viện, ref tương đối)` (nhận diện thêm `adminlte`, `apexcharts`, `echarts`...): map tải 1 lần; host sau ghi sighting theo SHA (`store_errors.sighting_missing` nếu hụt).
 - **Archive, Intel & Endpoints:**
   - Gap CDX 2,5 s (Internet Archive giới hạn ~30 req/phút), AIMD lên tối đa 10 s; duyệt shard theo stride, có `wayback_listed_pct`.
   - Lỗi được cô lập theo nguồn: `ErrBlocked` của Wayback không hủy CC/OTX/URLScan; Memento bị chặn thì chuyển sang WARC của CC; `history()` luôn chạy (log timing từng pha `archive` + 4 chặng `history`, kèm harness offline `JSH_HISTORY_BENCH`).
   - `crawl -archive`: Stage 1 (`ModeListOnly`, 0 request tới target) chạy cùng crawl và **nhận streaming subdomain mới qua `ExtraHostCh`** (fan-out hàng đợi độc lập cho OTX & URLScan); Stage 2 (`ModeResume`) chạy sau Escalate/SPABoot chỉ hỏi delta host còn sót. Cả hai dùng chung một `archiveEnv` (khoá, client, budget); trần `-archive-max-pages 150`.
   - CDX bị **từ chối kết nối** thì Memento chờ và dừng ngay ở lần từ chối đầu; 429 của CDX không truyền sang Memento.
-  - `endpoints.ExtractCached` có singleflight theo SHA-256 và khoá trần `extractHeavySem` cho script lớn; `SaveIntel` quét cả `pages.jsonl` để bắt `AuthFlows` từ trang Login HTML, thăng cấp route sạch từ `redirect_uri` in-scope vào `intel.Routes`/`CrawlHosts`, và nhận diện framework qua tên cookie/header (`Laravel`, `ASP.NET`, `Drupal`...).
+  - `endpoints.ExtractCached` có singleflight theo SHA-256 và khoá trần `extractHeavySem` cho script lớn; `jsapi` v46 giải destructuring trực tiếp từ `*js.ObjectExpr` (Vite `import.meta.env`) với `destructDefault` fallback riêng, thêm `"domain"` vào `isBaseName`, nhận hậu tố vùng/env viết HOA cho key hằng (`keyNameMatch` + `strongKeyValue`), và nối `{ baseURL }` cấp request cho `clientMethods` không trộn `client:` của instance; `SaveIntel` quét cả `pages.jsonl` để bắt `AuthFlows` từ trang Login HTML, thăng cấp route sạch từ `redirect_uri` in-scope vào `intel.Routes`/`CrawlHosts`, và nhận diện framework qua tên cookie/header (`Laravel`, `ASP.NET`, `Drupal`...).
 - **Verify:**
   - `-host-inflight N` (mặc định 1, chỉ có lợi khi `-rate` lớn hơn 1/RTT). Singleflight cho canary, sub-canary, OPTIONS và root canary.
   - Root canary chạy ở **mọi** N; chặn cả Soft-`200` HTML mang đúng `Shell` của canary `404` thuộc cùng prefix.
+  - **Decoupled SPA:** `verify.Load` đọc tùy chọn `http.spa_origins` từ `run.json`; endpoint API tương đối (`client`/`wrapper`/`fetch`/`xhr`/`options`) gắn `l.Origin` thuộc `spa_origins` được mở rộng ứng viên `[l.Origin, extBases...]` (tối đa 8 base ngoài origin) — reverse-proxy SPA chốt đúng `l.Origin`, còn decoupled SPA tự cắt tỉa `l.Origin` sau 16 path chết rồi đi thẳng sang host API.
   - **Re-judge** 2xx-HTML với mọi shell canary đã biết: 0 request thêm, chỉ hạ `verified_alive` (xoá sạch cả `verified_method` lẫn `verified_base`), tất định theo thứ tự.
   - Host hạ về 1 khi gặp 429 (một chiều), hoặc khi đang đếm gate (tự nhả khi host trả lời khác).
 - **Test:** `internal/testlint` chặn handler test ghi biến capture (kể cả ghi vào map/slice/field/pointer, `delete()`, hoặc chỉ giữ `RLock()`).
@@ -71,7 +73,6 @@ Tài liệu nhập ngữ cảnh nhanh cho session mới (~5 KB). Đọc cùng [C
 ## 4. Lộ trình Dài hạn (chưa thực hiện, chỉ mở khi có nhu cầu thực tế)
 
 0. **Tồn đọng nhỏ còn defer (`T2`):** thử lại candidate thứ 2 và hiệu chỉnh thống kê base đầu cơ sau `rejudgeShells` (chỉ xảy ra khi shell học muộn từ host khác `*`; đã đóng `T1` và `T3` ở Đợt 38): xem [plan-37.1.md](plan-37.1.md).
-0b. **Kế hoạch Đợt 40 (từ scan thực địa hậu Đợt 39):** xem [backlog-round40.md](backlog-round40.md) (`R40-A1..A3`: giải Vite `import.meta.env` object destructuring & `intel.bases`, nối `{ baseURL }` cấp request cho `axiosInstance.get/post`, gỡ ghim cứng SPA `Origin` khi có `intel.Bases` tách rời; `R40-B1..B3`: chặn `specProbe` sang host SDK/IdP bên thứ ba, lọc soft-200 SPA khỏi `http.probes`, đồng bộ `run.json` sau `Escalated`/`SPABoot`).
 
 1. **Tách dần module nội bộ theo thay đổi tính năng:** thu gọn dần sự phụ thuộc `x.cursor` trong `internal/jsapi` và cấu trúc `Config` trong `internal/engine` theo từng tính năng chạm tới (không đại phẫu tách rời).
 2. **Tùy chọn Stealth nâng cao:** `-stealth` với `uTLS` + HTTP/2 fingerprint chuẩn Chrome / Isolated World hooks nếu gặp WAF kiểm tra JA4/H2 frame ở pha HTTP pre-auth.
