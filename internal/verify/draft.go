@@ -224,6 +224,7 @@ type Inputs struct {
 	Catalog    []endpoints.Endpoint
 	Intel      endpoints.Intel
 	Historical []archive.HistLine // with -include-historical
+	SPAOrigins []string           // optional: http.spa_origins loaded from run.json
 	InScope    func(host string) bool
 }
 
@@ -249,6 +250,20 @@ func Load(roleDir, archiveDir string, historical bool) (Inputs, error) {
 	}
 	if b, err := os.ReadFile(filepath.Join(roleDir, endpoints.IntelFile)); err == nil {
 		json.Unmarshal(b, &in.Intel)
+	}
+	if rb, err := os.ReadFile(filepath.Join(roleDir, "run.json")); err == nil {
+		var runMeta struct {
+			HTTP *struct {
+				SPAOrigins []string `json:"spa_origins"`
+			} `json:"http"`
+		}
+		if json.Unmarshal(rb, &runMeta) == nil && runMeta.HTTP != nil {
+			for _, o := range runMeta.HTTP.SPAOrigins {
+				if norm := normalizeOrigin(o); norm != "" && !slices.Contains(in.SPAOrigins, norm) {
+					in.SPAOrigins = append(in.SPAOrigins, norm)
+				}
+			}
+		}
 	}
 	if historical {
 		if hf, err := os.Open(filepath.Join(archiveDir, "historical.jsonl")); err == nil {
@@ -576,6 +591,67 @@ func join(base, path string) string {
 	return base + p
 }
 
+// maxDecoupledSPABases bounds external in-scope intel.Bases appended as
+// fallback candidates for relative API calls on a confirmed SPA origin (R40-A3).
+const maxDecoupledSPABases = 8
+
+func normalizeOrigin(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return ""
+	}
+	return strings.ToLower(u.Scheme + "://" + u.Host)
+}
+
+func isAPICallKind(kind string) bool {
+	switch kind {
+	case "client", "wrapper", "fetch", "xhr", "options":
+		return true
+	}
+	return false
+}
+
+func isSPAOrigin(origin string, spaOrigins []string) bool {
+	want := normalizeOrigin(origin)
+	if want == "" || len(spaOrigins) == 0 {
+		return false
+	}
+	for _, o := range spaOrigins {
+		if normalizeOrigin(o) == want {
+			return true
+		}
+	}
+	return false
+}
+
+func decoupledSPABases(spaOrigin string, bases []string) []string {
+	spaNorm := normalizeOrigin(spaOrigin)
+	if spaNorm == "" {
+		return nil
+	}
+	var rootLevel, subLevel []string
+	for _, b := range bases {
+		bNorm := normalizeOrigin(b)
+		if bNorm == "" || bNorm == spaNorm {
+			continue
+		}
+		u, err := url.Parse(b)
+		if err != nil {
+			continue
+		}
+		if u.Path == "" || u.Path == "/" {
+			rootLevel = append(rootLevel, b)
+		} else {
+			subLevel = append(subLevel, b)
+		}
+	}
+	ext := append(rootLevel, subLevel...)
+	if len(ext) > maxDecoupledSPABases {
+		ext = ext[:maxDecoupledSPABases]
+	}
+	return ext
+}
+
 func draftOf(l line, source string, bases []string, in Inputs) Draft {
 	return draftOfWithLangs(l, source, bases, in, nil)
 }
@@ -600,7 +676,27 @@ func draftOfWithLangs(l line, source string, bases []string, in Inputs, originLa
 	case l.Host != "" && !strings.Contains(l.Host, "{"):
 		target = join(hostOriginFor(l.Host, l.Samples, in.Intel.Bases, l.Static), l.Path)
 	case l.Origin != "":
-		target = strings.TrimRight(l.Origin, "/") + l.Path
+		orig := strings.TrimRight(l.Origin, "/")
+		if !l.ThirdParty && isAPICallKind(l.Kind) && isSPAOrigin(orig, in.SPAOrigins) {
+			if extBases := decoupledSPABases(orig, bases); len(extBases) > 0 {
+				// R40-A3: keep SPA origin first so reverse-proxy SPA routes lock onto
+				// their own origin, while decoupled SPAs prune orig after 16 dead paths
+				// (specBasePruneAfter) and route subsequent drafts straight to extBases.
+				addCand := func(base string) {
+					u := join(base, l.Path)
+					if !slices.Contains(d.Candidates, u) {
+						d.Candidates = append(d.Candidates, u)
+						d.CandidateBases = append(d.CandidateBases, base)
+					}
+				}
+				addCand(orig)
+				for _, b := range extBases {
+					addCand(b)
+				}
+				break
+			}
+		}
+		target = orig + l.Path
 	default:
 		if !l.ThirdParty {
 			sOrigins := allScriptOrigins(l.Static, in.InScope)
