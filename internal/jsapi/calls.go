@@ -263,14 +263,32 @@ func (x *extractor) call(c *js.CallExpr) {
 				}
 				cfg = 2
 			}
+			var optPre []string
+			hasOptBase := false
 			if len(as) > cfg {
 				if o, ok := x.options(as[cfg]); ok {
 					ep.Query, ep.Headers = o.query, o.headers
+					if o.base != nil {
+						hasOptBase = true
+						pre, isClient := x.optBasePre(o.base)
+						optPre = pre
+						if isClient {
+							ep.Client = true
+							ep.BaseKeys = x.baseKeysOf(o.base, false, 0)
+						}
+					}
 				}
 			}
-			x.pre = x.prefixesOf(d.X)
+			savedReqBase := x.reqBase
+			if hasOptBase {
+				x.pre = optPre
+				x.reqBase = true
+			} else {
+				x.pre = x.prefixesOf(d.X)
+			}
 			key := x.add(as[0], ep, c, call)
 			x.pre = nil
+			x.reqBase = savedReqBase
 			if key != "" {
 				return
 			}
@@ -1048,13 +1066,21 @@ func (x *extractor) baseKeysOf(e js.IExpr, includeParam bool, depth int) []strin
 			}
 		}
 		if prop := x.propOf[rv]; prop != "" {
-			if src, ok := x.destructFrom[rv].(*js.Var); ok {
-				if arg, bound := x.args[root(src)]; bound && arg != nil {
-					if obj, isObj := x.object(arg); isObj {
-						if pv := objectValue(obj, prop); pv != nil {
-							if sub := x.baseKeysOf(pv, includeParam, depth+1); len(sub) > 0 {
-								return sub
+			if src := x.destructFrom[rv]; src != nil {
+				if sv, ok := src.(*js.Var); ok {
+					if arg, bound := x.args[root(sv)]; bound && arg != nil {
+						if obj, isObj := x.object(arg); isObj {
+							if pv := objectValue(obj, prop); pv != nil {
+								if sub := x.baseKeysOf(pv, includeParam, depth+1); len(sub) > 0 {
+									return sub
+								}
 							}
+						}
+					}
+				} else if obj, isObj := x.object(src); isObj {
+					if pv := objectValue(obj, prop); pv != nil {
+						if sub := x.baseKeysOf(pv, includeParam, depth+1); len(sub) > 0 {
+							return sub
 						}
 					}
 				}

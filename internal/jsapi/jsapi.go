@@ -22,7 +22,7 @@ import (
 
 // Version changes when what Extract finds changes, so that cached results
 // are made again.
-const Version = 45
+const Version = 46
 
 // Endpoint is one call to a URL that a script makes.
 type Endpoint struct {
@@ -178,7 +178,7 @@ func isBaseName(name string) bool {
 		return false
 	}
 	switch {
-	case strings.Contains(n, "api") && has("url", "base", "uri", "endpoint", "root", "host", "path", "prefix"):
+	case strings.Contains(n, "api") && has("url", "base", "uri", "endpoint", "root", "host", "path", "prefix", "domain"):
 		return true
 	case has("baseurl", "baseuri", "authbase", "serviceurl", "gatewayurl", "backendurl", "graphqlurl", "graphqlendpoint", "serverurl", "resturl", "restendpoint"):
 		return true
@@ -214,18 +214,113 @@ var headerNameRe = regexp.MustCompile(`^(?:X-[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*|Auth
 // keyWords are in every name keyNameRe takes: a cheap test before it.
 var keyWords = []string{"key", "secret", "id", "domain", "bucket", "dsn", "url", "token"}
 
-func keyName(name string) bool {
-	if len(name) < 3 || len(name) > 64 {
+var keySuffixMetadata = map[string]bool{
+	"ID": true, "IDS": true, "NAME": true, "TYPE": true, "LEN": true, "SIZE": true,
+	"PATH": true, "URL": true, "URI": true, "FILE": true, "CODE": true, "LIST": true,
+	"MAP": true, "ALG": true, "FMT": true, "REF": true, "EXP": true, "TTL": true,
+	"AGE": true, "HDR": true, "KEY": true, "MODE": true, "FLAG": true, "HASH": true,
+}
+
+func isUpperSnake(s string) bool {
+	if s == "" {
 		return false
 	}
+	hasAlpha := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'A' && c <= 'Z':
+			hasAlpha = true
+		case c >= '0' && c <= '9' || c == '_':
+		default:
+			return false
+		}
+	}
+	return hasAlpha
+}
+
+func isUpperAlpha(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < 'A' || s[i] > 'Z' {
+			return false
+		}
+	}
+	return true
+}
+
+func keyNameMatch(name string) (ok, suffixOnly bool) {
+	if len(name) < 3 || len(name) > 64 {
+		return false, false
+	}
 	n := strings.ToLower(name)
+	hasWord := false
 	for _, w := range keyWords {
 		if strings.Contains(n, w) {
-			if nonSecretKeySuffixRe.MatchString(name) {
+			hasWord = true
+			break
+		}
+	}
+	if !hasWord || nonSecretKeySuffixRe.MatchString(name) {
+		return false, false
+	}
+	if keyNameRe.MatchString(name) {
+		return true, false
+	}
+	// UPPER_SNAKE_CASE key with a short region/env suffix (e.g. PUBLIC_KEY_LAO, API_KEY_VN).
+	if i := strings.LastIndexByte(name, '_'); i > 0 {
+		base, suf := name[:i], name[i+1:]
+		if len(suf) >= 2 && len(suf) <= 5 && isUpperAlpha(suf) && !keySuffixMetadata[suf] && isUpperSnake(base) {
+			if !nonSecretKeySuffixRe.MatchString(base) && keyNameRe.MatchString(base) {
+				return true, true
+			}
+		}
+	}
+	return false, false
+}
+
+func keyName(name string) bool {
+	ok, _ := keyNameMatch(name)
+	return ok
+}
+
+// strongKeyValue requires values matched only via a region/env suffix
+// (e.g. PUBLIC_KEY_LAO) to look like actual key material: PEM, hex >= 32,
+// or base64/base64url >= 16 containing both letters and digits.
+func strongKeyValue(v string) bool {
+	if strings.Contains(v, "-----BEGIN ") {
+		return true
+	}
+	if len(v) >= 32 {
+		allHex := true
+		for i := 0; i < len(v); i++ {
+			c := v[i]
+			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+				allHex = false
+				break
+			}
+		}
+		if allHex {
+			return true
+		}
+	}
+	if len(v) >= 16 {
+		hasLetter, hasDigit := false, false
+		for i := 0; i < len(v); i++ {
+			c := v[i]
+			switch {
+			case (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'):
+				hasLetter = true
+			case c >= '0' && c <= '9':
+				hasDigit = true
+			case c == '+' || c == '/' || c == '=' || c == '_' || c == '-':
+			default:
 				return false
 			}
-			return keyNameRe.MatchString(name)
 		}
+		return hasLetter && hasDigit
 	}
 	return false
 }
@@ -318,7 +413,11 @@ func keyValue(v string) bool {
 }
 
 func (x *extractor) key(name, value string, line int) {
-	if name == "" || !keyName(name) || !keyValue(value) || strings.EqualFold(sepCutter.Replace(name), sepCutter.Replace(value)) {
+	ok, suffixOnly := keyNameMatch(name)
+	if name == "" || !ok || !keyValue(value) || strings.EqualFold(sepCutter.Replace(name), sepCutter.Replace(value)) {
+		return
+	}
+	if suffixOnly && !strongKeyValue(value) {
 		return
 	}
 	x.recordKey(name, value, line)
@@ -579,8 +678,10 @@ type extractor struct {
 	paramOf map[*js.Var]paramPlace
 	callsTo map[*js.Var][]*js.CallExpr
 	// destructFrom is what a variable is destructured from ({apiBase: t}
-	// = e); propOf its key.
-	destructFrom map[*js.Var]js.IExpr
+	// = e); propOf its key; destructDefault its default initializer ({t = d} = e).
+	destructFrom    map[*js.Var]js.IExpr
+	destructDefault map[*js.Var]js.IExpr
+	reqBase         bool // per-request baseURL overrides instance base in addOne
 	sse          map[*js.Var]int // sseParam's, by function
 	hasSSE       bool            // the script names text/event-stream
 	// fromMemo and givenMemo keep what fromCallersOf and givenFn read off
@@ -703,7 +804,7 @@ func newExtractor(src, origSrc []byte, lm *esbuildLineMap, nested bool) *extract
 		chains: map[*js.Var][]chain{}, declDepth: map[*js.Var]int{}, declFnDepth: map[*js.Var]int{}, bind: map[*js.Var][]string{}, busy: map[any]bool{},
 		thisProps: map[string][]js.IExpr{}, baseCands: map[string]bool{}, cloud: map[string]bool{}, concats: map[*js.CallExpr]bool{},
 		args: map[*js.Var]js.IExpr{}, routeCalls: map[*js.CallExpr]bool{}, routeObjs: map[*js.ObjectExpr]bool{}, routeMap: map[string]*RouteEntry{}, keysSeen: map[string]bool{}, secretVals: map[string]bool{},
-		clientPre: map[*js.Var][]string{}, factoryCalls: map[*js.CallExpr]bool{}, noArgs: map[*js.Var][]string{}, qparams: map[*js.Var]int{}, ownPre: map[string]bool{}, basedPre: map[string]bool{}, docVars: map[string][]string{}, docDev: map[string][]string{}, methodDefs: map[string][]methodDef{}, paramOf: map[*js.Var]paramPlace{}, callsTo: map[*js.Var][]*js.CallExpr{}, destructFrom: map[*js.Var]js.IExpr{}, sse: map[*js.Var]int{}, hasSSE: bytes.Contains(src, []byte("text/event-stream")), fromMemo: map[[2]any][]string{}, givenMemo: map[*js.DotExpr]js.IExpr{}, methodMemo: map[methodKey]js.IExpr{}, ownerOf: map[js.INode]js.INode{}, objParent: map[*js.ObjectExpr]*js.ObjectExpr{}, objKey: map[*js.ObjectExpr]string{}, named: map[string][]js.IExpr{}, madeBy: map[*js.ObjectExpr]*js.Var{}, classOf: map[*js.ClassDecl]*js.Var{}, msums: map[js.IExpr]*summary{}, apiBuilders: map[*js.Var]bool{}, producers: map[string][]js.INode{}, inst: map[*js.CallExpr][]string{}, maker: map[*js.CallExpr]bool{}, factories: map[*js.Var]*Factory{}, tailQuery: map[*js.CallExpr][]string{}, propOf: map[*js.Var]string{}, clients: map[*js.Var]bool{}, qset: map[*js.Var][]string{}, settings: map[string]bool{}, propBases: map[string]bool{}, segProps: map[string][]js.IExpr{}, joinedSeg: map[string]bool{}, esImports: map[*js.Var][2]string{}, esNSImports: map[*js.Var]string{}, awaited: map[*js.CallExpr]bool{}, enumProps: map[*js.Var]map[string]js.IExpr{}, enumParamTarget: map[*js.Var]*js.Var{}, omitted: map[*js.Var]bool{}, supplied: map[*js.Var]bool{}, viaCalls: map[*js.CallExpr]bool{},
+		clientPre: map[*js.Var][]string{}, factoryCalls: map[*js.CallExpr]bool{}, noArgs: map[*js.Var][]string{}, qparams: map[*js.Var]int{}, ownPre: map[string]bool{}, basedPre: map[string]bool{}, docVars: map[string][]string{}, docDev: map[string][]string{}, methodDefs: map[string][]methodDef{}, paramOf: map[*js.Var]paramPlace{}, callsTo: map[*js.Var][]*js.CallExpr{}, destructFrom: map[*js.Var]js.IExpr{}, destructDefault: map[*js.Var]js.IExpr{}, sse: map[*js.Var]int{}, hasSSE: bytes.Contains(src, []byte("text/event-stream")), fromMemo: map[[2]any][]string{}, givenMemo: map[*js.DotExpr]js.IExpr{}, methodMemo: map[methodKey]js.IExpr{}, ownerOf: map[js.INode]js.INode{}, objParent: map[*js.ObjectExpr]*js.ObjectExpr{}, objKey: map[*js.ObjectExpr]string{}, named: map[string][]js.IExpr{}, madeBy: map[*js.ObjectExpr]*js.Var{}, classOf: map[*js.ClassDecl]*js.Var{}, msums: map[js.IExpr]*summary{}, apiBuilders: map[*js.Var]bool{}, producers: map[string][]js.INode{}, inst: map[*js.CallExpr][]string{}, maker: map[*js.CallExpr]bool{}, factories: map[*js.Var]*Factory{}, tailQuery: map[*js.CallExpr][]string{}, propOf: map[*js.Var]string{}, clients: map[*js.Var]bool{}, qset: map[*js.Var][]string{}, settings: map[string]bool{}, propBases: map[string]bool{}, segProps: map[string][]js.IExpr{}, joinedSeg: map[string]bool{}, esImports: map[*js.Var][2]string{}, esNSImports: map[*js.Var]string{}, awaited: map[*js.CallExpr]bool{}, enumProps: map[*js.Var]map[string]js.IExpr{}, enumParamTarget: map[*js.Var]*js.Var{}, omitted: map[*js.Var]bool{}, supplied: map[*js.Var]bool{}, viaCalls: map[*js.CallExpr]bool{},
 		wpModExports: map[string]map[string]js.IExpr{}, wpModDefault: map[string]js.IExpr{}, wpReqVars: map[*js.Var]bool{}, jsonObjs: map[*js.CallExpr]*js.ObjectExpr{},
 		renderCtxVars: map[*js.Var]bool{}, hasVueRenderHint: hasVueHint, thisObjCache: map[string]*js.ObjectExpr{}, thisObjDone: map[string]bool{}, thisEnumCache: map[string]*js.Var{}, thisEnumDone: map[string]bool{}, esExports: map[string]js.IExpr{}, turbopackConst: map[[2]string]js.IExpr{},
 		classFieldImports: map[*js.ClassDecl]map[string][2]string{}, varInstanceImports: map[*js.Var][2]string{},

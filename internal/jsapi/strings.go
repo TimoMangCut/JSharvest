@@ -114,7 +114,7 @@ func (x *extractor) addOne(t string, ep Endpoint, q []string, at js.INode, lv le
 			ep.Query = append(ep.Query, k)
 		}
 	}
-	if ep.Kind == "client" && !ep.NoInheritBase && !strings.Contains(path, "://") && !strings.HasPrefix(path, "//") && !x.ownPrefix(x.pre, path) {
+	if ep.Kind == "client" && !ep.NoInheritBase && !x.reqBase && !strings.Contains(path, "://") && !strings.HasPrefix(path, "//") && !x.ownPrefix(x.pre, path) {
 		ep.Client = true
 		if c, ok := at.(*js.CallExpr); ok {
 			if d, ok := unwrapEnumGroup(c.X).(*js.DotExpr); ok {

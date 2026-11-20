@@ -159,9 +159,13 @@ func (v *defsVisitor) Enter(n js.INode) js.IVisitor {
 			if bo, ok := b.Binding.(*js.BindingObject); ok {
 				for _, it := range bo.List {
 					if vr, ok := it.Value.Binding.(*js.Var); ok && it.Key != nil {
-						x.propOf[root(vr)] = propName(it.Key)
+						r := root(vr)
+						x.propOf[r] = propName(it.Key)
 						if b.Default != nil {
-							x.destructFrom[root(vr)] = b.Default
+							x.destructFrom[r] = b.Default
+						}
+						if it.Value.Default != nil {
+							x.destructDefault[r] = it.Value.Default
 						}
 					}
 				}

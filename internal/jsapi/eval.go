@@ -357,19 +357,26 @@ func (x *extractor) evalVar(v *js.Var, q *[]string, depth int) []string {
 	}
 	cs := x.chains[v]
 	if len(cs) == 0 {
-		// let {apiBase: t} = e, e a parameter: e.apiBase as its callers
-		// give it.
-		if src, ok := x.destructFrom[v].(*js.Var); ok {
+		// let {apiBase: t = "/x"} = e (object literal or parameter): read from
+		// the object first, then callers of e, and only fall back to the
+		// destructuring default when neither gives a value.
+		if src := x.destructFrom[v]; src != nil {
 			if obj, ok := x.object(src); ok {
-				// The call being read gave it: {apiBase: i, …}.
 				if val := objectValue(obj, x.propOf[v]); val != nil && !x.busy[v] {
 					x.busy[v] = true
 					defer delete(x.busy, v)
 					return x.eval(val, q, depth+1)
 				}
-			} else if out := x.fromCallersOf(root(src), x.propOf[v], q, depth); out != nil {
-				return out
+			} else if sv, ok := src.(*js.Var); ok {
+				if out := x.fromCallersOf(root(sv), x.propOf[v], q, depth); out != nil {
+					return out
+				}
 			}
+		}
+		if def := x.destructDefault[v]; def != nil && !x.busy[v] {
+			x.busy[v] = true
+			defer delete(x.busy, v)
+			return x.eval(def, q, depth+1)
 		}
 	}
 	if len(cs) == 0 || len(cs) > maxAlts || x.busy[v] {
