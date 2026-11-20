@@ -109,10 +109,16 @@ func Judge(c Case) Judgement {
 	case s >= 300 && s < 400:
 		loc := t.Header["location"]
 		if c.IsLogin != nil && c.IsLogin(loc) {
+			if c.Stale || c.Kept {
+				return Judgement{Unclear, "sent to the login page, with a CSRF token or credential not taken fresh"}
+			}
 			return Judgement{Enforced, "sent to the login page"}
 		}
 		return Judgement{Unclear, fmt.Sprintf("%d to %s", s, loc)}
 	case s == 404 && ctl != nil:
+		if c.Stale || c.Kept {
+			return Judgement{Unclear, "404, with a CSRF token or credential not taken fresh"}
+		}
 		return Judgement{Enforced, "404, where the higher role gets it"}
 	case s >= 400 && s < 500:
 		return Judgement{Unclear, strconv.Itoa(s)}
@@ -122,6 +128,9 @@ func Judge(c Case) Judgement {
 		return Judgement{Unclear, strconv.Itoa(s)}
 	}
 	// A success.
+	if c.Kept {
+		return Judgement{Unclear, "a success, with the higher role's credential still in the request"}
+	}
 	var ctlBody []byte
 	if ctl != nil {
 		ctlBody = ctl.Body

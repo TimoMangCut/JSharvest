@@ -456,7 +456,7 @@ func (s *Sender) answered(hs *hostState, method string, raw []byte, scheme, host
 	// old one.
 	bare := strip(raw, scheme+"://"+host+uri, nil)
 	s.mu.Lock()
-	if hs.good == nil {
+	if hs.good == nil && bare != nil {
 		hs.good, hs.goodScheme = bare, scheme
 	}
 	s.mu.Unlock()

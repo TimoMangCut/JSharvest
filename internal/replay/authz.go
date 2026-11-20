@@ -89,10 +89,11 @@ type Trial struct {
 	Size      int       `json:"size,omitempty"`
 	File      string    `json:"file,omitempty"`
 	Missing   []string  `json:"missing,omitempty"`
-	Refreshed []string  `json:"refreshed,omitempty"`
-	Stale     []string  `json:"stale,omitempty"`
-	Kept      []string  `json:"kept,omitempty"`
-	At        time.Time `json:"at,omitzero"` // when the trial was answered
+	Refreshed   []string  `json:"refreshed,omitempty"`
+	Stale       []string  `json:"stale,omitempty"`
+	Kept        []string  `json:"kept,omitempty"`
+	KeptHeaders []string  `json:"kept_headers,omitempty"`
+	At          time.Time `json:"at,omitzero"` // when the trial was answered
 }
 
 type roleCtx struct {
@@ -598,53 +599,110 @@ func (a *authz) build(ctx context.Context, owner, as *roleCtx, r *export.Request
 		patched, err := Patch(out, at, v)
 		if err != nil {
 			b.stale = append(b.stale, at)
+			if owner != as {
+				out = dropCredential(out, at)
+			}
 			continue
 		}
 		out = patched
 		b.refreshed = append(b.refreshed, at)
 	}
 	// Credentials in the query or the body (an access_token) that nothing
-	// refreshed are the owner's still.
+	// refreshed are the owner's still. In vertical authz, strip what can be
+	// stripped and hold back the trial if anything remains; in peer mode,
+	// bola.go refuses to send whenever bt.kept is non-empty.
 	if owner != as {
-		for _, p := range export.Params(out) {
-			isCred := (p.In == "query" || p.In == "json" || p.In == "form" || p.In == "multipart") && traffic.Sensitive(lastName(p.Name)) &&
-				p.Value != "" && !(a.peer && isURLSignatureParam(lastName(p.Name)))
-			if a.peer {
-				isCred = a.foreignParam(p)
+		if a.peer {
+			for _, p := range export.Params(out) {
+				if a.foreignParam(p) && !slices.Contains(b.refreshed, p.At()) {
+					b.kept = append(b.kept, p.In+":"+p.Name)
+				}
 			}
-			if isCred && !slices.Contains(b.refreshed, p.At()) {
-				b.kept = append(b.kept, p.In+":"+p.Name)
+			if len(export.Params(out)) >= maxExportParams {
+				b.kept = append(b.kept, "params: 200 or more, not all checked for credentials")
 			}
-		}
-		if a.peer && len(export.Params(out)) >= maxExportParams {
-			b.kept = append(b.kept, "params: 200 or more, not all checked for credentials")
+		} else {
+			var dropped, kept []string
+			out, dropped, kept = stripUnrefreshedParams(out, b.refreshed, isRawSensitiveParam)
+			for _, d := range dropped {
+				if !slices.Contains(b.stale, d) {
+					b.stale = append(b.stale, d)
+				}
+			}
+			b.kept = append(b.kept, kept...)
 		}
 	}
 	return out, b, nil
 }
 
+func isRawSensitiveParam(p export.Param) bool {
+	if p.In != "query" && p.In != "json" && p.In != "form" && p.In != "multipart" {
+		return false
+	}
+	return traffic.Sensitive(lastKey(p.Name))
+}
+
+// stripUnrefreshedParams removes every unrefreshed credential parameter it can
+// (up to 50 drops) and reports both what was dropped and any credential that
+// could not be removed (e.g. multipart, duplicate keys, or >= maxExportParams).
+func stripUnrefreshedParams(raw []byte, refreshed []string, isCred func(export.Param) bool) (out []byte, dropped []string, kept []string) {
+	if len(export.Params(raw)) >= maxExportParams {
+		return raw, nil, []string{"params: 200 or more, not all checked for credentials"}
+	}
+	out = raw
+	for range 50 {
+		changed := false
+		for _, p := range export.Params(out) {
+			if !isCred(p) || p.Value == "" || p.Value == "null" {
+				continue
+			}
+			at := p.At()
+			if at == "" || slices.Contains(refreshed, at) {
+				continue
+			}
+			next := dropCredential(out, at)
+			if bytes.Equal(next, out) {
+				continue
+			}
+			out = next
+			if !slices.Contains(dropped, at) {
+				dropped = append(dropped, at)
+			}
+			changed = true
+			break
+		}
+		if !changed {
+			break
+		}
+	}
+	for _, p := range export.Params(out) {
+		if !isCred(p) || p.Value == "" || p.Value == "null" {
+			continue
+		}
+		if at := p.At(); at != "" && slices.Contains(refreshed, at) {
+			continue
+		}
+		kept = append(kept, p.In+":"+p.Name)
+	}
+	return out, dropped, kept
+}
+
 // strip takes every credential off a request: its identity's headers and
-// cookies, and the credentials in its query and body.
+// cookies, and the credentials in its query and body. It returns nil when a
+// credential cannot be safely removed.
 func strip(raw []byte, rawURL string, derived map[string]flow.LinkEnd) []byte {
+	if len(export.Params(raw)) >= maxExportParams {
+		return nil
+	}
 	out, _ := Apply(raw, NoIdentity(), rawURL, nil)
 	for at, from := range derived {
 		if credentialLink(at, from) {
 			out = dropCredential(out, at)
 		}
 	}
-	// One at a time: each drop moves the places after it.
-	for range 50 {
-		done := true
-		for _, p := range export.Params(out) {
-			if (p.In == "query" || p.In == "json" || p.In == "form" || p.In == "multipart") && traffic.Sensitive(lastName(p.Name)) &&
-				p.Value != "" && p.Value != "null" && p.At() != "" {
-				out, done = dropCredential(out, p.At()), false
-				break
-			}
-		}
-		if done {
-			break
-		}
+	out, _, kept := stripUnrefreshedParams(out, nil, isRawSensitiveParam)
+	if len(kept) > 0 {
+		return nil
 	}
 	return out
 }
@@ -730,26 +788,21 @@ func (a *authz) fresh(ctx context.Context, owner, as *roleCtx, r *export.Request
 	if len(missing) > 0 {
 		return "", false
 	}
-	if a.peer && owner != as {
-		// The source is A's request: B's identity on it, and none of A's
-		// credentials in its query or body.
-		if !identityFor(as, src.Entry.URL) || len(export.Params(raw)) >= maxExportParams {
+	if owner != as {
+		// The source is the higher role's (or peer A's) request: put the lower
+		// role's identity on it, and leave none of the owner's credentials in
+		// its query or body.
+		if a.peer && !identityFor(as, src.Entry.URL) {
 			return "", false
 		}
-		for range 50 {
-			dropped := false
-			for _, p := range export.Params(raw) {
-				if a.foreignParam(p) {
-					if p.At() == "" {
-						return "", false
-					}
-					raw, dropped = dropCredential(raw, p.At()), true
-					break
-				}
-			}
-			if !dropped {
-				break
-			}
+		pred := isRawSensitiveParam
+		if a.peer {
+			pred = a.foreignParam
+		}
+		var kept []string
+		raw, _, kept = stripUnrefreshedParams(raw, nil, pred)
+		if len(kept) > 0 {
+			return "", false
 		}
 	}
 	ans, err := a.sendRaw(ctx, as, raw, src.Entry.URL, "source", item, nil)
@@ -840,12 +893,19 @@ func (a *authz) item(ctx context.Context, it roles.Item) (*AuthzItem, error) {
 		}
 		p.b = b
 		p.t.Refreshed, p.t.Stale, p.t.Kept, p.t.Missing = b.refreshed, b.stale, b.kept, b.missing
-		p.t.File = a.trialFile(it.Key, rc.name, raw)
+		p.t.KeptHeaders = customHeaders(raw)
 		if len(b.missing) > 0 {
 			release()
 			p.t.Judgement = Judgement{Unclear, "no equivalent credential: " + strings.Join(b.missing, ", ")}
 			continue
 		}
+		if len(b.kept) > 0 {
+			release()
+			p.t.Judgement = Judgement{Unclear, "the higher role's credential cannot be replaced: " + strings.Join(b.kept, ", ")}
+			continue
+		}
+		// Never write a trial file that still carries the higher role's credential.
+		p.t.File = a.trialFile(it.Key, rc.name, raw)
 		ans, err := a.sendRaw(ctx, rc, raw, sr.Entry.URL, "trial", it.Key, func(s *Sent) { s.Refreshed, s.Stale = b.refreshed, b.stale })
 		release()
 		p.t.At = time.Now()
@@ -896,9 +956,10 @@ func (a *authz) item(ctx context.Context, it roles.Item) (*AuthzItem, error) {
 		p.t.Judgement = Judge(c)
 		if p.t.Verdict == Bypass && noID == nil && !write {
 			raw, _ := sr.Raw()
-			bare := strip(raw, sr.Entry.URL, sr.Derived)
-			if ans, err := a.o.Sender.Send(ctx, bare, schemeOf(sr.Entry.URL), "no-identity", "(none)", it.Key, nil); err == nil {
-				noID = &ans
+			if bare := strip(raw, sr.Entry.URL, sr.Derived); bare != nil {
+				if ans, err := a.o.Sender.Send(ctx, bare, schemeOf(sr.Entry.URL), "no-identity", "(none)", it.Key, nil); err == nil {
+					noID = &ans
+				}
 			}
 		}
 		if p.t.Verdict == Bypass && noID != nil {

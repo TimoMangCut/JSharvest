@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -205,10 +206,27 @@ func ReplayFlow(ctx context.Context, o FlowOptions) (*FlowResult, error) {
 			patched, err := Patch(raw, at, v)
 			if err != nil {
 				st.Stale = append(st.Stale, at)
+				if o.Owner != o.As.Role && credentialLink(at, from) {
+					raw = dropCredential(raw, at)
+				}
 				continue
 			}
 			raw = patched
 			st.Refreshed = append(st.Refreshed, at)
+		}
+		if o.Owner != o.As.Role {
+			var dropped, kept []string
+			raw, dropped, kept = stripUnrefreshedParams(raw, st.Refreshed, isRawSensitiveParam)
+			for _, d := range dropped {
+				if !slices.Contains(st.Stale, d) {
+					st.Stale = append(st.Stale, d)
+				}
+			}
+			if len(kept) > 0 {
+				st.Skipped = "higher role credential cannot be stripped: " + strings.Join(kept, ", ")
+				res.Steps = append(res.Steps, st)
+				continue
+			}
 		}
 		ans, err := o.Sender.Send(ctx, raw, u.Scheme, st.Purpose, o.As.Role, f.Action, func(s *Sent) { s.Refreshed, s.Stale = st.Refreshed, st.Stale })
 		if err != nil {

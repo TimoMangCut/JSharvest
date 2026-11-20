@@ -684,17 +684,9 @@ func stripPeer(raw []byte, rawURL string, derived map[string]flow.LinkEnd, a *au
 			out = dropCredential(out, at)
 		}
 	}
-	for range 50 {
-		done := true
-		for _, p := range export.Params(out) {
-			if a.foreignParam(p) && p.At() != "" {
-				out, done = dropCredential(out, p.At()), false
-				break
-			}
-		}
-		if done {
-			break
-		}
+	out, _, kept := stripUnrefreshedParams(out, nil, a.foreignParam)
+	if len(kept) > 0 {
+		return nil
 	}
 	return out
 }
