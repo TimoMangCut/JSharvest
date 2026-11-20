@@ -1039,7 +1039,12 @@ func (e *engine) startOn(tab context.Context) (*capture.Capture, string, error) 
 	opts.NoPrivateCheck = e.cfg.Browser.Proxy != "" || e.privOff
 	opts.OnPrivateHit = func(h capture.PrivateHit) { e.privateHit(tab, h) }
 	if e.traffic != nil {
-		opts.Record = capture.RecordOptions{Mode: e.cfg.Record, MaxBody: e.cfg.RecordBody, Sink: e.record}
+		opts.Record = capture.RecordOptions{
+			Mode:            e.cfg.Record,
+			MaxBody:         e.cfg.RecordBody,
+			Sink:            e.record,
+			SensitiveWindow: func() bool { return e.keeper.isRelogging() },
+		}
 	}
 	if g := e.guard; g != nil {
 		opts.OnClearSiteData = func(id string) {

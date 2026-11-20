@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/url"
 	"strings"
 	"sync"
@@ -113,7 +114,8 @@ type keeper struct {
 
 	rmu        sync.Mutex
 	rcond      *sync.Cond
-	recovering bool // no tab starts a page, nor an action, meanwhile (wait)
+	recovering bool        // no tab starts a page, nor an action, meanwhile (wait)
+	relogging  atomic.Bool // login steps are running: capture redacts credentials
 }
 
 func newKeeper(tabs []*engine, l *Login) *keeper {
@@ -149,6 +151,10 @@ func (k *keeper) setRecovering(on bool) {
 	k.recovering = on
 	k.rmu.Unlock()
 	k.rcond.Broadcast()
+}
+
+func (k *keeper) isRelogging() bool {
+	return k != nil && k.relogging.Load()
 }
 
 // lost reports whether the session went for good.
@@ -234,11 +240,17 @@ func (k *keeper) setTabScriptLocked(t *engine) error {
 	if k.override.Load() {
 		src = snap.OverrideScript()
 	}
-	if src == "" {
-		return nil
-	}
 	mid := t.mainFrameID()
 	old := k.scripts[mid]
+	if src == "" {
+		if old != "" {
+			ctx, cancel := k.call(t)
+			chromedp.Call(ctx, page.RemoveScriptToEvaluateOnNewDocument, page.RemoveScriptToEvaluateOnNewDocumentParams{Identifier: old})
+			cancel()
+			delete(k.scripts, mid)
+		}
+		return nil
+	}
 	ctx, cancel := k.call(t)
 	if old != "" {
 		chromedp.Call(ctx, page.RemoveScriptToEvaluateOnNewDocument, page.RemoveScriptToEvaluateOnNewDocumentParams{Identifier: old})
@@ -503,11 +515,12 @@ func (k *keeper) recover(ctx context.Context, e *engine, ep int64, cause, pageUR
 		ev.Outcome, ev.Detail = "failed", why+"; no login script to log in again"
 		return false
 	}
-	if err := k.relogin(ctx, e); err != nil {
+	snap, err := k.relogin(ctx, e)
+	if err != nil {
 		ev.Outcome, ev.Detail = "failed", why+"; login again: "+err.Error()
 		return false
 	}
-	if ok, why2 := k.verify(e); !ok {
+	if ok, why2 := k.finishRelogin(snap, func() (bool, string) { return k.verify(e) }); !ok {
 		ev.Outcome, ev.Detail = "failed", "after logging in again: "+why2
 		return false
 	}
@@ -518,41 +531,77 @@ func (k *keeper) recover(ctx context.Context, e *engine, ep int64, cause, pageUR
 }
 
 // relogin runs the login script in tab e, the guard letting that tab's
-// writes through (destructive ones still held back), and saves the new
-// session; every tab gets its storage.
-func (k *keeper) relogin(ctx context.Context, e *engine) error {
+// writes through (destructive ones still held back), and builds the candidate
+// snapshot without saving or pushing scripts until verify succeeds.
+func (k *keeper) relogin(ctx context.Context, e *engine) (*session.Snapshot, error) {
+	k.relogging.Store(true)
+	defer k.relogging.Store(false)
 	if g := e.guard; g != nil {
 		done := g.AllowWrites(e.mainFrameID())
 		defer done()
 	}
 	before, _ := k.cookies(e)
 	if err := session.Run(e.tabCtx(), k.login.Steps, 30*time.Second); err != nil {
-		return err
+		return nil, err
 	}
 	e.settle(ctx)
 	after, err := k.cookies(e)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	var stPtr *originStorage
+	if st, err := e.readStorage(); err == nil {
+		stPtr = &st
+	}
+	return k.buildReloginSnapshot(before, after, stPtr), nil
+}
+
+func (k *keeper) buildReloginSnapshot(before, after []*network.Cookie, st *originStorage) *session.Snapshot {
 	snap := *k.snapCopy()
+	snap.Storage = maps.Clone(snap.Storage)
 	snap.Cookies, snap.Saved = after, time.Now().UTC()
 	if fresh := session.NewCookies(before, after); len(fresh) > 0 && len(snap.Signs.Cookies) == 0 {
 		snap.Signs.Cookies, snap.Signs.Keys = fresh, session.NewCookieKeys(before, after)
 	}
-	if st, err := e.readStorage(); err == nil {
+	if st != nil {
 		if snap.Storage == nil {
 			snap.Storage = map[string]session.Storage{}
 		}
 		snap.Storage[st.origin] = st.Storage
 	}
+	return &snap
+}
+
+// finishRelogin installs snap in memory so verify can inspect it, and only
+// saves it to disk and updates tab scripts when verify passes. Call with k.mu held.
+func (k *keeper) finishRelogin(snap *session.Snapshot, verify func() (bool, string)) (bool, string) {
 	k.smu.Lock()
-	k.login.Snapshot = &snap
-	k.dirty = false // saved whole, just below
+	prev, prevDirty := k.login.Snapshot, k.dirty
+	k.login.Snapshot = snap
 	k.smu.Unlock()
-	if err := snap.Save(k.login.Profile); err != nil {
-		slog.Warn("save the new session", "err", err)
+
+	if ok, why := verify(); !ok {
+		k.smu.Lock()
+		k.login.Snapshot, k.dirty = prev, prevDirty
+		k.smu.Unlock()
+		return false, why
 	}
-	return k.setScript()
+
+	k.smu.Lock()
+	k.dirty = false
+	prof := k.login.Profile
+	k.smu.Unlock()
+	if prof != "" {
+		if err := snap.Save(prof); err != nil {
+			slog.Warn("save the new session", "err", err)
+		} else {
+			k.stats.Saved = true
+		}
+	}
+	if err := k.setScript(); err != nil {
+		slog.Warn("save the new session script", "err", err)
+	}
+	return true, ""
 }
 
 type originStorage struct {

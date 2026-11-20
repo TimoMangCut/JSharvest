@@ -22,9 +22,10 @@ import (
 // RecordOptions turns on the request log. Sink receives each request once
 // it is complete, from any goroutine.
 type RecordOptions struct {
-	Mode    traffic.Mode
-	MaxBody int // bytes kept of each request and response body; 0 keeps none
-	Sink    func(traffic.Entry)
+	Mode            traffic.Mode
+	MaxBody         int // bytes kept of each request and response body; 0 keeps none
+	Sink            func(traffic.Entry)
+	SensitiveWindow func() bool // when true (e.g. re-login), request credentials are always redacted
 }
 
 const (
@@ -47,6 +48,7 @@ const (
 type recorder struct {
 	s    *session
 	opts RecordOptions
+	red  *traffic.Redactor
 
 	mu  sync.Mutex
 	xs  map[network.RequestID]*exchange
@@ -55,11 +57,12 @@ type recorder struct {
 
 // exchange is one request id: a request and the hops of its redirects.
 type exchange struct {
-	hops  []*hop
-	rtype string
-	frame string
-	page  string
-	init  *traffic.Initiator
+	hops      []*hop
+	rtype     string
+	frame     string
+	page      string
+	init      *traffic.Initiator
+	sensitive bool // sent during SensitiveWindow (re-login): tag and redact request credentials
 
 	final         *network.Response // the response of the last hop
 	finalType     string
@@ -101,7 +104,15 @@ type hop struct {
 }
 
 func newRecorder(s *session, o RecordOptions) *recorder {
-	return &recorder{s: s, opts: o, xs: map[network.RequestID]*exchange{}, now: time.Now}
+	var red *traffic.Redactor
+	if o.SensitiveWindow != nil {
+		red = traffic.NewRedactor()
+	}
+	return &recorder{s: s, opts: o, red: red, xs: map[network.RequestID]*exchange{}, now: time.Now}
+}
+
+func (r *recorder) isSensitive() bool {
+	return r.opts.SensitiveWindow != nil && r.opts.SensitiveWindow()
 }
 
 func (r *recorder) start() {
@@ -136,7 +147,13 @@ func (r *recorder) onServedFromCache(ev *network.EventRequestServedFromCache) {
 }
 
 func (r *recorder) onSentExtra(ev *network.EventRequestWillBeSentExtraInfo) {
-	r.with(ev.RequestID, func(x *exchange) { x.reqExtra = append(x.reqExtra, ev.Headers) })
+	sens := r.isSensitive()
+	r.with(ev.RequestID, func(x *exchange) {
+		if len(x.hops) == 0 && sens {
+			x.sensitive = true
+		}
+		x.reqExtra = append(x.reqExtra, ev.Headers)
+	})
 }
 
 func (r *recorder) onResponse(ev *network.EventResponseReceived) {
@@ -214,7 +231,11 @@ func (r *recorder) onSent(ev *network.EventRequestWillBeSent) {
 		}
 	}
 	page := r.s.c.currentPage()
+	sens := r.isSensitive()
 	r.with(ev.RequestID, func(x *exchange) {
+		if sens {
+			x.sensitive = true
+		}
 		if ev.RedirectResponse != nil && len(x.hops) > 0 {
 			last := x.hops[len(x.hops)-1]
 			last.redirect, last.extra = ev.RedirectResponse, ev.RedirectHasExtraInfo
@@ -399,6 +420,9 @@ func (r *recorder) entries(id network.RequestID, x *exchange) []traffic.Entry {
 	if r.challenge(x, rtype) {
 		tags = append(tags, detect.TagChallenge)
 	}
+	if x.sensitive {
+		tags = append(tags, "relogin")
+	}
 	var out []traffic.Entry
 	ri, si := 0, 0
 	for i, h := range x.hops {
@@ -477,6 +501,11 @@ func (r *recorder) entries(id network.RequestID, x *exchange) []traffic.Entry {
 					e.Response.BodyOmitted = "unfinished"
 				}
 			}
+		}
+		if x.sensitive && r.red != nil {
+			e.URL = r.red.URL(e.URL)
+			e.Headers = r.red.Headers(e.Headers)
+			e.Body = r.red.Body(e.Body)
 		}
 		out = append(out, e)
 	}
