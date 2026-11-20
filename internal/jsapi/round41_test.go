@@ -3,7 +3,10 @@ package jsapi
 import (
 	"bytes"
 	"fmt"
+	"os"
+	"os/exec"
 	"runtime/debug"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -152,4 +155,119 @@ func TestRound41LooseTruncatedFlags(t *testing.T) {
 			t.Fatalf("len(Endpoints)=%d, want %d", len(res.Endpoints), maxLooseEndpoints)
 		}
 	})
+}
+
+func TestRound41MaxNestingLexer(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want int
+	}{
+		{"strings_and_comments", `const s = "((((([[[{{"; /* [[[[ */ // ((((`, 0},
+		{"regex_and_char_class", `const r = /\(\[\{[/([{]/g; const y = (1 + 2) / 3;`, 1},
+		{"keyword_regex", `function f() { return /((((/.test("x"); }`, 2},
+		{"template_interp", "const t = `(((( ${a + `${b + (1)}`} ]]]]`;", 3},
+		{"nested_arrays", `[[[1]]]`, 3},
+	}
+	for _, tc := range cases {
+		got, over := maxNesting([]byte(tc.src), 100)
+		if over || got != tc.want {
+			t.Errorf("%s: maxNesting=%d over=%v, want %d false", tc.name, got, over, tc.want)
+		}
+	}
+	if _, over := maxNesting([]byte(strings.Repeat("[", 401)+strings.Repeat("]", 401)), maxEsbuildNesting); !over {
+		t.Fatal("expected over=true at 401 levels")
+	}
+}
+
+func TestRound41DeepNestingSkipsEsbuild(t *testing.T) {
+	if os.Getenv("JSHARVEST_TEST_DEEP_SUBPROC") == "1" {
+		deep := strings.Repeat("[", 1_000_000) + strings.Repeat("]", 1_000_000)
+		for _, tc := range []struct {
+			hint string
+			body string
+		}{
+			{"app.js", deep},
+			{"app.ts", "const x: any = " + deep},
+			{"App.vue", "<script lang=\"ts\">\nconst x: any = " + deep + "\n</script>"},
+			{"Two.vue", "<script lang=\"ts\">\nconst a = 1;\n</script>\n<script setup lang=\"ts\">\nconst x: any = " + deep + "\n</script>"},
+		} {
+			r := ExtractSource([]byte(tc.body), tc.hint)
+			if !strings.Contains(r.Error, "esbuild skipped") {
+				t.Fatalf("%s: got Error=%q, want esbuild skipped", tc.hint, r.Error)
+			}
+		}
+		if r := Extract([]byte(deep)); !strings.Contains(r.Error, "esbuild skipped") {
+			t.Fatalf("Extract: got Error=%q, want esbuild skipped", r.Error)
+		}
+		if x, ast := prepared([]byte("const f = ({a: b = 1} = {}) => " + deep)); x != nil || ast != nil {
+			t.Fatalf("prepared: expected nil on 1M-nested input")
+		}
+		return
+	}
+
+	// Fast in-process check at 200k levels across .js, .ts, and .vue.
+	med := strings.Repeat("[", 200_000) + strings.Repeat("]", 200_000)
+	start := time.Now()
+	for _, hint := range []string{"bundle.js", "mod.ts"} {
+		r := ExtractSource([]byte(med), hint)
+		if !strings.Contains(r.Error, "esbuild skipped") {
+			t.Fatalf("%s: Error=%q, want esbuild skipped", hint, r.Error)
+		}
+	}
+	rVue := ExtractSource([]byte("<script lang=\"ts\">"+med+"</script>"), "Comp.vue")
+	if !strings.Contains(rVue.Error, "esbuild skipped") {
+		t.Fatalf("Comp.vue: Error=%q, want esbuild skipped", rVue.Error)
+	}
+	limit := 2 * time.Second
+	if isRaceBuild() {
+		limit = 10 * time.Second
+	}
+	if took := time.Since(start); took > limit {
+		t.Fatalf("200k nesting took %s, want <= %s", took, limit)
+	}
+
+	// Subprocess check at 1,000,000 levels (unrecoverable stack overflow in esbuild if unguarded).
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(exe, "-test.run=^TestRound41DeepNestingSkipsEsbuild$")
+	cmd.Env = append(os.Environ(), "JSHARVEST_TEST_DEEP_SUBPROC=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("1M nesting subprocess crashed: %v\n%s", err, out)
+	}
+}
+
+func TestRound41NestingThresholdCorpus(t *testing.T) {
+	list := os.Getenv("JSAPI_SNAPSHOT")
+	if list == "" {
+		t.Skip("JSAPI_SNAPSHOT not set")
+	}
+	b, err := os.ReadFile(list)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var depths []int
+	overCount := 0
+	for _, f := range strings.Fields(string(b)) {
+		src, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("%s: %v", f, err)
+		}
+		d, over := maxNesting(src, maxEsbuildNesting)
+		depths = append(depths, d)
+		if over {
+			overCount++
+		}
+	}
+	sort.Ints(depths)
+	if len(depths) > 0 {
+		p99 := depths[len(depths)*99/100]
+		t.Logf("corpus files=%d p99=%d max=%d over(%d)=%d", len(depths), p99, depths[len(depths)-1], maxEsbuildNesting, overCount)
+	}
+	if overCount > 0 {
+		t.Fatalf("%d corpus script(s) exceeded maxEsbuildNesting=%d", overCount, maxEsbuildNesting)
+	}
 }

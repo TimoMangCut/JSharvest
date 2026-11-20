@@ -337,11 +337,17 @@ var envKeyRe = regexp.MustCompile(`^(?:VITE|NEXT_PUBLIC|REACT_APP|VUE_APP|NUXT|P
 func Extract(src []byte) Result {
 	r := extractWithMap(src, nil, nil, false)
 	if strings.HasPrefix(r.Error, "parse") {
-		if code, lm, ok := transformJSLower(src); ok {
+		if strings.Contains(r.Error, "too many nested") {
+			return Result{Version: Version, Error: nestingSkipError()}
+		}
+		var st transformState
+		if code, lm, ok := transformJSLowerState(src, &st); ok {
 			if r2 := extractWithMap(code, src, lm, false); !strings.HasPrefix(r2.Error, "parse") {
 				r2.ASTLowered = true
 				return r2
 			}
+		} else if st.overDepth {
+			return Result{Version: Version, Error: nestingSkipError()}
 		}
 	}
 	return r

@@ -16,19 +16,28 @@ import (
 // direct Extract fast path with zero preprocessing overhead; esbuild's pure-Go
 // transform only runs when SFC masking or TypeScript/JSX syntax requires it.
 func ExtractSource(src []byte, hint string) Result {
+	var st transformState
 	if masked, spans, preferTSX, hasLangTS, ok := maskSFC(src, hint); ok {
 		if !hasLangTS && !preferTSX {
 			r := extractWithMap(masked, src, nil, false)
 			if !strings.HasPrefix(r.Error, "parse") {
 				return r
 			}
+			if strings.Contains(r.Error, "too many nested") {
+				st.markOverDepth()
+				return Result{Version: Version, Error: nestingSkipError()}
+			}
 		}
-		if code, lm, tok := transformTS(masked, hint, preferTSX); tok {
+		if code, lm, tok := transformTSState(masked, hint, preferTSX, &st); tok {
 			r := extractWithMap(code, src, lm, false)
 			if !strings.HasPrefix(r.Error, "parse") {
 				return r
 			}
-			if lcode, llm, lok := transformTSWithSupported(masked, hint, preferTSX, arrowLowered); lok {
+			if strings.Contains(r.Error, "too many nested") {
+				st.markOverDepth()
+				return Result{Version: Version, Error: nestingSkipError()}
+			}
+			if lcode, llm, lok := transformTSWithSupportedState(masked, hint, preferTSX, arrowLowered, &st); lok {
 				if r2 := extractWithMap(lcode, src, llm, false); !strings.HasPrefix(r2.Error, "parse") {
 					r2.ASTLowered = true
 					return r2
@@ -36,24 +45,34 @@ func ExtractSource(src []byte, hint string) Result {
 			}
 			return r
 		}
+		if st.overDepth {
+			return Result{Version: Version, Error: nestingSkipError()}
+		}
 		// Dual <script> + <script setup> blocks in a .vue SFC can both
 		// import the same identifier; transform each block separately while
 		// preserving original .vue line numbers.
 		if len(spans) > 1 {
-			if merged, mok := extractSFCSpans(src, spans, hint, preferTSX); mok {
+			if merged, mok := extractSFCSpans(src, spans, hint, preferTSX, &st); mok {
 				return merged
+			}
+			if st.overDepth {
+				return Result{Version: Version, Error: nestingSkipError()}
 			}
 		}
 		return extractWithMap(masked, src, nil, false)
 	}
 	switch hintExt(hint) {
 	case ".ts", ".tsx", ".mts", ".cts":
-		if code, lm, ok := transformTS(src, hint, false); ok {
+		if code, lm, ok := transformTSState(src, hint, false, &st); ok {
 			r := extractWithMap(code, src, lm, false)
 			if !strings.HasPrefix(r.Error, "parse") {
 				return r
 			}
-			if lcode, llm, lok := transformTSWithSupported(src, hint, false, arrowLowered); lok {
+			if strings.Contains(r.Error, "too many nested") {
+				st.markOverDepth()
+				return Result{Version: Version, Error: nestingSkipError()}
+			}
+			if lcode, llm, lok := transformTSWithSupportedState(src, hint, false, arrowLowered, &st); lok {
 				if r2 := extractWithMap(lcode, src, llm, false); !strings.HasPrefix(r2.Error, "parse") {
 					r2.ASTLowered = true
 					return r2
@@ -61,23 +80,37 @@ func ExtractSource(src []byte, hint string) Result {
 			}
 			return r
 		}
+		if st.overDepth {
+			return Result{Version: Version, Error: nestingSkipError()}
+		}
 	}
 	r := extractWithMap(src, nil, nil, false)
 	if !strings.HasPrefix(r.Error, "parse") {
 		return r
 	}
-	if code, lm, ok := transformJSLower(src); ok {
+	if strings.Contains(r.Error, "too many nested") {
+		st.markOverDepth()
+		return Result{Version: Version, Error: nestingSkipError()}
+	}
+	if code, lm, ok := transformJSLowerState(src, &st); ok {
 		if r2 := extractWithMap(code, src, lm, false); !strings.HasPrefix(r2.Error, "parse") {
 			r2.ASTLowered = true
 			return r2
 		}
 	}
-	if code, lm, ok := transformTS(src, hint, false); ok {
+	if st.overDepth {
+		return Result{Version: Version, Error: nestingSkipError()}
+	}
+	if code, lm, ok := transformTSState(src, hint, false, &st); ok {
 		r2 := extractWithMap(code, src, lm, false)
 		if !strings.HasPrefix(r2.Error, "parse") {
 			return r2
 		}
-		if lcode, llm, lok := transformTSWithSupported(src, hint, false, arrowLowered); lok {
+		if strings.Contains(r2.Error, "too many nested") {
+			st.markOverDepth()
+			return Result{Version: Version, Error: nestingSkipError()}
+		}
+		if lcode, llm, lok := transformTSWithSupportedState(src, hint, false, arrowLowered, &st); lok {
 			if r3 := extractWithMap(lcode, src, llm, false); !strings.HasPrefix(r3.Error, "parse") {
 				r3.ASTLowered = true
 				return r3
@@ -85,10 +118,13 @@ func ExtractSource(src []byte, hint string) Result {
 		}
 		return r2
 	}
+	if st.overDepth {
+		return Result{Version: Version, Error: nestingSkipError()}
+	}
 	return r
 }
 
-func extractSFCSpans(src []byte, spans [][2]int, hint string, preferTSX bool) (Result, bool) {
+func extractSFCSpans(src []byte, spans [][2]int, hint string, preferTSX bool, st *transformState) (Result, bool) {
 	out := Result{Version: Version}
 	anyOK := false
 	buf := make([]byte, len(src))
@@ -103,13 +139,28 @@ func extractSFCSpans(src []byte, spans [][2]int, hint string, preferTSX bool) (R
 		copy(buf[sp[0]:sp[1]], src[sp[0]:sp[1]])
 		r := extractWithMap(buf, src, nil, false)
 		if strings.HasPrefix(r.Error, "parse") {
-			code, lm, ok := transformTS(buf, hint, preferTSX)
+			if strings.Contains(r.Error, "too many nested") {
+				if st != nil {
+					st.markOverDepth()
+				}
+				return Result{}, false
+			}
+			code, lm, ok := transformTSState(buf, hint, preferTSX, st)
 			if !ok {
+				if st != nil && st.overDepth {
+					return Result{}, false
+				}
 				continue
 			}
 			r = extractWithMap(code, src, lm, false)
 			if strings.HasPrefix(r.Error, "parse") {
-				if lcode, llm, lok := transformTSWithSupported(buf, hint, preferTSX, arrowLowered); lok {
+				if strings.Contains(r.Error, "too many nested") {
+					if st != nil {
+						st.markOverDepth()
+					}
+					return Result{}, false
+				}
+				if lcode, llm, lok := transformTSWithSupportedState(buf, hint, preferTSX, arrowLowered, st); lok {
 					if r2 := extractWithMap(lcode, src, llm, false); !strings.HasPrefix(r2.Error, "parse") {
 						r2.ASTLowered = true
 						r = r2
@@ -434,11 +485,37 @@ const legacyDecoratorsTSConfig = `{"compilerOptions":{"experimentalDecorators":t
 
 var arrowLowered = map[string]bool{"arrow": false}
 
+type transformState struct {
+	depthChecked bool
+	overDepth    bool
+}
+
+func (st *transformState) markOverDepth() {
+	st.depthChecked = true
+	st.overDepth = true
+}
+
+func allowTransformDepth(src []byte, st *transformState) bool {
+	if st == nil {
+		_, over := maxNesting(src, maxEsbuildNesting)
+		return !over
+	}
+	if !st.depthChecked {
+		_, st.overDepth = maxNesting(src, maxEsbuildNesting)
+		st.depthChecked = true
+	}
+	return !st.overDepth
+}
+
 // transformJSLower lowers arrow functions in valid standard JavaScript (not
 // TypeScript/JSX) when tdewolff/parse fails on ES2015+ cover-grammar edge
 // cases such as `({ a: b = 1 } = { a: 1 }) => b`.
 func transformJSLower(src []byte) ([]byte, *esbuildLineMap, bool) {
-	if len(src) == 0 || looksLikeHTMLDoc(src) {
+	return transformJSLowerState(src, nil)
+}
+
+func transformJSLowerState(src []byte, st *transformState) ([]byte, *esbuildLineMap, bool) {
+	if len(src) == 0 || looksLikeHTMLDoc(src) || !allowTransformDepth(src, st) {
 		return nil, nil, false
 	}
 	res := api.Transform(string(src), api.TransformOptions{
@@ -461,11 +538,19 @@ func transformJSLower(src []byte) ([]byte, *esbuildLineMap, bool) {
 // Transform API without tree-shaking or minifying, returning the generated JS
 // and a decoded SourceMap v3 line mapper back to src.
 func transformTS(src []byte, hint string, preferTSX bool) ([]byte, *esbuildLineMap, bool) {
-	return transformTSWithSupported(src, hint, preferTSX, nil)
+	return transformTSWithSupportedState(src, hint, preferTSX, nil, nil)
+}
+
+func transformTSState(src []byte, hint string, preferTSX bool, st *transformState) ([]byte, *esbuildLineMap, bool) {
+	return transformTSWithSupportedState(src, hint, preferTSX, nil, st)
 }
 
 func transformTSWithSupported(src []byte, hint string, preferTSX bool, supported map[string]bool) ([]byte, *esbuildLineMap, bool) {
-	if len(src) == 0 || looksLikeHTMLDoc(src) {
+	return transformTSWithSupportedState(src, hint, preferTSX, supported, nil)
+}
+
+func transformTSWithSupportedState(src []byte, hint string, preferTSX bool, supported map[string]bool, st *transformState) ([]byte, *esbuildLineMap, bool) {
+	if len(src) == 0 || looksLikeHTMLDoc(src) || !allowTransformDepth(src, st) {
 		return nil, nil, false
 	}
 	ext := hintExt(hint)
