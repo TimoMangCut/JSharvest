@@ -364,12 +364,13 @@ func TestSaaSDomainsDoNotStarveSpecProbeSlots(t *testing.T) {
 
 	var sc SpecCollector
 	sc.AddScript(r, "https://portal.example.test/", "https://portal.example.test/app.js")
-	// R40-B1: out-of-scope hosts do not multiply sub-path Bases or Services.
-	if scopedPlan := sc.Plan("https://portal.example.test", inScope); len(scopedPlan.Bases) != 0 || len(scopedPlan.Services) != 0 {
-		t.Fatalf("SpecCollector.Plan with inScope should exclude out-of-scope bases/services, got %+v", scopedPlan)
+	// R40-B1: hosts outside -scope keep only the bases the code names
+	// itself (an API Gateway stage, a worker's /v1), never a microservice
+	// prefix under them; SaaS noise stays out.
+	plan := sc.Plan("https://portal.example.test", inScope)
+	if len(plan.Services) != 0 {
+		t.Fatalf("out-of-scope bases multiplied into Services: %+v", plan.Services)
 	}
-	// When scope allows those cloud APIs (inScope=nil), SaaS noise is still excluded.
-	plan := sc.Plan("https://portal.example.test", nil)
 	wantBases := []string{
 		"https://abc123.execute-api.us-east-1.amazonaws.com/prod",
 		"https://api.my-org.workers.dev/v1",

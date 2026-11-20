@@ -165,16 +165,16 @@ type Page struct {
 type Stats struct {
 	// UserAgent is the one the crawl presented (round 25L): what an
 	// escalation to Chrome presents too.
-	UserAgent  string         `json:"user_agent,omitempty"`
-	Requests   int            `json:"requests"`
-	Pages      int            `json:"pages"`
-	Scripts    int            `json:"scripts"`
-	Inline     int            `json:"inline"`
-	Found      map[string]int `json:"found"`  // scripts by how they were found
+	UserAgent      string         `json:"user_agent,omitempty"`
+	Requests       int            `json:"requests"`
+	Pages          int            `json:"pages"`
+	Scripts        int            `json:"scripts"`
+	Inline         int            `json:"inline"`
+	Found          map[string]int `json:"found"`                      // scripts by how they were found
 	Probes         map[string]int `json:"probes"`                     // well-known file -> status
 	SoftProbes     []string       `json:"soft_probes,omitempty"`      // Probes keys whose 2xx response was a soft-200 SPA/HTML fallback
 	SoftProbesMore int            `json:"soft_probes_more,omitempty"` // soft-200 probes beyond SoftProbes cap
-	SourceMaps int            `json:"source_maps,omitempty"`
+	SourceMaps     int            `json:"source_maps,omitempty"`
 	// MapGuessesHeld: <script>.map guesses not made, their origin having
 	// missed sourcemap.GuessMisses with no map found.
 	MapGuessesHeld int            `json:"map_guesses_held,omitempty"`

@@ -35,7 +35,8 @@
   - [specprobe.go](../internal/frontier/specprobe.go): `SpecCollector.Plan` lọc `inScope` trong cả `noteBase` và `addSvc` — không bao giờ sinh `plan.Bases` hay `plan.Services` cho host ngoài scope.
   - [crawl.go](../internal/httpcrawl/crawl.go) & [engine/specprobe.go](../internal/engine/specprobe.go): chỉ chạy `OriginSpecPaths` khi `inScope(host)` là `true` trên cả HTTP lẫn CDP engine.
   - Vẫn bảo toàn quyết định `D2`: API cross-origin sạch (ngoài `nonAPIInfraDomains`) vẫn được probe gốc nhẹ bằng `SpecPaths`.
-  - **Đánh đổi với `-scope fqdn`:** chạy trên `www.example.test` với `-scope fqdn` thì gateway anh em `api.example.test` nằm ngoài scope, chỉ còn probe gốc D2 (muốn probe đủ sub-path/service hãy chạy `-scope rdn`).
+  - **Host ngoài scope (sửa sau review, 40.1):** chỉ nhận `SpecPaths` ở gốc (D2) và ở tối đa `MaxOutOfScopeSpecBasesPerOrigin = 2` base **do chính code đặt tên** (`Result.Bases`, `explicit`); không base suy ra từ path endpoint, không `OriginSpecPaths`, không tiền tố microservice (`addSvc` vẫn khoá `inScope`). Lý do: bản đầu khoá cứng `plan.Bases` theo `inScope` làm mất probe stage của API Gateway (`https://<id>.execute-api.<region>.amazonaws.com/prod`) và `/v1` của `workers.dev`, vốn nằm ngoài scope nhưng là API của chính ứng dụng (test `TestSaaSDomainsDoNotStarveSpecProbeSlots` đã bị nới sang `Plan(..., nil)` và che mất hồi quy; nay khôi phục với `inScope`). IdP/SDK công cộng vẫn bị `isStaticOrNonAPIHost` loại trước.
+  - **Đánh đổi với `-scope fqdn`:** chạy trên `www.example.test` với `-scope fqdn` thì gateway anh em `api.example.test` nằm ngoài scope: chỉ còn probe gốc và base được đặt tên, không probe service (muốn probe đủ hãy chạy `-scope rdn`).
 - **Lớp chặn phụ (Hạ tầng công cộng):** mở rộng `nonAPIInfraDomains` trong [queue.go](../internal/frontier/queue.go) (dùng bởi `isStaticOrNonAPIHost`) thêm các host IdP/cloud SDK (`microsoftonline.*`, `chinacloudapi.cn`, `graph.microsoft.com`, `live.com`...), bản đồ/tile (`openstreetmap.org`, `maplibre.org`, `googleapis.com`...), tài liệu/schema XML (`reactrouter.com`, `adobe.com`, `xfa.org`...).
 - **Kiểm chứng:** [frontier/round40_test.go](../internal/frontier/round40_test.go), [httpcrawl/round40_test.go](../internal/httpcrawl/round40_test.go), [engine/round40_test.go](../internal/engine/round40_test.go).
 
@@ -46,6 +47,7 @@
 - [verify/draft.go](../internal/verify/draft.go):
   - `verify.Inputs` thêm `SPAOrigins []string`, nạp tùy chọn từ `run.json` (`http.spa_origins`) trong `Load()`.
   - Trong `draftOfWithLangs` nhánh `case l.Origin != ""`: nếu là lời gọi API (`client`, `wrapper`, `fetch`, `xhr`, `options`), `l.Origin` thuộc `SPAOrigins`, và có base tuyệt đối `inScope` khác origin (`decoupledSPABases`, trần `maxDecoupledSPABases = 8`), mở rộng thành `d.Candidates` theo thứ tự `[l.Origin, extBases...]`.
+  - **Dòng đã quan sát trên chính origin SPA (sửa sau review, 40.1):** nếu `l.Samples` có request cùng dạng trên `l.Origin`, giữ một target duy nhất cùng giá trị của sample (bằng chứng route nằm ở origin SPA); bản đầu tách thành ứng viên và điền giá trị giả thay cho sample thật.
   - **Tự thích nghi theo bằng chứng `verify`:** reverse-proxy SPA giữ nguyên `VerifiedBase = l.Origin` (không bị host API trả 404 riêng chiếm trước); decoupled SPA cắt tỉa `l.Origin` sau 16 path chết (`specBasePruneAfter`) để các draft sau đi thẳng tới API host.
 - **Kiểm chứng:** 3 test trong [verify/round40_test.go](../internal/verify/round40_test.go); `verify-check.sh` & `crosscheck-check.sh` PASS.
 

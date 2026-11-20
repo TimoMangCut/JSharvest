@@ -25,6 +25,11 @@ const (
 	MaxServiceDocPrefixes = 0
 	// MaxPhase2SpecProbes caps total Phase-2 GET requests across a crawl (0: unlimited).
 	MaxPhase2SpecProbes = 0
+	// MaxOutOfScopeSpecBasesPerOrigin bounds the bases of one host outside
+	// -scope that Phase 2 asks SpecPaths of (round 40, B1): only bases the
+	// app's code names itself (an API Gateway stage, /prod; a worker's /v1),
+	// never derived gateways nor microservice prefixes.
+	MaxOutOfScopeSpecBasesPerOrigin = 2
 )
 
 // ServiceDocPaths are the canonical microservice OpenAPI paths probed on
@@ -369,15 +374,24 @@ func (sc *SpecCollector) Plan(seedOrigin string, inScope func(string) bool) Spec
 		return err == nil && u != nil && u.Hostname() != "" && inScope(u.Hostname())
 	}
 
+	// A host outside -scope gets no sub-path multiplication (round 40, B1):
+	// only a base the code names itself (Result.Bases, explicit) is asked
+	// of, at most MaxOutOfScopeSpecBasesPerOrigin of a host, and never a
+	// microservice prefix under it (addSvc). Third-party SDK/IdP/map hosts
+	// are dropped earlier by normalizeSpecBase (isStaticOrNonAPIHost).
 	baseMap := map[string]*baseStat{}
 	noteBase := func(raw, defOrigin string, explicit bool) {
 		norm, orig, bp, ok := normalizeSpecBase(raw, defOrigin)
-		if !ok || bp == "" || !urlInScope(norm) {
+		if !ok || bp == "" {
 			return
 		}
+		inS := urlInScope(norm)
 		st := baseMap[norm]
 		if st == nil {
-			st = &baseStat{url: norm, origin: orig, path: bp, explicit: explicit, inScope: true}
+			if !inS && !explicit {
+				return
+			}
+			st = &baseStat{url: norm, origin: orig, path: bp, explicit: explicit, inScope: inS}
 			baseMap[norm] = st
 		}
 		if explicit {
@@ -449,9 +463,16 @@ func (sc *SpecCollector) Plan(seedOrigin string, inScope func(string) bool) Spec
 
 	var plan SpecProbePlan
 	var keptBases []*baseStat
+	outOfScope := map[string]int{}
 	for _, st := range allBases {
 		if MaxSpecBases > 0 && len(plan.Bases) >= MaxSpecBases {
 			break
+		}
+		if !st.inScope {
+			if !st.explicit || outOfScope[st.origin] >= MaxOutOfScopeSpecBasesPerOrigin {
+				continue
+			}
+			outOfScope[st.origin]++
 		}
 		plan.Bases = append(plan.Bases, st.url)
 		keptBases = append(keptBases, st)

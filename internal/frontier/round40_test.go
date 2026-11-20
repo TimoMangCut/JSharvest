@@ -65,8 +65,10 @@ func TestRound40SpecProbeBlocksThirdPartySDKAndOutOfScopePlan(t *testing.T) {
 	sc.AddScript(r, "https://www.example.test/", "https://www.example.test/app.js")
 	plan := sc.Plan("https://www.example.test", rdnScope)
 
-	if !slices.Equal(plan.Bases, []string{"https://api.example.test/gw"}) {
-		t.Fatalf("rdn plan.Bases = %v, want [https://api.example.test/gw]", plan.Bases)
+	// The partner's own named base is asked of (D2 at the base the code
+	// names, round 40 B1), but nothing is derived under it.
+	if !slices.Equal(plan.Bases, []string{"https://api.example.test/gw", "https://api-partner.example.net/gw"}) {
+		t.Fatalf("rdn plan.Bases = %v, want [https://api.example.test/gw https://api-partner.example.net/gw]", plan.Bases)
 	}
 	for _, svc := range plan.Services {
 		if strings.Contains(svc.PrefixURL, "api-partner.example.net") || strings.Contains(svc.PrefixURL, "microsoftonline") {
@@ -87,7 +89,44 @@ func TestRound40SpecProbeBlocksThirdPartySDKAndOutOfScopePlan(t *testing.T) {
 		t.Fatal(err)
 	}
 	fqdnPlan := sc.Plan("https://www.example.test", fqdnScope)
-	if len(fqdnPlan.Bases) != 0 || len(fqdnPlan.Services) != 0 {
-		t.Fatalf("fqdn plan should not multiply sibling gateway bases/services, got bases=%v services=%+v", fqdnPlan.Bases, fqdnPlan.Services)
+	if !slices.Equal(fqdnPlan.Bases, []string{"https://api-partner.example.net/gw", "https://api.example.test/gw"}) || len(fqdnPlan.Services) != 0 {
+		t.Fatalf("fqdn plan: want only the named bases, no services; got bases=%v services=%+v", fqdnPlan.Bases, fqdnPlan.Services)
+	}
+}
+
+// R40-B1: a host outside -scope gets at most MaxOutOfScopeSpecBasesPerOrigin
+// of the bases the code names, and none it derives (a gateway prefix seen
+// only in endpoint paths).
+func TestRound40OutOfScopeBasesCappedAndExplicitOnly(t *testing.T) {
+	r := jsapi.Result{
+		Bases: []string{
+			"https://edge.partner.example.net/a",
+			"https://edge.partner.example.net/b",
+			"https://edge.partner.example.net/c",
+		},
+		Endpoints: []jsapi.Endpoint{
+			// Implicit gateway /api-gateway/<svc>/v1 on another out-of-scope host.
+			{Method: "GET", URL: "https://gw.other.example.org/api-gateway/users/v1/me", Kind: "fetch"},
+			{Method: "GET", URL: "https://gw.other.example.org/api-gateway/orders/v1/list", Kind: "fetch"},
+		},
+	}
+	inScope := func(h string) bool { return h == "www.example.test" }
+	var sc SpecCollector
+	sc.AddScript(r, "https://www.example.test/", "https://www.example.test/app.js")
+	plan := sc.Plan("https://www.example.test", inScope)
+	n := 0
+	for _, b := range plan.Bases {
+		if strings.Contains(b, "edge.partner.example.net") {
+			n++
+		}
+		if strings.Contains(b, "gw.other.example.org") {
+			t.Fatalf("derived out-of-scope gateway in plan.Bases: %v", plan.Bases)
+		}
+	}
+	if n != MaxOutOfScopeSpecBasesPerOrigin {
+		t.Fatalf("out-of-scope named bases kept %d, want %d: %v", n, MaxOutOfScopeSpecBasesPerOrigin, plan.Bases)
+	}
+	if len(plan.Services) != 0 {
+		t.Fatalf("out-of-scope services: %+v", plan.Services)
 	}
 }

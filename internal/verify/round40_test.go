@@ -221,3 +221,32 @@ func TestRound40SPAOriginPrunedAfter16DeadPaths(t *testing.T) {
 		t.Fatalf("API host received %d draft probes, want 20", got)
 	}
 }
+
+// R40-A3: a line the traffic saw on the SPA origin keeps that one target and
+// the sample's values; it is not spread over the external bases.
+func TestRound40ObservedOnSPAOriginKeepsSampleTarget(t *testing.T) {
+	spa := "https://portal.example.test"
+	in := Inputs{
+		Catalog: []endpoints.Endpoint{
+			{Method: "GET", Origin: spa, Path: "/api/orders/{}", Kind: "wrapper", Confidence: "code",
+				Observed: &endpoints.Observed{Requests: 1, Samples: []string{spa + "/api/orders/4711"}}},
+			{Method: "GET", Origin: spa, Path: "/api/items/{}", Kind: "wrapper", Confidence: "code"},
+		},
+		Intel:      endpoints.Intel{Bases: []string{"https://api.example.test"}},
+		SPAOrigins: []string{spa},
+		InScope:    func(string) bool { return true },
+	}
+	byPath := map[string]Draft{}
+	for _, d := range Drafts(in) {
+		byPath[d.Path] = d
+	}
+	seen := byPath["/api/orders/{}"]
+	if seen.URL != spa+"/api/orders/4711" || len(seen.Candidates) != 0 {
+		t.Fatalf("observed line: URL %q candidates %v, want the sample on the SPA origin", seen.URL, seen.Candidates)
+	}
+	unseen := byPath["/api/items/{}"]
+	if unseen.URL != "" || len(unseen.Candidates) != 2 || !strings.HasPrefix(unseen.Candidates[0], spa) ||
+		!strings.HasPrefix(unseen.Candidates[1], "https://api.example.test") {
+		t.Fatalf("unobserved line: URL %q candidates %v, want [SPA origin, API base]", unseen.URL, unseen.Candidates)
+	}
+}

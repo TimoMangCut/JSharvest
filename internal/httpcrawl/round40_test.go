@@ -84,8 +84,15 @@ func TestRound40SpecProbeScopeAndThirdPartyBlocking(t *testing.T) {
 		return out
 	}
 
-	// 1. -scope rdn: 0 requests to SDK/IdP/map; partner gets root SpecPaths only (no OriginSpecPaths, no /gw/*);
-	// sibling api.example.test (inScope) gets OriginSpecPaths + /gw/* + /gw/auth/*.
+	// outOfScopeOK: what a host outside -scope may be asked: SpecPaths at its
+	// root (D2) and at the base the code names (/gw), never OriginSpecPaths
+	// nor a microservice prefix under the base (/gw/billing/...).
+	outOfScopeOK := func(p string) bool {
+		return slices.Contains(frontier.SpecPaths, p) || slices.Contains(frontier.SpecPaths, strings.TrimPrefix(p, "/gw"))
+	}
+
+	// 1. -scope rdn: 0 requests to SDK/IdP/map; partner gets SpecPaths at its root and its named base
+	// only; sibling api.example.test (inScope) gets OriginSpecPaths + /gw/* + /gw/auth/*.
 	rdnHits := runCase(t, "rdn")
 	for _, blocked := range []string{"login.microsoftonline.com", "nominatim.openstreetmap.org", "reactrouter.com"} {
 		if len(rdnHits[blocked]) > 0 {
@@ -96,9 +103,12 @@ func TestRound40SpecProbeScopeAndThirdPartyBlocking(t *testing.T) {
 	if !slices.Contains(partnerHits, "/openapi.json") {
 		t.Fatalf("expected D2 root SpecPaths probe on clean partner host, got %v", partnerHits)
 	}
+	if !slices.Contains(partnerHits, "/gw/openapi.json") {
+		t.Fatalf("expected SpecPaths at the partner's named base /gw, got %v", partnerHits)
+	}
 	for _, p := range partnerHits {
-		if strings.HasPrefix(p, "/gw/") || slices.Contains(frontier.OriginSpecPaths, p) {
-			t.Fatalf("out-of-scope partner host received OriginSpecPaths or sub-path probe %q (all=%v)", p, partnerHits)
+		if !outOfScopeOK(p) {
+			t.Fatalf("out-of-scope partner host received %q: not SpecPaths at its root or named base (all=%v)", p, partnerHits)
 		}
 	}
 	sibRDN := rdnHits["api.example.test"]
@@ -109,15 +119,16 @@ func TestRound40SpecProbeScopeAndThirdPartyBlocking(t *testing.T) {
 		t.Fatalf("in-scope sibling in rdn mode should receive sub-path and service probes, got %v", sibRDN)
 	}
 
-	// 2. -scope fqdn: sibling api.example.test is out of scope -> root SpecPaths only (D2), no OriginSpecPaths or /gw/*.
+	// 2. -scope fqdn: sibling api.example.test is out of scope -> SpecPaths at its root (D2) and named base
+	// /gw only, no OriginSpecPaths nor service prefixes (/gw/auth/...).
 	fqdnHits := runCase(t, "fqdn")
 	sibFQDN := fqdnHits["api.example.test"]
 	if !slices.Contains(sibFQDN, "/openapi.json") {
 		t.Fatalf("fqdn mode sibling should still receive root D2 SpecPaths, got %v", sibFQDN)
 	}
 	for _, p := range sibFQDN {
-		if strings.HasPrefix(p, "/gw/") || slices.Contains(frontier.OriginSpecPaths, p) {
-			t.Fatalf("fqdn mode sibling should NOT receive OriginSpecPaths or sub-path probe %q (all=%v)", p, sibFQDN)
+		if !outOfScopeOK(p) {
+			t.Fatalf("fqdn mode sibling received %q: not SpecPaths at its root or named base (all=%v)", p, sibFQDN)
 		}
 	}
 }

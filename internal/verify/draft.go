@@ -677,7 +677,10 @@ func draftOfWithLangs(l line, source string, bases []string, in Inputs, originLa
 		target = join(hostOriginFor(l.Host, l.Samples, in.Intel.Bases, l.Static), l.Path)
 	case l.Origin != "":
 		orig := strings.TrimRight(l.Origin, "/")
-		if !l.ThirdParty && isAPICallKind(l.Kind) && isSPAOrigin(orig, in.SPAOrigins) {
+		// A request seen on the SPA origin itself is evidence the route
+		// lives there (a reverse proxy): one target, its sample's values.
+		seenHere := slices.ContainsFunc(l.Samples, func(s string) bool { return sameShape(s, orig+l.Path) })
+		if !l.ThirdParty && !seenHere && isAPICallKind(l.Kind) && isSPAOrigin(orig, in.SPAOrigins) {
 			if extBases := decoupledSPABases(orig, bases); len(extBases) > 0 {
 				// R40-A3: keep SPA origin first so reverse-proxy SPA routes lock onto
 				// their own origin, while decoupled SPAs prune orig after 16 dead paths
