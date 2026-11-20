@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"path"
@@ -263,6 +264,27 @@ type extractCall struct {
 	res   jsapi.Result
 }
 
+func parseWatchdogDuration() time.Duration {
+	if s := strings.TrimSpace(os.Getenv("JSHARVEST_PARSE_WATCHDOG")); s != "" {
+		if d, err := time.ParseDuration(s); err == nil && d > 0 {
+			return d
+		}
+	}
+	return 0
+}
+
+func startParseWatchdog(src []byte, hint string) func() {
+	wd := parseWatchdogDuration()
+	if wd <= 0 {
+		return func() {}
+	}
+	t := time.AfterFunc(wd, func() {
+		sum := sha256.Sum256(src)
+		slog.Warn("static parse exceeded JSHARVEST_PARSE_WATCHDOG", "threshold", wd, "bytes", len(src), "sha256", hex.EncodeToString(sum[:]))
+	})
+	return func() { t.Stop() }
+}
+
 func extractJS(src []byte, hint string, heavySem chan struct{}) jsapi.Result {
 	// Clip slice capacity so tdewolff/parse/v2.NewInputBytes (which appends a
 	// NUL sentinel byte) never mutates a shared backing array across workers.
@@ -278,6 +300,8 @@ func extractJS(src []byte, hint string, heavySem chan struct{}) jsapi.Result {
 		if fn := testExtractHook.Load(); fn != nil {
 			(*fn)()
 		}
+		stopWD := startParseWatchdog(src, hint)
+		defer stopWD()
 		res := jsapi.ExtractLoose(src)
 		res.LooseFallback = true
 		res.ParseError = fmt.Sprintf("oversize_ast_bypass: %d bytes", len(src))
@@ -290,6 +314,8 @@ func extractJS(src []byte, hint string, heavySem chan struct{}) jsapi.Result {
 	if fn := testExtractHook.Load(); fn != nil {
 		(*fn)()
 	}
+	stopWD := startParseWatchdog(src, hint)
+	defer stopWD()
 	res := jsapi.ExtractSource(src, hint)
 	if strings.HasPrefix(res.Error, "parse") {
 		parseErr := res.Error

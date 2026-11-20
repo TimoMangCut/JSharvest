@@ -1,10 +1,32 @@
 package endpoints
 
 import (
+	"bytes"
+	"log/slog"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/TimoMangCut/JSharvest/internal/jsapi"
 )
+
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
 
 func TestRound41SummarizeScriptsCountsLooseTruncated(t *testing.T) {
 	scripts := []Script{
@@ -32,5 +54,30 @@ func TestRound41SummarizeScriptsCountsLooseTruncated(t *testing.T) {
 	}
 	if st.LooseTruncated != 3 {
 		t.Fatalf("LooseTruncated=%d, want 3 (oversize + source + bundle)", st.LooseTruncated)
+	}
+}
+
+func TestRound41ParseWatchdogWarnsWithoutChangingResult(t *testing.T) {
+	t.Setenv("JSHARVEST_PARSE_WATCHDOG", "10ms")
+	var logBuf syncBuffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+	defer slog.SetDefault(prev)
+
+	// Build an input slow enough (>10ms) without exceeding limits.
+	slow := bytes.Repeat([]byte("fetch(\"/api/v1/items\");\n"), 8000)
+	stop := startParseWatchdog(slow, "slow.js")
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && !strings.Contains(logBuf.String(), "JSHARVEST_PARSE_WATCHDOG") {
+		time.Sleep(5 * time.Millisecond)
+	}
+	stop()
+
+	res := extractJS([]byte(`fetch("/api/v1/ok")`), "ok.js", nil)
+	if len(res.Endpoints) != 1 || res.Endpoints[0].URL != "/api/v1/ok" {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+	if !strings.Contains(logBuf.String(), "JSHARVEST_PARSE_WATCHDOG") {
+		t.Fatalf("expected watchdog warning in log, got %q", logBuf.String())
 	}
 }

@@ -6,17 +6,22 @@ import (
 	"path"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"unicode/utf8"
 
 	"github.com/evanw/esbuild/pkg/api"
 )
+
+const maxSFCSpans = 4
+
+var testTransformHook atomic.Pointer[func()]
 
 // ExtractSource extracts API endpoints from a script or original source file
 // (TypeScript, TSX/JSX, Vue/Svelte SFC). Plain valid JavaScript runs on the
 // direct Extract fast path with zero preprocessing overhead; esbuild's pure-Go
 // transform only runs when SFC masking or TypeScript/JSX syntax requires it.
 func ExtractSource(src []byte, hint string) Result {
-	var st transformState
+	st := transformState{hasBudget: true, budget: fallbackBudget(len(src), hint)}
 	if masked, spans, preferTSX, hasLangTS, ok := maskSFC(src, hint); ok {
 		if !hasLangTS && !preferTSX {
 			r := extractWithMap(masked, src, nil, false)
@@ -61,8 +66,10 @@ func ExtractSource(src []byte, hint string) Result {
 		}
 		return extractWithMap(masked, src, nil, false)
 	}
+	tsTried := false
 	switch hintExt(hint) {
 	case ".ts", ".tsx", ".mts", ".cts":
+		tsTried = true
 		if code, lm, ok := transformTSState(src, hint, false, &st); ok {
 			r := extractWithMap(code, src, lm, false)
 			if !strings.HasPrefix(r.Error, "parse") {
@@ -101,42 +108,62 @@ func ExtractSource(src []byte, hint string) Result {
 	if st.overDepth {
 		return Result{Version: Version, Error: nestingSkipError()}
 	}
-	if code, lm, ok := transformTSState(src, hint, false, &st); ok {
-		r2 := extractWithMap(code, src, lm, false)
-		if !strings.HasPrefix(r2.Error, "parse") {
+	if !tsTried {
+		if code, lm, ok := transformTSState(src, hint, false, &st); ok {
+			r2 := extractWithMap(code, src, lm, false)
+			if !strings.HasPrefix(r2.Error, "parse") {
+				return r2
+			}
+			if strings.Contains(r2.Error, "too many nested") {
+				st.markOverDepth()
+				return Result{Version: Version, Error: nestingSkipError()}
+			}
+			if lcode, llm, lok := transformTSWithSupportedState(src, hint, false, arrowLowered, &st); lok {
+				if r3 := extractWithMap(lcode, src, llm, false); !strings.HasPrefix(r3.Error, "parse") {
+					r3.ASTLowered = true
+					return r3
+				}
+			}
 			return r2
 		}
-		if strings.Contains(r2.Error, "too many nested") {
-			st.markOverDepth()
+		if st.overDepth {
 			return Result{Version: Version, Error: nestingSkipError()}
 		}
-		if lcode, llm, lok := transformTSWithSupportedState(src, hint, false, arrowLowered, &st); lok {
-			if r3 := extractWithMap(lcode, src, llm, false); !strings.HasPrefix(r3.Error, "parse") {
-				r3.ASTLowered = true
-				return r3
-			}
-		}
-		return r2
-	}
-	if st.overDepth {
-		return Result{Version: Version, Error: nestingSkipError()}
 	}
 	return r
 }
 
 func extractSFCSpans(src []byte, spans [][2]int, hint string, preferTSX bool, st *transformState) (Result, bool) {
+	if len(spans) > maxSFCSpans {
+		spans = spans[:maxSFCSpans]
+	}
 	out := Result{Version: Version}
 	anyOK := false
 	buf := make([]byte, len(src))
-	for _, sp := range spans {
-		for i, c := range src {
-			if c == '\n' {
+	for i, c := range src {
+		if c == '\n' {
+			buf[i] = '\n'
+		} else {
+			buf[i] = ' '
+		}
+	}
+	clearSpan := func(sp [2]int) {
+		for i := sp[0]; i < sp[1]; i++ {
+			if src[i] == '\n' {
 				buf[i] = '\n'
 			} else {
 				buf[i] = ' '
 			}
 		}
+	}
+	perSpan := sfcSpanBudget(len(src))
+	for _, sp := range spans {
 		copy(buf[sp[0]:sp[1]], src[sp[0]:sp[1]])
+		spanSt := transformState{hasBudget: true, budget: perSpan}
+		if st != nil {
+			spanSt.depthChecked = st.depthChecked
+			spanSt.overDepth = st.overDepth
+		}
 		r := extractWithMap(buf, src, nil, false)
 		if strings.HasPrefix(r.Error, "parse") {
 			if strings.Contains(r.Error, "too many nested") {
@@ -145,11 +172,15 @@ func extractSFCSpans(src []byte, spans [][2]int, hint string, preferTSX bool, st
 				}
 				return Result{}, false
 			}
-			code, lm, ok := transformTSState(buf, hint, preferTSX, st)
+			code, lm, ok := transformTSState(buf, hint, preferTSX, &spanSt)
 			if !ok {
-				if st != nil && st.overDepth {
+				if spanSt.overDepth {
+					if st != nil {
+						st.markOverDepth()
+					}
 					return Result{}, false
 				}
+				clearSpan(sp)
 				continue
 			}
 			r = extractWithMap(code, src, lm, false)
@@ -160,7 +191,7 @@ func extractSFCSpans(src []byte, spans [][2]int, hint string, preferTSX bool, st
 					}
 					return Result{}, false
 				}
-				if lcode, llm, lok := transformTSWithSupportedState(buf, hint, preferTSX, arrowLowered, st); lok {
+				if lcode, llm, lok := transformTSWithSupportedState(buf, hint, preferTSX, arrowLowered, &spanSt); lok {
 					if r2 := extractWithMap(lcode, src, llm, false); !strings.HasPrefix(r2.Error, "parse") {
 						r2.ASTLowered = true
 						r = r2
@@ -168,6 +199,7 @@ func extractSFCSpans(src []byte, spans [][2]int, hint string, preferTSX bool, st
 				}
 			}
 		}
+		clearSpan(sp)
 		if r.Error != "" {
 			continue
 		}
@@ -486,8 +518,47 @@ const legacyDecoratorsTSConfig = `{"compilerOptions":{"experimentalDecorators":t
 var arrowLowered = map[string]bool{"arrow": false}
 
 type transformState struct {
+	hasBudget    bool
+	budget       int
 	depthChecked bool
 	overDepth    bool
+}
+
+func fallbackBudget(n int, hint string) int {
+	switch {
+	case n < 1<<20:
+		return 6
+	case n <= 4<<20:
+		return 3
+	default:
+		switch hintExt(hint) {
+		case ".ts", ".tsx", ".mts", ".cts":
+			return 2
+		}
+		return 1
+	}
+}
+
+func sfcSpanBudget(n int) int {
+	switch {
+	case n < 1<<20:
+		return 4
+	case n <= 4<<20:
+		return 2
+	default:
+		return 1
+	}
+}
+
+func (st *transformState) takeBudget() bool {
+	if st == nil || !st.hasBudget {
+		return true
+	}
+	if st.budget <= 0 {
+		return false
+	}
+	st.budget--
+	return true
 }
 
 func (st *transformState) markOverDepth() {
@@ -507,6 +578,13 @@ func allowTransformDepth(src []byte, st *transformState) bool {
 	return !st.overDepth
 }
 
+func runEsbuildTransform(input string, opts api.TransformOptions) api.TransformResult {
+	if fn := testTransformHook.Load(); fn != nil {
+		(*fn)()
+	}
+	return api.Transform(input, opts)
+}
+
 // transformJSLower lowers arrow functions in valid standard JavaScript (not
 // TypeScript/JSX) when tdewolff/parse fails on ES2015+ cover-grammar edge
 // cases such as `({ a: b = 1 } = { a: 1 }) => b`.
@@ -515,10 +593,10 @@ func transformJSLower(src []byte) ([]byte, *esbuildLineMap, bool) {
 }
 
 func transformJSLowerState(src []byte, st *transformState) ([]byte, *esbuildLineMap, bool) {
-	if len(src) == 0 || looksLikeHTMLDoc(src) || !allowTransformDepth(src, st) {
+	if len(src) == 0 || looksLikeHTMLDoc(src) || !allowTransformDepth(src, st) || !st.takeBudget() {
 		return nil, nil, false
 	}
-	res := api.Transform(string(src), api.TransformOptions{
+	res := runEsbuildTransform(string(src), api.TransformOptions{
 		Loader:         api.LoaderJS,
 		Target:         api.ESNext,
 		Supported:      arrowLowered,
@@ -553,6 +631,9 @@ func transformTSWithSupportedState(src []byte, hint string, preferTSX bool, supp
 	if len(src) == 0 || looksLikeHTMLDoc(src) || !allowTransformDepth(src, st) {
 		return nil, nil, false
 	}
+	if st != nil && st.hasBudget && st.budget <= 0 {
+		return nil, nil, false
+	}
 	ext := hintExt(hint)
 	loaders := []api.Loader{api.LoaderTS, api.LoaderTSX}
 	if preferTSX || ext == ".tsx" || ext == ".jsx" {
@@ -561,7 +642,10 @@ func transformTSWithSupportedState(src []byte, hint string, preferTSX bool, supp
 	input := string(src)
 	for _, loader := range loaders {
 		for _, tsconfig := range []string{legacyDecoratorsTSConfig, ""} {
-			res := api.Transform(input, api.TransformOptions{
+			if !st.takeBudget() {
+				return nil, nil, false
+			}
+			res := runEsbuildTransform(input, api.TransformOptions{
 				Loader:         loader,
 				Target:         api.ESNext,
 				Supported:      supported,

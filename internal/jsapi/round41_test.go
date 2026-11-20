@@ -8,6 +8,7 @@ import (
 	"runtime/debug"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -269,5 +270,86 @@ func TestRound41NestingThresholdCorpus(t *testing.T) {
 	}
 	if overCount > 0 {
 		t.Fatalf("%d corpus script(s) exceeded maxEsbuildNesting=%d", overCount, maxEsbuildNesting)
+	}
+}
+
+func TestRound41FallbackBudgetBySize(t *testing.T) {
+	var calls atomic.Int32
+	hook := func() { calls.Add(1) }
+	testTransformHook.Store(&hook)
+	defer testTransformHook.Store(nil)
+
+	// 1. 5 MiB broken .js: fallbackBudget == 1, so api.Transform runs exactly once.
+	bigBrokenJS := append(bytes.Repeat([]byte("// pad\n"), (5<<20)/7), []byte("function ??? invalid")...)
+	calls.Store(0)
+	_ = ExtractSource(bigBrokenJS, "bundle.js")
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("5 MiB broken .js: api.Transform called %d times, want 1", got)
+	}
+
+	// 2. 500 KiB broken .js: at most 6 calls (1 JSLower + 4 TS = 5 <= 6).
+	medBrokenJS := append(bytes.Repeat([]byte("// pad\n"), (500<<10)/7), []byte("function ??? invalid")...)
+	calls.Store(0)
+	_ = ExtractSource(medBrokenJS, "bundle.js")
+	if got := calls.Load(); got < 1 || got > 6 {
+		t.Fatalf("500 KiB broken .js: api.Transform called %d times, want 1..6", got)
+	}
+
+	// 3. Broken .ts does NOT fall through and run transformTS a second time (5 calls, not 9).
+	calls.Store(0)
+	_ = ExtractSource([]byte("const x: number = ??? invalid;"), "mod.ts")
+	if got := calls.Load(); got != 5 {
+		t.Fatalf("broken .ts: api.Transform called %d times, want 5 (4 TS + 1 JSLower, no duplicate TS)", got)
+	}
+
+	// 4. Dual-<script lang="ts"> .vue over 1 MiB with duplicate imports still extracts both blocks.
+	pad := strings.Repeat("// pad line\n", (1200<<10)/12)
+	vue := `<template><div/></template>` + "\n" + pad + `
+<script lang="ts">
+import { ep } from "./shared.js";
+const a: string = "/api/v1/from_first";
+fetch(a);
+</script>
+<script setup lang="ts">
+import { ep } from "./shared.js";
+const b: string = "/api/v1/from_second";
+fetch(b);
+</script>`
+	rVue := ExtractSource([]byte(vue), "https://example.test/Two.vue")
+	if rVue.Error != "" || len(rVue.Endpoints) != 2 {
+		t.Fatalf("1.2 MiB dual-script .vue failed: err=%q endpoints=%+v", rVue.Error, rVue.Endpoints)
+	}
+
+	// 5. Hostile .vue with 20 broken <script lang="ts"> blocks is bounded by maxSFCSpans.
+	var sfc strings.Builder
+	sfc.WriteString("<template><div/></template>\n")
+	for i := range 20 {
+		fmt.Fprintf(&sfc, "<script lang=\"ts\">const s%d: number = ???;</script>\n", i)
+	}
+	calls.Store(0)
+	_ = ExtractSource([]byte(sfc.String()), "Hostile.vue")
+	maxAllowed := int32(6 + maxSFCSpans*4)
+	if got := calls.Load(); got > maxAllowed {
+		t.Fatalf("20-span hostile .vue: api.Transform called %d times, want <= %d", got, maxAllowed)
+	}
+}
+
+func TestRound41NestedFunctionsBounded(t *testing.T) {
+	// Previously N=1001 nested functions bypassed tdewolff (>1000) and ran esbuild
+	// multiple times (>20s CPU). Now M7 + M13 bound it deterministically.
+	const n = 1001
+	src := []byte(strings.Repeat("function f(){", n) + "fetch('/api/deep');" + strings.Repeat("}", n))
+	start := time.Now()
+	r := ExtractSource(src, "nested.js")
+	took := time.Since(start)
+	limit := 2 * time.Second
+	if isRaceBuild() {
+		limit = 5 * time.Second
+	}
+	if took > limit {
+		t.Fatalf("1001 nested functions took %s, want <= %s", took, limit)
+	}
+	if !strings.Contains(r.Error, "esbuild skipped") {
+		t.Fatalf("expected esbuild skipped error, got %q", r.Error)
 	}
 }
