@@ -415,6 +415,34 @@ func RunHTTP(ctx context.Context, cfg Config, ho HTTPOptions) (Record, error) {
 		tmp.writeEndpoints()
 		run.Endpoints, run.StaticAnalysis, run.Warnings = tmp.run.Endpoints, tmp.run.StaticAnalysis, tmp.run.Warnings
 	}
+	var chromeRuns []EscalatedRun
+	if run.Escalated != nil {
+		chromeRuns = append(chromeRuns, run.Escalated.Runs...)
+	}
+	chromeRuns = append(chromeRuns, run.SPABoot...)
+	if len(chromeRuns) > 0 {
+		tot := &RunTotals{
+			Requests:         run.Requests,
+			PageRequests:     run.PageRequests,
+			InternalRequests: run.InternalRequests,
+			NewScripts:       run.NewScripts,
+		}
+		addedScripts := 0
+		for _, er := range chromeRuns {
+			tot.Requests += er.Requests
+			tot.PageRequests += er.PageRequests
+			tot.InternalRequests += er.InternalRequests
+			tot.NewScripts += er.NewScripts
+			addedScripts += er.NewScripts
+			if er.RunID != "" {
+				tot.Runs = append(tot.Runs, er.RunID)
+			}
+		}
+		if len(tot.Runs) > 0 || addedScripts > 0 || tot.Requests > run.Requests {
+			run.Totals = tot
+			run.UniqueScripts = st.Len() + addedScripts
+		}
+	}
 	blockedEmpty := run.Blocked.Blocked && len(run.Scripts) == 0 && !seedPassed
 	if blockedEmpty {
 		// Nothing of the site: the CDP engine would have met the same page.
@@ -480,8 +508,12 @@ func RunHTTP(ctx context.Context, cfg Config, ho HTTPOptions) (Record, error) {
 	if werr != nil {
 		slog.Error("write run.json", "err", werr)
 	}
-	slog.Info("done", "engine", "http", "pages", visited, "listed", listedN, "unique_scripts", run.UniqueScripts, "new_this_run", run.NewScripts,
-		"requests", run.Requests, "page_requests", run.PageRequests, "internal_requests", run.InternalRequests, "challenge_dropped", run.Stats.Challenge)
+	logArgs := []any{"engine", "http", "pages", visited, "listed", listedN, "unique_scripts", run.UniqueScripts, "new_this_run", run.NewScripts,
+		"requests", run.Requests, "page_requests", run.PageRequests, "internal_requests", run.InternalRequests, "challenge_dropped", run.Stats.Challenge}
+	if run.Totals != nil {
+		logArgs = append(logArgs, "total_requests", run.Totals.Requests)
+	}
+	slog.Info("done", logArgs...)
 	return run, err
 }
 

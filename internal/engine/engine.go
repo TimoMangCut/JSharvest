@@ -268,6 +268,9 @@ type Record struct {
 	// SPABoot: the SPA origins Chrome booted when the crawl saw no API
 	// call (crawl -spa-boot).
 	SPABoot []EscalatedRun `json:"spa_boot,omitempty"`
+	// Totals aggregates this HTTP run's counts with any follow-up Chrome runs
+	// (Escalated / SPABoot) while keeping the HTTP run's own counters intact.
+	Totals  *RunTotals     `json:"totals,omitempty"`
 	Guard   *guard.Stats   `json:"guard,omitempty"`
 	Blocked detect.Result  `json:"blocked"`
 	// Fronted names the bot/WAF vendor sitting in front of the target, blocked
@@ -276,6 +279,16 @@ type Record struct {
 	FrontedBy []string `json:"fronted_by,omitempty"`
 	Warnings  []string `json:"warnings,omitempty"`
 	ExitCode  int      `json:"exit_code"`
+}
+
+// RunTotals aggregates an HTTP run's counters with its follow-up Chrome runs
+// (Escalated and SPABoot), leaving the HTTP run's own per-run counters intact.
+type RunTotals struct {
+	Requests         int      `json:"requests"`
+	PageRequests     int      `json:"page_requests"`
+	InternalRequests int      `json:"internal_requests"`
+	NewScripts       int      `json:"new_scripts"`
+	Runs             []string `json:"runs"`
 }
 
 // runState is what the tabs of one run share: its record, its output,

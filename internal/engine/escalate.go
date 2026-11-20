@@ -27,14 +27,17 @@ type Escalation struct {
 
 // EscalatedRun is one host's run in Chrome.
 type EscalatedRun struct {
-	Host       string `json:"host"`
-	Target     string `json:"target"`
-	RunID      string `json:"run_id,omitempty"`
-	Pages      int    `json:"pages"` // pages visited
-	NewScripts int    `json:"new_scripts"`
-	Blocked    bool   `json:"blocked"`
-	ExitCode   int    `json:"exit_code"`
-	Error      string `json:"error,omitempty"`
+	Host             string `json:"host"`
+	Target           string `json:"target"`
+	RunID            string `json:"run_id,omitempty"`
+	Pages            int    `json:"pages"` // pages visited
+	Requests         int    `json:"requests,omitempty"`
+	PageRequests     int    `json:"page_requests,omitempty"`
+	InternalRequests int    `json:"internal_requests,omitempty"`
+	NewScripts       int    `json:"new_scripts"`
+	Blocked          bool   `json:"blocked"`
+	ExitCode         int    `json:"exit_code"`
+	Error            string `json:"error,omitempty"`
 }
 
 // MaxEscalatedHosts bounds the browsers one crawl starts for its
@@ -132,8 +135,9 @@ func Escalate(ctx context.Context, cfg Config, pages []httpcrawl.Challenged, coo
 		slog.Info("a bot challenge HTTP could not pass: Chrome takes the host's pages", "host", h, "target", target.String(),
 			"pages", len(ps), "depth", c.Depth)
 		rec, err := RunRecord(ctx, c)
-		r := EscalatedRun{Host: h, Target: target.String(), RunID: rec.RunID, NewScripts: rec.NewScripts,
-			Blocked: rec.Blocked.Blocked, ExitCode: rec.ExitCode}
+		r := EscalatedRun{Host: h, Target: target.String(), RunID: rec.RunID,
+			Requests: rec.Requests, PageRequests: rec.PageRequests, InternalRequests: rec.InternalRequests,
+			NewScripts: rec.NewScripts, Blocked: rec.Blocked.Blocked, ExitCode: rec.ExitCode}
 		if rec.Frontier != nil {
 			r.Pages = rec.Frontier.Visited
 		} else if rec.RunID != "" {
@@ -190,8 +194,9 @@ func SPABoot(ctx context.Context, cfg Config, origins []string) []EscalatedRun {
 		slog.Info("an SPA with no API call seen: Chrome boots it (-spa-boot)", "origin", o)
 		rec, err := RunRecord(bctx, c)
 		cancel()
-		r := EscalatedRun{Host: target.Hostname(), Target: target.String(), RunID: rec.RunID, NewScripts: rec.NewScripts,
-			Blocked: rec.Blocked.Blocked, ExitCode: rec.ExitCode, Pages: 1}
+		r := EscalatedRun{Host: target.Hostname(), Target: target.String(), RunID: rec.RunID,
+			Requests: rec.Requests, PageRequests: rec.PageRequests, InternalRequests: rec.InternalRequests,
+			NewScripts: rec.NewScripts, Blocked: rec.Blocked.Blocked, ExitCode: rec.ExitCode, Pages: 1}
 		if err != nil {
 			r.Error = err.Error()
 		}
