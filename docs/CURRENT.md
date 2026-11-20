@@ -71,6 +71,7 @@ Tài liệu nhập ngữ cảnh nhanh cho session mới (~5 KB). Đọc cùng [C
 ## 4. Lộ trình Dài hạn (chưa thực hiện, chỉ mở khi có nhu cầu thực tế)
 
 0. **Tồn đọng nhỏ còn defer (`T2`):** thử lại candidate thứ 2 và hiệu chỉnh thống kê base đầu cơ sau `rejudgeShells` (chỉ xảy ra khi shell học muộn từ host khác `*`; đã đóng `T1` và `T3` ở Đợt 38): xem [plan-37.1.md](plan-37.1.md).
+0b. **Kế hoạch Đợt 40 (từ scan thực địa hậu Đợt 39):** xem [backlog-round40.md](backlog-round40.md) (`R40-A1..A3`: giải Vite `import.meta.env` object destructuring & `intel.bases`, nối `{ baseURL }` cấp request cho `axiosInstance.get/post`, gỡ ghim cứng SPA `Origin` khi có `intel.Bases` tách rời; `R40-B1..B3`: chặn `specProbe` sang host SDK/IdP bên thứ ba, lọc soft-200 SPA khỏi `http.probes`, đồng bộ `run.json` sau `Escalated`/`SPABoot`).
 
 1. **Tách dần module nội bộ theo thay đổi tính năng:** thu gọn dần sự phụ thuộc `x.cursor` trong `internal/jsapi` và cấu trúc `Config` trong `internal/engine` theo từng tính năng chạm tới (không đại phẫu tách rời).
 2. **Tùy chọn Stealth nâng cao:** `-stealth` với `uTLS` + HTTP/2 fingerprint chuẩn Chrome / Isolated World hooks nếu gặp WAF kiểm tra JA4/H2 frame ở pha HTTP pre-auth.
