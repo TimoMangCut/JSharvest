@@ -689,4 +689,27 @@ func TestRound41AuthzAndBolaScrubRedirectLocations(t *testing.T) {
 			t.Fatalf("%s leaked 302 Location access_token:\n%s", fname, string(raw))
 		}
 	}
+	if !authzRep.Redacted || !bolaRep.TrialsRedacted {
+		t.Fatalf("expected Redacted/TrialsRedacted true with Redactor, got authz=%v bola=%v", authzRep.Redacted, bolaRep.TrialsRedacted)
+	}
+}
+
+func TestRound41AuthzAndBolaFooterReflectsRedaction(t *testing.T) {
+	redAuthz := (&AuthzReport{Host: "app.example.test", Roles: []string{"user", "admin"}, Redacted: true}).Markdown()
+	if !strings.Contains(redAuthz, "are redacted (-redact=false keeps live credentials)") || strings.Contains(redAuthz, "hold the lower roles' live credentials") {
+		t.Fatalf("redacted authz.md footer mismatch:\n%s", redAuthz)
+	}
+	liveAuthz := (&AuthzReport{Host: "app.example.test", Roles: []string{"user", "admin"}, Redacted: false}).Markdown()
+	if !strings.Contains(liveAuthz, "hold the lower roles' live credentials") {
+		t.Fatalf("live authz.md footer mismatch:\n%s", liveAuthz)
+	}
+
+	redBola := (&BolaReport{Host: "app.example.test", Peers: [2]string{"alice", "bob"}, Relation: RelCrossOrg, Redacted: false, TrialsRedacted: true}).Markdown()
+	if !strings.Contains(redBola, "are redacted (-redact=false keeps live credentials)") || strings.Contains(redBola, "hold the peers' live credentials") {
+		t.Fatalf("redacted bola.md footer mismatch:\n%s", redBola)
+	}
+	liveBola := (&BolaReport{Host: "app.example.test", Peers: [2]string{"alice", "bob"}, Relation: RelCrossOrg, Redacted: true, TrialsRedacted: false}).Markdown()
+	if !strings.Contains(liveBola, "hold the peers' live credentials") {
+		t.Fatalf("live bola.md footer mismatch:\n%s", liveBola)
+	}
 }

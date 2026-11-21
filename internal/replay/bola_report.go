@@ -83,6 +83,10 @@ func (r *BolaReport) Markdown() string {
 			mdsafe.TableText(strings.Join(ev, ", ")),
 			mdsafe.TableText(why))
 	}
-	b.WriteString("\nVerdicts: bypass, B read what only A had (a value of A's answer, found in B's: not echoed, not B's own, not shown to B or a visitor before), and, with -relation same-org, the object is private (-private, a private flag, an owner that is A); unauthenticated, a request with no identity got it too; shared, same-org with nothing private about it; enforced, refused or nothing of A's in the answer (B's session still lives); enforced-parent, refused where the request has two ids or more: only the parent level was tried (-substitute); needs-review, a success with another answer or a blind write; replay_broken, A's own request no longer answers as recorded; unclear, nothing to conclude (a dead session, a control that failed, an id that names nothing answered with data); skipped, not sent. The trial files (authz/trials/bola.*.http) hold the peers' live credentials.\n")
+	trialNote := "The trial files (authz/trials/bola.*.http) hold the peers' live credentials."
+	if r.TrialsRedacted {
+		trialNote = "Credentials in the trial files (authz/trials/bola.*.http) are redacted (-redact=false keeps live credentials)."
+	}
+	b.WriteString("\nVerdicts: bypass, B read what only A had (a value of A's answer, found in B's: not echoed, not B's own, not shown to B or a visitor before), and, with -relation same-org, the object is private (-private, a private flag, an owner that is A); unauthenticated, a request with no identity got it too; shared, same-org with nothing private about it; enforced, refused or nothing of A's in the answer (B's session still lives); enforced-parent, refused where the request has two ids or more: only the parent level was tried (-substitute); needs-review, a success with another answer or a blind write; replay_broken, A's own request no longer answers as recorded; unclear, nothing to conclude (a dead session, a control that failed, an id that names nothing answered with data); skipped, not sent. " + trialNote + "\n")
 	return b.String()
 }

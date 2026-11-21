@@ -55,6 +55,7 @@ type BolaReport struct {
 	AllowWrite       bool              `json:"allow_write,omitempty"`
 	AnonLoaded       bool              `json:"anon_loaded"`
 	Redacted         bool              `json:"redacted"`
+	TrialsRedacted   bool              `json:"trials_redacted,omitempty"`
 	Generated        time.Time         `json:"generated"`
 	Sent             int               `json:"sent"`
 	Stopped          string            `json:"stopped,omitempty"`
@@ -168,7 +169,7 @@ func Bola(ctx context.Context, o BolaOptions) (*BolaReport, error) {
 	b.a = &authz{o: AuthzOptions{Policy: o.Policy, AllowWrite: o.AllowWrite, Sender: o.Sender, InScope: o.InScope, Out: o.Out, Now: o.Now},
 		out: &AuthzReport{}, peer: true}
 	b.rep = &BolaReport{Host: filepath.Base(o.Root), Peers: o.Peers, Relation: o.Relation, Substitute: o.Substitute, AllowWrite: o.AllowWrite,
-		Redacted: !o.Reveal, Generated: o.Now.UTC(), Summary: map[string]int{}}
+		Redacted: !o.Reveal, TrialsRedacted: o.Sender != nil && o.Sender.Redactor() != nil, Generated: o.Now.UTC(), Summary: map[string]int{}}
 
 	anon := NewSeenSet()
 	if st, err := os.Stat(filepath.Join(o.Root, "anon")); err == nil && st.IsDir() {

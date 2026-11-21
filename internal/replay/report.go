@@ -77,6 +77,10 @@ func (r *AuthzReport) Markdown() string {
 			mdsafe.TableText(ctl),
 			mdsafe.TableText(x.t.Reason))
 	}
-	b.WriteString("\nVerdicts: bypass, the lower role gets what the higher one gets; unauthenticated, so does a request with no identity; likely, nearly; needs-review, a success with another answer (filtered, its own object); enforced, refused; unclear, nothing to conclude (a control failed, a CSRF token went stale, a dead session…); skipped, not sent. The trial files (authz/trials/) hold the lower roles' live credentials.\n")
+	trialNote := "The trial files (authz/trials/) hold the lower roles' live credentials."
+	if r.Redacted {
+		trialNote = "Credentials in the trial files (authz/trials/) are redacted (-redact=false keeps live credentials)."
+	}
+	b.WriteString("\nVerdicts: bypass, the lower role gets what the higher one gets; unauthenticated, so does a request with no identity; likely, nearly; needs-review, a success with another answer (filtered, its own object); enforced, refused; unclear, nothing to conclude (a control failed, a CSRF token went stale, a dead session…); skipped, not sent. " + trialNote + "\n")
 	return b.String()
 }

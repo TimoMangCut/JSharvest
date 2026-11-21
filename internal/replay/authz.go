@@ -52,6 +52,7 @@ type AuthzReport struct {
 	Roles     []string  `json:"roles"`
 	Generated time.Time `json:"generated"`
 	Sent      int       `json:"sent"`
+	Redacted  bool      `json:"redacted,omitempty"`
 	Stopped   string    `json:"stopped,omitempty"`
 	// HostsBlocked are the hosts given up: a vendor blocked the client
 	// there, a control request too (round 25H).
@@ -241,7 +242,7 @@ func Authz(ctx context.Context, o AuthzOptions) (*AuthzReport, error) {
 	if err := json.Unmarshal(b, &rep); err != nil {
 		return nil, fmt.Errorf("authz: diff.json: %w", err)
 	}
-	a := &authz{o: o, rep: &rep, out: &AuthzReport{Host: rep.Host, Roles: rep.Roles, Generated: o.Now.UTC(), Summary: map[string]int{}}}
+	a := &authz{o: o, rep: &rep, out: &AuthzReport{Host: rep.Host, Roles: rep.Roles, Generated: o.Now.UTC(), Redacted: o.Sender != nil && o.Sender.Redactor() != nil, Summary: map[string]int{}}}
 	for _, name := range rep.Roles {
 		m, err := export.Load(export.Options{Dir: filepath.Join(o.Root, name), Run: "all", InScope: o.InScope})
 		if err != nil {
