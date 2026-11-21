@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +17,8 @@ import (
 	"time"
 
 	"github.com/TimoMangCut/JSharvest/internal/browser"
+	"github.com/TimoMangCut/JSharvest/internal/scope"
+	"github.com/TimoMangCut/JSharvest/internal/session"
 )
 
 type syncBuf struct {
@@ -225,5 +229,108 @@ func TestRound41ArchiveUAFlag(t *testing.T) {
 	if env.opts.Wayback.Client.UA != "CustomUA/1.0" || env.opts.Wayback.IndexClient.UA != "CustomUA/1.0" ||
 		env.opts.OTX.Client.UA != "CustomUA/1.0" || env.opts.CC.Client.UA != "CustomUA/1.0" || env.opts.URLScan.Client.UA != "CustomUA/1.0" {
 		t.Fatalf("custom -archive-ua not applied to all archive clients")
+	}
+}
+
+func TestRound41CrawlLocksProfile(t *testing.T) {
+	// 1. Anonymous crawl must NOT create directories under -profiles.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`<html><body>ok</body></html>`))
+	}))
+	defer srv.Close()
+
+	anonOut := t.TempDir()
+	anonProfiles := filepath.Join(t.TempDir(), "profiles")
+	err := runCrawl([]string{
+		"-u", srv.URL,
+		"-o", anonOut,
+		"-profiles", anonProfiles,
+		"-engine", "http",
+		"-depth", "0",
+		"-probe=false",
+		"-archive=false",
+		"-archive-fallback=false",
+	})
+	if err != nil {
+		t.Fatalf("anonymous crawl failed: %v", err)
+	}
+	if _, statErr := os.Stat(anonProfiles); !os.IsNotExist(statErr) {
+		entries, _ := os.ReadDir(anonProfiles)
+		t.Fatalf("anonymous crawl created unexpected entries in -profiles: %v (err=%v)", entries, statErr)
+	}
+
+	// 2. When login holds the profile lock with a half-written jsharvest-session.json,
+	// both -u and -urls fail at lockDirs ("in use") BEFORE loadLogin reads corrupt JSON.
+	profilesRoot := t.TempDir()
+	uApp, _ := parseTarget("https://app.example/")
+	hostDir := scope.TargetDir(uApp)
+	profDir := filepath.Join(profilesRoot, hostDir, "user")
+	if err := os.MkdirAll(profDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(profDir, "jsharvest-session.json"), []byte(`{"saved":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	urlsPath := filepath.Join(t.TempDir(), "urls.txt")
+	if err := os.WriteFile(urlsPath, []byte("https://app.example/a\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	unlockLogin, err := lockDirs("login", 0, profDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runCrawl([]string{"-u", "https://app.example/a", "-role", "user", "-o", t.TempDir(), "-profiles", profilesRoot}); err == nil || !strings.Contains(err.Error(), "in use") {
+		unlockLogin()
+		t.Fatalf("crawl -u did not lock profile before loadLogin: %v", err)
+	}
+	if err := runCrawl([]string{"-urls", urlsPath, "-role", "user", "-o", t.TempDir(), "-profiles", profilesRoot}); err == nil || !strings.Contains(err.Error(), "in use") {
+		unlockLogin()
+		t.Fatalf("crawl -urls did not lock profile before loadLogin: %v", err)
+	}
+	unlockLogin()
+
+	// 3. While crawl holds profile P (for both -u and -urls), login -profile P reports "in use".
+	snap := &session.Snapshot{Saved: time.Now().UTC()}
+	if err := snap.Save(profDir); err != nil {
+		t.Fatal(err)
+	}
+	fakeChrome := filepath.Join(t.TempDir(), "fake-chrome.sh")
+	startedFile := filepath.Join(t.TempDir(), "started")
+	releaseFile := filepath.Join(t.TempDir(), "release")
+	script := fmt.Sprintf("#!/bin/sh\necho ok >%q\nfor _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do [ -f %q ] && exit 1; sleep 0.05; done\nexit 1\n", startedFile, releaseFile)
+	if err := os.WriteFile(fakeChrome, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, modeArgs := range [][]string{
+		{"-u", "https://app.example/a"},
+		{"-urls", urlsPath},
+	} {
+		_ = os.Remove(startedFile)
+		_ = os.Remove(releaseFile)
+		done := make(chan error, 1)
+		args := append([]string{}, modeArgs...)
+		args = append(args, "-role", "user", "-o", t.TempDir(), "-profiles", profilesRoot, "-engine", "cdp", "-chrome", fakeChrome)
+		go func() {
+			done <- runCrawl(args)
+		}()
+		deadline := time.Now().Add(3 * time.Second)
+		for {
+			if _, err := os.Stat(startedFile); err == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				_ = os.WriteFile(releaseFile, []byte("1"), 0o600)
+				t.Fatalf("crawl (%v) did not reach browser launch: err=%v", modeArgs, <-done)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		lerr := runLogin([]string{"-u", "https://app.example/login", "-role", "user", "-profile", profDir})
+		_ = os.WriteFile(releaseFile, []byte("1"), 0o600)
+		<-done
+		if lerr == nil || !strings.Contains(lerr.Error(), "in use") {
+			t.Fatalf("login during crawl (%v) got %v, want 'in use'", modeArgs, lerr)
+		}
 	}
 }

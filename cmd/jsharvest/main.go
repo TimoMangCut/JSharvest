@@ -241,8 +241,8 @@ func runCrawl(args []string) error {
 		return err
 	}
 	// The role's saved login: -profile, or what jsharvest login left for
-	// this host and role.
-	var login *engine.Login
+	// this host and role. Resolved before lockDirs and loaded only after the
+	// profile lock is held (L6).
 	loadLogin := func(dir string) (*engine.Login, error) {
 		snap, err := session.Load(dir)
 		if err != nil {
@@ -258,34 +258,8 @@ func runCrawl(args []string) error {
 			"can_log_in_again", l.Steps != nil)
 		return l, nil
 	}
-	if *attach == "" && *urlsFile == "" {
-		if *profile == "" {
-			if u, err := parseTarget(*target); err == nil {
-				if d := filepath.Join(*profiles, scope.TargetDir(u), *role); session.Exists(d) {
-					*profile = d
-				}
-			}
-		}
-		if *profile != "" && session.Exists(*profile) {
-			if login, err = loadLogin(*profile); err != nil {
-				return err
-			}
-		}
-	}
-	// The login's User-Agent, unless -ua says otherwise: a session may be
-	// tied to it (cf_clearance), and a headless browser's own differs.
-	if *ua == "" && login != nil && login.Snapshot != nil && login.Snapshot.UserAgent != "" {
-		*ua = login.Snapshot.UserAgent
-		slog.Info("presenting the login's User-Agent", "ua", *ua)
-	}
-	var guardOn bool
 	switch *guardMode {
-	case "on":
-		guardOn = true
-	case "off":
-	case "auto":
-		// A logged-in session is where a stray write costs something.
-		guardOn = *profile != "" || *attach != ""
+	case "on", "off", "auto":
 	default:
 		return fmt.Errorf("-guard: want on, off or auto, got %q", *guardMode)
 	}
@@ -295,7 +269,6 @@ func runCrawl(args []string) error {
 		if *guardMode == "off" {
 			return errors.New("-explore needs the guard: it clicks every control; use -allow-write where writes are agreed")
 		}
-		guardOn = true
 		if traffic.Mode(*record) == traffic.Off {
 			return errors.New("-explore needs the request log: -record api or all")
 		}
@@ -370,30 +343,89 @@ func runCrawl(args []string) error {
 	if !roleRe.MatchString(*role) || strings.Contains(*role, "..") {
 		return fmt.Errorf("bad role %q: use letters, digits, '.', '_' and '-'", *role)
 	}
-	// One crawl at a time writes a host's role directory.
+
+	profileCandidate := func(dir string) bool {
+		if session.Exists(dir) {
+			return true
+		}
+		_, err := os.Stat(filepath.Join(dir, ".jsharvest.lock"))
+		return err == nil
+	}
+
+	var profileDirs []string
+	var urlHosts []string
+	if *attach == "" {
+		if *urlsFile == "" {
+			if *profile != "" {
+				profileDirs = append(profileDirs, *profile)
+			} else if d := filepath.Join(*profiles, scope.TargetDir(targets[0]), *role); profileCandidate(d) {
+				profileDirs = append(profileDirs, d)
+			}
+		} else {
+			seenHosts := map[string]bool{}
+			for _, u := range targets {
+				h := scope.TargetDir(u)
+				if !seenHosts[h] {
+					seenHosts[h] = true
+					urlHosts = append(urlHosts, h)
+				}
+			}
+			if *profile != "" {
+				profileDirs = append(profileDirs, *profile)
+			}
+			for _, h := range urlHosts {
+				d := filepath.Join(*profiles, h, *role)
+				if *profile != "" && len(urlHosts) == 1 {
+					d = *profile
+				}
+				if profileCandidate(d) {
+					profileDirs = append(profileDirs, d)
+				}
+			}
+		}
+	}
+
+	// One crawl at a time writes a host's role directory or uses a saved profile.
 	{
 		var dirs []string
 		for _, u := range targets {
 			dirs = append(dirs, filepath.Join(*out, scope.TargetDir(u), *role))
 		}
+		dirs = append(dirs, profileDirs...)
 		unlock, err := lockDirs("crawl", *waitLock, dirs...)
 		if err != nil {
 			return err
 		}
 		defer unlock()
 	}
+
+	var login *engine.Login
+	if *attach == "" && *urlsFile == "" {
+		if *profile == "" {
+			if d := filepath.Join(*profiles, scope.TargetDir(targets[0]), *role); session.Exists(d) {
+				*profile = d
+			}
+		}
+		if *profile != "" && session.Exists(*profile) {
+			if login, err = loadLogin(*profile); err != nil {
+				return err
+			}
+		}
+	}
+	// The login's User-Agent, unless -ua says otherwise: a session may be
+	// tied to it (cf_clearance), and a headless browser's own differs.
+	if *ua == "" && login != nil && login.Snapshot != nil && login.Snapshot.UserAgent != "" {
+		*ua = login.Snapshot.UserAgent
+		slog.Info("presenting the login's User-Agent", "ua", *ua)
+	}
 	// A list: each URL with the saved login of its host, if any. The
 	// browser keeps the login's profile only when one host has it all.
 	var logins map[string]*engine.Login
 	if *attach == "" && *urlsFile != "" {
 		logins = map[string]*engine.Login{}
-		hosts := map[string]bool{}
-		for _, u := range targets {
-			hosts[scope.TargetDir(u)] = true
-		}
-		for h := range hosts {
+		for _, h := range urlHosts {
 			d := filepath.Join(*profiles, h, *role)
-			if *profile != "" && len(hosts) == 1 {
+			if *profile != "" && len(urlHosts) == 1 {
 				d = *profile
 			}
 			if !session.Exists(d) {
@@ -404,10 +436,22 @@ func runCrawl(args []string) error {
 				return err
 			}
 			logins[h] = l
-			if len(hosts) == 1 && *profile == "" {
+			if len(urlHosts) == 1 && *profile == "" {
 				*profile = d
 			}
 		}
+	}
+	var guardOn bool
+	switch *guardMode {
+	case "on":
+		guardOn = true
+	case "off":
+	case "auto":
+		// A logged-in session is where a stray write costs something.
+		guardOn = *profile != "" || len(logins) > 0 || *attach != ""
+	}
+	if *exploreOn {
+		guardOn = true
 	}
 
 	if *ua == "" && len(logins) == 1 {
