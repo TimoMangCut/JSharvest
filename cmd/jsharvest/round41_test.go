@@ -334,3 +334,17 @@ func TestRound41CrawlLocksProfile(t *testing.T) {
 		}
 	}
 }
+
+func TestRound41CleanStderrStripsControls(t *testing.T) {
+	var buf bytes.Buffer
+	hostile := "host.example\x1b]52;c;YWJj\x07\u009b31m/path\tok"
+	fprintClean(&buf, "item %s\n", hostile)
+	fprintlnClean(&buf, "note:", hostile)
+	got := buf.String()
+	if strings.ContainsAny(got, "\x1b\x07") || strings.ContainsRune(got, '\u009b') {
+		t.Fatalf("control chars survived stderr helper: %q", got)
+	}
+	if !strings.Contains(got, "item host.example]52;c;YWJj31m/path\tok\n") || !strings.Contains(got, "note: host.example]52;c;YWJj31m/path\tok\n") {
+		t.Fatalf("unexpected cleaned stderr output: %q", got)
+	}
+}

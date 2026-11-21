@@ -71,9 +71,9 @@ func runDiff(args []string) error {
 	if err := rep.Write(root); err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "roles %s: %d items\n", strings.Join(names, " < "), len(rep.Items))
+	fprintClean(os.Stderr, "roles %s: %d items\n", strings.Join(names, " < "), len(rep.Items))
 	for _, w := range rep.Warnings {
-		fmt.Fprintln(os.Stderr, "warning:", w)
+		fprintlnClean(os.Stderr, "warning:", w)
 	}
 	layers := make([]string, 0, len(rep.Summary))
 	for l := range rep.Summary {

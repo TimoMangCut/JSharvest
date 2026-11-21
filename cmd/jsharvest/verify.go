@@ -108,10 +108,10 @@ func runVerify(args []string) error {
 	}
 	if snap != nil || (*role != "anon" && len(entries) > 0) {
 		o.Identity = replay.NewIdentity(*role, snap, entries, time.Now())
-		fmt.Fprintf(os.Stderr, "as %s: %d credential header(s) from its traffic, cookies of %s\n", *role, len(o.Identity.Creds),
+		fprintClean(os.Stderr, "as %s: %d credential header(s) from its traffic, cookies of %s\n", *role, len(o.Identity.Creds),
 			map[bool]string{true: "its saved login", false: "its traffic"}[snap != nil])
 		for _, n := range o.Identity.Notes {
-			fmt.Fprintln(os.Stderr, "note:", n)
+			fprintlnClean(os.Stderr, "note:", n)
 		}
 	}
 	if !sender.DryRun() {
@@ -136,15 +136,15 @@ func runVerify(args []string) error {
 	for _, k := range slices.Sorted(mapKeys(rep.Verdicts)) {
 		parts = append(parts, fmt.Sprintf("%s %d", k, rep.Verdicts[k]))
 	}
-	fmt.Fprintf(os.Stderr, "verify %s (%s): %d drafts, %d canaries, %d request(s)%s: %s; drafts/ %d files\n", targetDir(*target), *role,
+	fprintClean(os.Stderr, "verify %s (%s): %d drafts, %d canaries, %d request(s)%s: %s; drafts/ %d files\n", targetDir(*target), *role,
 		len(drafts), len(rep.Canaries), rep.Sent, map[bool]string{true: " planned (dry run)", false: " sent"}[rep.DryRun],
 		strings.Join(parts, ", "), idx.Files)
 	if rep.Stopped != "" {
-		fmt.Fprintln(os.Stderr, "stopped:", rep.Stopped)
+		fprintlnClean(os.Stderr, "stopped:", rep.Stopped)
 	}
 	printBlockedHosts(rep.HostsBlocked)
 	for h, why := range rep.HostsGated {
-		fmt.Fprintf(os.Stderr, "host gated: %s: %s\n", h, why)
+		fprintClean(os.Stderr, "host gated: %s: %s\n", h, why)
 	}
 	fmt.Fprintln(os.Stderr, "wrote", dest)
 	return rerr

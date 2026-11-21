@@ -185,9 +185,9 @@ func runExport(args []string) error {
 		counts = append(counts, fmt.Sprintf("%s %d", k, v))
 	}
 	sort.Strings(counts)
-	fmt.Fprintf(os.Stderr, "export of run %s: %s\n", strings.Join(m.Runs, ", "), strings.Join(counts, ", "))
+	fprintClean(os.Stderr, "export of run %s: %s\n", strings.Join(m.Runs, ", "), strings.Join(counts, ", "))
 	for _, w := range m.Warnings {
-		fmt.Fprintln(os.Stderr, "warning:", w)
+		fprintlnClean(os.Stderr, "warning:", w)
 	}
 	if len(m.Incomplete) > 0 {
 		fmt.Fprintf(os.Stderr, "warning: %d raw file(s) have an incomplete body (manifest.json incomplete)\n", len(m.Incomplete))

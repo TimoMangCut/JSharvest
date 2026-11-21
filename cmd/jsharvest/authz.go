@@ -176,13 +176,13 @@ func runAuthz(args []string) error {
 	if *rf.dryRun {
 		verb = "that would be sent (dry run)"
 	}
-	fmt.Fprintf(os.Stderr, "authz %s (%s): %d items, %d requests %s to %s; %s\n", rep.Host, strings.Join(rep.Roles, " < "), len(rep.Items), rep.Sent, verb,
+	fprintClean(os.Stderr, "authz %s (%s): %d items, %d requests %s to %s; %s\n", rep.Host, strings.Join(rep.Roles, " < "), len(rep.Items), rep.Sent, verb,
 		strings.Join(sender.Hosts(), ", "), strings.Join(parts, ", "))
 	for _, n := range rep.Notes {
-		fmt.Fprintln(os.Stderr, "note:", n)
+		fprintlnClean(os.Stderr, "note:", n)
 	}
 	if rep.Stopped != "" {
-		fmt.Fprintln(os.Stderr, "stopped:", rep.Stopped)
+		fprintlnClean(os.Stderr, "stopped:", rep.Stopped)
 	}
 	printBlockedHosts(rep.HostsBlocked)
 	fmt.Fprintf(os.Stderr, "wrote %s and %s\n", filepath.Join(dest, "authz.json"), filepath.Join(dest, "authz.md"))
@@ -197,7 +197,7 @@ func printBlockedHosts(m map[string]string) {
 	}
 	sort.Strings(hosts)
 	for _, h := range hosts {
-		fmt.Fprintf(os.Stderr, "host given up: %s: %s\n", h, m[h])
+		fprintClean(os.Stderr, "host given up: %s: %s\n", h, m[h])
 	}
 }
 
@@ -281,13 +281,13 @@ func runBola(peers, relation string, substitute bool, private string, reveal boo
 	if *rf.dryRun {
 		verb = "that would be sent (dry run)"
 	}
-	fmt.Fprintf(os.Stderr, "authz %s (%s, %s): %d items, %d requests %s to %s; %s\n", rep.Host, pair[0]+" <-> "+pair[1], rel, len(rep.Items), rep.Sent, verb,
+	fprintClean(os.Stderr, "authz %s (%s, %s): %d items, %d requests %s to %s; %s\n", rep.Host, pair[0]+" <-> "+pair[1], rel, len(rep.Items), rep.Sent, verb,
 		strings.Join(sender.Hosts(), ", "), strings.Join(parts, ", "))
 	for _, n := range rep.Notes {
-		fmt.Fprintln(os.Stderr, "note:", n)
+		fprintlnClean(os.Stderr, "note:", n)
 	}
 	if rep.Stopped != "" {
-		fmt.Fprintln(os.Stderr, "stopped:", rep.Stopped)
+		fprintlnClean(os.Stderr, "stopped:", rep.Stopped)
 	}
 	printBlockedHosts(rep.HostsBlocked)
 	fmt.Fprintf(os.Stderr, "wrote %s and %s\n", filepath.Join(dest, "bola.json"), filepath.Join(dest, "bola.md"))

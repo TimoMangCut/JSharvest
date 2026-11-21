@@ -427,20 +427,20 @@ func (e *archiveEnv) report(sum *archive.Summary, err error) {
 			listed = append(listed, fmt.Sprintf("%s %d", k, v))
 		}
 		sort.Strings(listed)
-		fmt.Fprintf(os.Stderr, "archive %s: listed %s; %d URLs, %d script contents; fetched %d (alive %d, the same live %d), already held %d, digest mismatch %d, failed %d\n",
+		fprintClean(os.Stderr, "archive %s: listed %s; %d URLs, %d script contents; fetched %d (alive %d, the same live %d), already held %d, digest mismatch %d, failed %d\n",
 			e.cfg.target, strings.Join(listed, ", "), sum.URLs, sum.Digests, sum.Fetched, sum.Alive, sum.LiveSame, sum.Known, sum.Mismatch, sum.Failed)
 		if sum.Pages > 0 || sum.HTML > 0 {
 			fmt.Fprintf(os.Stderr, "old pages: %d listed, %d read; %d scripts named, %d inline; %d chunks resolved; %d not archived\n",
 				sum.HTML, sum.Pages, sum.PageScripts, sum.Inline, sum.Resolved, sum.NotArchived)
 		}
 		if len(sum.Historical) > 0 {
-			fmt.Fprintf(os.Stderr, "historical endpoints: %v (historical.jsonl)\n", sum.Historical)
+			fprintClean(os.Stderr, "historical endpoints: %v (historical.jsonl)\n", sum.Historical)
 		}
 		if n := len(sum.Credential); n > 0 {
 			fmt.Fprintf(os.Stderr, "finding: %d archived URLs carry a credential (masked in archive.json): check whether they still work, by hand\n", n)
 		}
 		for _, n := range sum.Notes {
-			fmt.Fprintln(os.Stderr, "note:", n)
+			fprintlnClean(os.Stderr, "note:", n)
 		}
 	}
 	if errors.Is(err, context.Canceled) {

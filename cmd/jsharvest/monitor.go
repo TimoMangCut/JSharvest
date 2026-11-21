@@ -100,16 +100,16 @@ func runMonitor(args []string) error {
 		}
 	}
 	c := monitor.Counts(res.Changes)
-	fmt.Fprintf(os.Stderr, "monitor %s, snapshot %s: %d high, %d medium, %d low, %d info\n", *target, res.Snapshot.ID, c[monitor.High], c[monitor.Medium], c[monitor.Low], c[monitor.Info])
+	fprintClean(os.Stderr, "monitor %s, snapshot %s: %d high, %d medium, %d low, %d info\n", *target, res.Snapshot.ID, c[monitor.High], c[monitor.Medium], c[monitor.Low], c[monitor.Info])
 	for _, r := range res.Baseline {
-		fmt.Fprintf(os.Stderr, "  %s: first runs, the baseline\n", r)
+		fprintClean(os.Stderr, "  %s: first runs, the baseline\n", r)
 	}
 	for _, n := range res.Notes {
-		fmt.Fprintln(os.Stderr, "note:", n)
+		fprintlnClean(os.Stderr, "note:", n)
 	}
 	for _, ch := range res.Changes {
 		if ch.Severity != monitor.Info {
-			fmt.Fprintln(os.Stderr, " ", ch)
+			fprintlnClean(os.Stderr, " ", ch)
 		}
 	}
 	report := filepath.Join(root, "monitor", "latest.md")

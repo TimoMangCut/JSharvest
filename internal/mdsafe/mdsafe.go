@@ -41,7 +41,7 @@ func codeSpan(s string, inTable bool) string {
 	s = flattenNewlines(s, "␤")
 	s = strings.ReplaceAll(s, "\t", " ")
 	if inTable {
-		s = strings.ReplaceAll(s, "|", `\|`)
+		s = escapeTableCodePipes(s)
 	}
 	if s == "" {
 		return "` `"
@@ -64,8 +64,42 @@ func codeSpan(s string, inTable bool) string {
 	return fence + s + fence
 }
 
+func escapeTableCodePipes(s string) string {
+	if !strings.ContainsRune(s, '|') {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + 8)
+	bs := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '\\' {
+			bs++
+			continue
+		}
+		if c == '|' {
+			for range 2*bs + 1 {
+				b.WriteByte('\\')
+			}
+			b.WriteByte('|')
+			bs = 0
+			continue
+		}
+		for range bs {
+			b.WriteByte('\\')
+		}
+		bs = 0
+		b.WriteByte(c)
+	}
+	for range bs {
+		b.WriteByte('\\')
+	}
+	return b.String()
+}
+
 var (
 	inlineTextEscaper = strings.NewReplacer(
+		`\`, `\\`,
 		`<`, `&lt;`,
 		`>`, `&gt;`,
 		`[`, `\[`,

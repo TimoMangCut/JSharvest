@@ -29,6 +29,7 @@ import (
 	"github.com/TimoMangCut/JSharvest/internal/guard"
 	"github.com/TimoMangCut/JSharvest/internal/httpcrawl"
 	"github.com/TimoMangCut/JSharvest/internal/mcpserver"
+	"github.com/TimoMangCut/JSharvest/internal/mdsafe"
 	"github.com/TimoMangCut/JSharvest/internal/netsafe"
 	"github.com/TimoMangCut/JSharvest/internal/scope"
 	"github.com/TimoMangCut/JSharvest/internal/session"
@@ -1003,7 +1004,7 @@ func runEndpoints(args []string) error {
 		fmt.Fprintf(os.Stderr, "scripts analysed: %d (bundle parse fallbacks: %d, AST lowered: %d, source fallbacks: %d)\n",
 			st.Total, st.BundleParseErrors, st.BundleASTLowered, st.SourceParseFallback)
 		if len(st.FailedBundles) > 0 {
-			fmt.Fprintf(os.Stderr, "warning: bundle parse fallback to ExtractLoose: %s\n", strings.Join(traffic.LogBundleLabels(st.FailedBundles), ", "))
+			fprintClean(os.Stderr, "warning: bundle parse fallback to ExtractLoose: %s\n", strings.Join(traffic.LogBundleLabels(st.FailedBundles), ", "))
 		}
 	}
 	if err := endpoints.Write(dir, eps); err != nil {
@@ -1014,7 +1015,7 @@ func runEndpoints(args []string) error {
 	if ierr != nil {
 		return ierr
 	} else if len(intel.Headers) > 0 || len(intel.Cloud) > 0 || len(intel.Bases) > 0 {
-		fmt.Fprintf(os.Stderr, "%s: client headers [%s], bases [%s], %d cloud URL(s)\n", filepath.Join(dir, endpoints.IntelFile),
+		fprintClean(os.Stderr, "%s: client headers [%s], bases [%s], %d cloud URL(s)\n", filepath.Join(dir, endpoints.IntelFile),
 			strings.Join(intel.Names(), " "), strings.Join(intel.Bases, " "), len(intel.Cloud))
 	}
 	w := bufio.NewWriter(os.Stdout)
@@ -1114,4 +1115,12 @@ func handleCleanupSignals(parent context.Context, sigs <-chan os.Signal, errOut 
 			cancel()
 		})
 	}
+}
+
+func fprintClean(w io.Writer, format string, args ...any) {
+	fmt.Fprint(w, mdsafe.StripControls(fmt.Sprintf(format, args...)))
+}
+
+func fprintlnClean(w io.Writer, args ...any) {
+	fmt.Fprintln(w, mdsafe.StripControls(strings.TrimSuffix(fmt.Sprintln(args...), "\n")))
 }

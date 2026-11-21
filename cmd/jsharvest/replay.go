@@ -74,7 +74,7 @@ func runReplay(args []string) error {
 	}
 	id := replay.NewIdentity(*as, snap, entries, time.Now())
 	for _, n := range id.Notes {
-		fmt.Fprintln(os.Stderr, "note:", n)
+		fprintlnClean(os.Stderr, "note:", n)
 	}
 	dest := filepath.Join(root, *role, "replay", fmt.Sprintf("%s-%s", *action, strings.ReplaceAll(time.Now().UTC().Format("20060102T150405.000"), ".", "")))
 	sender, policy, err := rf.sender(filepath.Join(dest, "sent.jsonl"), 1, pickUA(snap, filepath.Join(root, *as), filepath.Join(root, "*")), *target) // a flow's steps hang on each other
@@ -100,7 +100,7 @@ func runReplay(args []string) error {
 	if err := os.WriteFile(filepath.Join(dest, "summary.json"), append(b, '\n'), 0o600); err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "replay of %s (%s) as %s:\n", res.Action, res.Label, res.As)
+	fprintClean(os.Stderr, "replay of %s (%s) as %s:\n", res.Action, res.Label, res.As)
 	for _, s := range res.Steps {
 		state := fmt.Sprintf("%d (recorded %d)", s.Status, s.Recorded)
 		switch {
@@ -113,17 +113,17 @@ func runReplay(args []string) error {
 		case s.Blocked != "":
 			state = fmt.Sprintf("%d BLOCKED: %s", s.Status, s.Blocked)
 		}
-		fmt.Fprintf(os.Stderr, "  %-12s #%-4d %-7s %-50s %s", s.Purpose, s.ID, s.Method, s.Endpoint, state)
+		fprintClean(os.Stderr, "  %-12s #%-4d %-7s %-50s %s", s.Purpose, s.ID, s.Method, s.Endpoint, state)
 		if len(s.Refreshed) > 0 {
-			fmt.Fprintf(os.Stderr, " fresh %v", s.Refreshed)
+			fprintClean(os.Stderr, " fresh %v", s.Refreshed)
 		}
 		if len(s.Stale) > 0 {
-			fmt.Fprintf(os.Stderr, " STALE %v", s.Stale)
+			fprintClean(os.Stderr, " STALE %v", s.Stale)
 		}
 		fmt.Fprintln(os.Stderr)
 	}
 	if res.Stopped != "" {
-		fmt.Fprintln(os.Stderr, "stopped:", res.Stopped)
+		fprintlnClean(os.Stderr, "stopped:", res.Stopped)
 	}
 	printBlockedHosts(res.HostsBlocked)
 	fmt.Fprintln(os.Stderr, "wrote", dest)

@@ -15,8 +15,14 @@ import (
 func countUnescapedPipes(line string) int {
 	n := 0
 	for i := 0; i < len(line); i++ {
-		if line[i] == '|' && (i == 0 || line[i-1] != '\\') {
-			n++
+		if line[i] == '|' {
+			bs := 0
+			for j := i - 1; j >= 0 && line[j] == '\\'; j-- {
+				bs++
+			}
+			if bs%2 == 0 {
+				n++
+			}
 		}
 	}
 	return n
@@ -134,6 +140,124 @@ func TestRound41MarkdownEscapingAndControlStrip(t *testing.T) {
 				}
 			} else {
 				wantPipes = 0
+			}
+		}
+	}
+}
+
+func TestRound41MarkdownBackslashParityAndLinks(t *testing.T) {
+	// 1. InlineText must escape backslashes first so \[x\](...) and \`code\` cannot survive as live Markdown.
+	if got := mdsafe.InlineText(`\[evil\](https://example.test)`); got != `\\\[evil\\\](https://example.test)` {
+		t.Fatalf("InlineText unexpected link escape: %q", got)
+	}
+	if got := mdsafe.InlineText("`code` and \\`code\\`"); got != "\\`code\\` and \\\\\\`code\\\\\\`" {
+		t.Fatalf("InlineText unexpected backtick escape: %q", got)
+	}
+	// Exact check: `\` -> `\\`, `[` -> `\[`, `` ` `` -> `` \` ``.
+	if got := mdsafe.InlineText(`\[x\](\` + "`a`" + `)`); got != `\\\[x\\\](\\`+"\\`a\\`"+`)` {
+		t.Fatalf("InlineText unexpected output: %q", got)
+	}
+
+	// 2. TableCode keeps odd backslash count before every pipe while preserving standalone backslashes.
+	for _, tc := range []struct {
+		in   string
+		want string
+	}{
+		{`a|b`, "`a\\|b`"},
+		{`a\|b`, "`a\\\\\\|b`"},
+		{`a\\|b`, "`a\\\\\\\\\\|b`"},
+		{`a\\\|b`, "`a\\\\\\\\\\\\\\|b`"},
+		{`C:\Users\foo|bar`, "`C:\\Users\\foo\\|bar`"},
+	} {
+		if got := mdsafe.TableCode(tc.in); got != tc.want {
+			t.Errorf("TableCode(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+		if p := countUnescapedPipes(mdsafe.TableCode(tc.in)); p != 0 {
+			t.Errorf("TableCode(%q) produced %d unescaped pipe(s): %q", tc.in, p, mdsafe.TableCode(tc.in))
+		}
+	}
+
+	// 3. All 5 report generators keep exact table column counts for backslash+pipe parity attacks (k=0..5).
+	for k := 0; k <= 5; k++ {
+		hostile := "pre" + strings.Repeat(`\`, k) + `|col \[evil\](https://example.test) ` + "\\`code\\`"
+		roleMD := (&roles.Report{
+			Host:      "app.example",
+			Roles:     []string{"anon", "admin"},
+			Generated: time.Date(2026, 11, 21, 9, 0, 0, 0, time.UTC),
+			Items: []roles.Item{{
+				Layer:    "endpoint",
+				Class:    roles.HigherOnly,
+				Key:      hostile,
+				Lowest:   "admin",
+				States:   map[string]roles.State{"anon": "none", "admin": "ok"},
+				Evidence: map[string]*roles.Evidence{"admin": {Label: hostile}},
+			}},
+		}).Markdown()
+		authzMD := (&replay.AuthzReport{
+			Host:  "app.example",
+			Roles: []string{"anon", "admin"},
+			Items: []replay.AuthzItem{{
+				Key:    hostile,
+				Class:  "higher_only",
+				Sample: hostile,
+				Trials: []replay.Trial{{Role: "anon", Judgement: replay.Judgement{Verdict: replay.Bypass, Reason: hostile}, Status: 200, Size: 10}},
+			}},
+		}).Markdown()
+		bolaMD := (&replay.BolaReport{
+			Host:     "app.example",
+			Peers:    [2]string{"alice", "bob"},
+			Relation: "same-org",
+			Redacted: false,
+			Items: []replay.PeerItem{{
+				Key:       hostile,
+				Direction: "alice->bob",
+				Mode:      "direct",
+				Judgement: replay.Judgement{Verdict: replay.Bypass, Reason: hostile},
+				Evidence:  []replay.EvidencePair{{Path: "$.note", Value: hostile}},
+			}},
+		}).Markdown()
+		verifyMD := verify.Markdown(&verify.Report{
+			Target: "app.example",
+			Role:   "anon",
+			Results: []verify.Result{{
+				Verdict: verify.Alive,
+				Method:  "GET",
+				URL:     hostile,
+				Reason:  hostile,
+			}},
+		})
+		monMD := (&monitor.Result{
+			Snapshot: &monitor.Snapshot{ID: "snap1", Taken: time.Now().UTC()},
+			Changes: []monitor.Change{{
+				Severity: "high",
+				Kind:     "endpoint_added",
+				Key:      hostile,
+				Roles:    []string{"anon"},
+				Before:   hostile,
+				After:    hostile,
+				Reason:   hostile,
+			}},
+		}).Markdown("app.example")
+
+		for name, md := range map[string]string{
+			"roles":   roleMD,
+			"authz":   authzMD,
+			"bola":    bolaMD,
+			"verify":  verifyMD,
+			"monitor": monMD,
+		} {
+			wantPipes := 0
+			for _, ln := range strings.Split(md, "\n") {
+				if strings.HasPrefix(ln, "|") {
+					p := countUnescapedPipes(ln)
+					if wantPipes == 0 {
+						wantPipes = p
+					} else if p != wantPipes {
+						t.Fatalf("k=%d %s table row broke column count (got %d pipes, want %d): %q", k, name, p, wantPipes, ln)
+					}
+				} else {
+					wantPipes = 0
+				}
 			}
 		}
 	}
