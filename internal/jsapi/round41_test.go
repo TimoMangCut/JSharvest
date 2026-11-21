@@ -371,6 +371,11 @@ func TestRound41EsbuildNonBracketRecursionSubprocess(t *testing.T) {
 			{"member", "app.js", "const x = a" + strings.Repeat(".b", 200_000) + ";", true},
 			{"new", "app.js", "const x = " + strings.Repeat("new ", 100_000) + "A;", true},
 			{"label", "app.js", strings.Repeat("l:", 100_000) + "a;", true},
+			{"index_chain", "app.js", "const x = a" + strings.Repeat("[0]", 100_000) + ";", true},
+			{"call_chain", "app.js", "const x = a" + strings.Repeat("()", 100_000) + ";", true},
+			{"jsx_backtick_linecomm", "app.tsx", "const x = <>`</>;\n" + strings.Repeat("a.b //\n", 100_000), false},
+			{"jsx_backtick_index_quote", "app.tsx", "const x = <>`</>;\nconst y = a" + strings.Repeat(`["b"]`, 100_000) + ";", false},
+			{"jsx_backtick_blockcomm_quote", "app.tsx", "const x = <>`</>; const y = " + strings.Repeat(`<a b="1">`, 60_000) + ` /* " */ ` + strings.Repeat("</a>", 60_000) + ";", false},
 		}
 		for _, v := range vectors {
 			r := ExtractSource([]byte(v.body), v.hint)
@@ -425,7 +430,12 @@ func TestRound41MaxNestingLexerDesyncBypass(t *testing.T) {
 		{"brace_div_not_regex", "({}/" + strings.Repeat("(", 5000) + "/1)"},
 		{"of_div_not_regex", "of/" + strings.Repeat("(", 5000) + "/1"},
 		{"jsx_text_apostrophe", "const x = <div>Don't</div>; " + strings.Repeat("(", 5000) + "; const y = <div>'</div>"},
-		{"raw_chain_inside_jsx_desync", "const x = <div>Don't</div>; " + strings.Repeat("!", 20_000) + "; const y = <div>'</div>"},
+		{"u2028_in_string", "\"hello\u2028" + strings.Repeat("(", 5000)},
+		{"index_chain", "const x = a" + strings.Repeat("[0]", 20_000) + ";"},
+		{"call_chain", "const x = a" + strings.Repeat("()", 20_000) + ";"},
+		{"jsx_backtick_linecomm", "const x = <>`</>;\n" + strings.Repeat("a.b //\n", 20_000)},
+		{"jsx_backtick_index_quote", "const x = <>`</>;\nconst y = a" + strings.Repeat(`["b"]`, 20_000) + ";"},
+		{"jsx_backtick_blockcomm_quote", "const x = <>`</>; const y = " + strings.Repeat(`<a b="1">`, 20_000) + ` /* " */ ` + strings.Repeat("</a>", 20_000) + ";"},
 	}
 	for _, tc := range cases {
 		_, over := maxNesting([]byte(tc.src), maxEsbuildNesting)
@@ -433,8 +443,14 @@ func TestRound41MaxNestingLexerDesyncBypass(t *testing.T) {
 			t.Errorf("%s: expected over=true, got false", tc.name)
 		}
 	}
-	// Verify valid normal constructs are not over.
+	// Verify valid normal constructs (incl. comma-separated arrays and semicolon-separated calls) are not over.
 	if _, over := maxNesting([]byte("const x = ({}/2); const y = of/2; a-- > 0;"), maxEsbuildNesting); over {
 		t.Error("valid division/decrement triggered false positive over=true")
+	}
+	if _, over := maxNesting([]byte("["+strings.Repeat("[1],", 10_000)+"]"), maxEsbuildNesting); over {
+		t.Error("comma-separated nested arrays triggered false positive over=true")
+	}
+	if _, over := maxNesting([]byte(strings.Repeat("f();", 10_000)), maxEsbuildNesting); over {
+		t.Error("semicolon-separated calls triggered false positive over=true")
 	}
 }

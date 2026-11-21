@@ -33,6 +33,7 @@ func maxNesting(src []byte, limit int) (int, bool) {
 	var tmplBraces []int
 	chainStack := make([]int, 1, 32)
 	var raw rawFuse
+	raw.chainStack = make([]int, 1, 32)
 
 	i := 0
 	if len(src) >= 2 && src[0] == '#' && src[1] == '!' {
@@ -207,6 +208,11 @@ func maxNesting(src []byte, limit int) (int, bool) {
 		case '(', '[', '{':
 			if raw.feed(c, limit > 0) {
 				return depth, true
+			}
+			if c != '{' && !canRegex {
+				if bumpChain() {
+					return depth, true
+				}
 			}
 			depth++
 			if depth > maxDepth {
@@ -498,20 +504,32 @@ func maxNesting(src []byte, limit int) (int, bool) {
 // byte so lexer-desync inputs cannot bypass maxNesting.
 type rawFuse struct {
 	depth       int
-	chain       int
-	prevSlash   bool
+	chainStack  []int
 	inLineComm  bool
+	inBlockComm bool
+	inQuote     byte
+	quoteEsc    bool
+	prevSlash   bool
+	prevStar    bool
+	u2028State  uint8
 	ident       [8]byte
 	identLen    int
 	inIdentSkip bool
+}
+
+func (r *rawFuse) bumpChain(checkLimit bool) bool {
+	top := len(r.chainStack) - 1
+	r.chainStack[top]++
+	return checkLimit && r.chainStack[top] > maxRawExprChain
 }
 
 func (r *rawFuse) flushIdent(checkLimit bool) bool {
 	if r.identLen > 0 && !r.inIdentSkip {
 		switch string(r.ident[:r.identLen]) {
 		case "new", "typeof", "void", "delete", "await", "yield", "else":
-			r.chain++
-			if checkLimit && r.chain > maxRawExprChain {
+			if r.bumpChain(checkLimit) {
+				r.identLen = 0
+				r.inIdentSkip = false
 				return true
 			}
 		}
@@ -522,8 +540,89 @@ func (r *rawFuse) flushIdent(checkLimit bool) bool {
 }
 
 func (r *rawFuse) feed(b byte, checkLimit bool) bool {
-	if isDepthIdentByte(b) {
+	switch b {
+	case '(', '[', '{':
+		r.depth++
+		if checkLimit && r.depth > maxRawBracketDepth {
+			return true
+		}
+	case ')', ']', '}':
+		if r.depth > 0 {
+			r.depth--
+		}
+	}
+
+	if r.inLineComm {
+		switch b {
+		case '\n', '\r':
+			r.inLineComm = false
+			r.u2028State = 0
+		case 0xe2:
+			r.u2028State = 1
+		case 0x80:
+			if r.u2028State == 1 {
+				r.u2028State = 2
+			} else {
+				r.u2028State = 0
+			}
+		case 0xa8, 0xa9:
+			if r.u2028State == 2 {
+				r.inLineComm = false
+			}
+			r.u2028State = 0
+		default:
+			r.u2028State = 0
+		}
+		return false
+	}
+	if r.inBlockComm {
+		if r.prevStar && b == '/' {
+			r.inBlockComm = false
+			r.prevStar = false
+		} else {
+			r.prevStar = b == '*'
+		}
+		return false
+	}
+	if r.inQuote != 0 {
+		if b == '\n' || b == '\r' {
+			r.inQuote = 0
+			r.quoteEsc = false
+			return false
+		}
+		if r.quoteEsc {
+			r.quoteEsc = false
+			return false
+		}
+		if b == '\\' {
+			r.quoteEsc = true
+			return false
+		}
+		if b == r.inQuote {
+			r.inQuote = 0
+		}
+		return false
+	}
+
+	if r.prevSlash {
 		r.prevSlash = false
+		if b == '/' {
+			r.inLineComm = true
+			r.u2028State = 0
+			r.identLen = 0
+			r.inIdentSkip = false
+			return false
+		}
+		if b == '*' {
+			r.inBlockComm = true
+			r.prevStar = false
+			r.identLen = 0
+			r.inIdentSkip = false
+			return false
+		}
+	}
+
+	if isDepthIdentByte(b) {
 		if !r.inIdentSkip {
 			if r.identLen < len(r.ident) {
 				r.ident[r.identLen] = b
@@ -538,48 +637,33 @@ func (r *rawFuse) feed(b byte, checkLimit bool) bool {
 		return true
 	}
 
-	if b == '/' {
-		if r.prevSlash {
-			r.inLineComm = true
-			r.prevSlash = false
-		} else {
-			r.prevSlash = true
-		}
-		return false
-	}
-	r.prevSlash = false
-
 	switch b {
-	case '\n':
-		if r.inLineComm {
-			r.chain = 0
-			r.inLineComm = false
-		}
-	case '\r':
-		if r.inLineComm {
-			r.chain = 0
-			r.inLineComm = false
-		}
-	case '(', '[', '{':
-		r.depth++
-		if checkLimit && r.depth > maxRawBracketDepth {
+	case '/':
+		r.prevSlash = true
+	case '"', '\'':
+		r.inQuote = b
+		r.quoteEsc = false
+	case '(', '[':
+		if r.bumpChain(checkLimit) {
 			return true
 		}
-		r.chain = 0
+		r.chainStack = append(r.chainStack, 0)
 	case ')', ']':
-		if r.depth > 0 {
-			r.depth--
+		if len(r.chainStack) > 1 {
+			r.chainStack = r.chainStack[:len(r.chainStack)-1]
 		}
+	case '{':
+		r.chainStack[len(r.chainStack)-1] = 0
+		r.chainStack = append(r.chainStack, 0)
 	case '}':
-		if r.depth > 0 {
-			r.depth--
+		if len(r.chainStack) > 1 {
+			r.chainStack = r.chainStack[:len(r.chainStack)-1]
 		}
-		r.chain = 0
-	case ';', ',', '"', '\'', '`':
-		r.chain = 0
+		r.chainStack[len(r.chainStack)-1] = 0
+	case ';', ',':
+		r.chainStack[len(r.chainStack)-1] = 0
 	case '!', '~', '?', ':', '=', '.', '<', '*', '+', '-':
-		r.chain++
-		if checkLimit && r.chain > maxRawExprChain {
+		if r.bumpChain(checkLimit) {
 			return true
 		}
 	}
@@ -670,6 +754,14 @@ func skipStringLiteral(src []byte, i int, quote byte, raw *rawFuse, checkLimit b
 			}
 		case quote, '\n', '\r':
 			return i + 1, false
+		case 0xe2:
+			if i+2 < len(src) && src[i+1] == 0x80 && (src[i+2] == 0xa8 || src[i+2] == 0xa9) {
+				if raw.feedSlice(src[i+1:i+3], checkLimit) {
+					return i, true
+				}
+				return i + 3, false
+			}
+			i++
 		default:
 			i++
 		}
