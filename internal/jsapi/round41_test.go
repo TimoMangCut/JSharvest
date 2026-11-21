@@ -353,3 +353,88 @@ func TestRound41NestedFunctionsBounded(t *testing.T) {
 		t.Fatalf("expected esbuild skipped error, got %q", r.Error)
 	}
 }
+
+func TestRound41EsbuildNonBracketRecursionSubprocess(t *testing.T) {
+	if os.Getenv("JSHARVEST_TEST_NONBRACKET_SUBPROC") == "1" {
+		vectors := []struct {
+			name string
+			hint string
+			body string
+			jsOK bool
+		}{
+			{"jsx_tag", "app.tsx", "const x = " + strings.Repeat("<a>", 80_000) + strings.Repeat("</a>", 80_000) + ";", false},
+			{"unary", "app.js", "const x = " + strings.Repeat("!", 300_000) + "1;", true},
+			{"ternary", "app.js", "const x = " + strings.Repeat("a?", 100_000) + "1" + strings.Repeat(":2", 100_000) + ";", true},
+			{"arrow", "app.js", "const x = " + strings.Repeat("a=>", 100_000) + "1;", true},
+			{"assign", "app.js", "let a; " + strings.Repeat("a=", 100_000) + "1;", true},
+			{"exp", "app.js", "const x = " + strings.Repeat("2**", 100_000) + "2;", true},
+			{"member", "app.js", "const x = a" + strings.Repeat(".b", 200_000) + ";", true},
+			{"new", "app.js", "const x = " + strings.Repeat("new ", 100_000) + "A;", true},
+			{"label", "app.js", strings.Repeat("l:", 100_000) + "a;", true},
+		}
+		for _, v := range vectors {
+			r := ExtractSource([]byte(v.body), v.hint)
+			if !strings.Contains(r.Error, "esbuild skipped") {
+				t.Fatalf("%s (%s): got Error=%q, want esbuild skipped", v.name, v.hint, r.Error)
+			}
+			if v.jsOK {
+				if rTS := ExtractSource([]byte(v.body), "mod.ts"); !strings.Contains(rTS.Error, "esbuild skipped") {
+					t.Fatalf("%s (mod.ts): got Error=%q, want esbuild skipped", v.name, rTS.Error)
+				}
+				if rVue := ExtractSource([]byte("<script lang=\"ts\">\n"+v.body+"\n</script>"), "Comp.vue"); !strings.Contains(rVue.Error, "esbuild skipped") {
+					t.Fatalf("%s (Comp.vue): got Error=%q, want esbuild skipped", v.name, rVue.Error)
+				}
+				if rExt := Extract([]byte(v.body)); !strings.Contains(rExt.Error, "esbuild skipped") {
+					t.Fatalf("%s (Extract): got Error=%q, want esbuild skipped", v.name, rExt.Error)
+				}
+			}
+		}
+		return
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	cmd := exec.Command(exe, "-test.run=^TestRound41EsbuildNonBracketRecursionSubprocess$")
+	cmd.Env = append(os.Environ(), "JSHARVEST_TEST_NONBRACKET_SUBPROC=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("non-bracket recursion subprocess crashed: %v\n%s", err, out)
+	}
+	limit := 2 * time.Second
+	if isRaceBuild() {
+		limit = 10 * time.Second
+	}
+	if took := time.Since(start); took > limit {
+		t.Fatalf("non-bracket recursion subprocess took %s, want <= %s", took, limit)
+	}
+}
+
+func TestRound41MaxNestingLexerDesyncBypass(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+	}{
+		{"cr_line_comment", "//\r" + strings.Repeat("(", 5000)},
+		{"u2028_line_comment", "//\u2028" + strings.Repeat("(", 5000)},
+		{"u2029_line_comment", "//\u2029" + strings.Repeat("(", 5000)},
+		{"html_open_comment", "<!--\n" + strings.Repeat("(", 5000)},
+		{"html_close_comment", "  -->\n" + strings.Repeat("(", 5000)},
+		{"brace_div_not_regex", "({}/" + strings.Repeat("(", 5000) + "/1)"},
+		{"of_div_not_regex", "of/" + strings.Repeat("(", 5000) + "/1"},
+		{"jsx_text_apostrophe", "const x = <div>Don't</div>; " + strings.Repeat("(", 5000) + "; const y = <div>'</div>"},
+		{"raw_chain_inside_jsx_desync", "const x = <div>Don't</div>; " + strings.Repeat("!", 20_000) + "; const y = <div>'</div>"},
+	}
+	for _, tc := range cases {
+		_, over := maxNesting([]byte(tc.src), maxEsbuildNesting)
+		if !over {
+			t.Errorf("%s: expected over=true, got false", tc.name)
+		}
+	}
+	// Verify valid normal constructs are not over.
+	if _, over := maxNesting([]byte("const x = ({}/2); const y = of/2; a-- > 0;"), maxEsbuildNesting); over {
+		t.Error("valid division/decrement triggered false positive over=true")
+	}
+}
