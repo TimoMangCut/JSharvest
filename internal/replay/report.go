@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/TimoMangCut/JSharvest/internal/mdsafe"
 )
 
 // verdictRank orders authz.md: the findings first.
@@ -30,15 +32,19 @@ func (r *AuthzReport) Write(dir string) error {
 
 func (r *AuthzReport) Markdown() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "# Authorization trials: %s\n\nRoles, lowest first: %s. Requests sent: %d.\n", r.Host, strings.Join(r.Roles, " < "), r.Sent)
+	var safeRoles []string
+	for _, role := range r.Roles {
+		safeRoles = append(safeRoles, mdsafe.InlineText(role))
+	}
+	fmt.Fprintf(&b, "# Authorization trials: %s\n\nRoles, lowest first: %s. Requests sent: %d.\n", mdsafe.InlineText(r.Host), strings.Join(safeRoles, " < "), r.Sent)
 	if r.Stopped != "" {
-		fmt.Fprintf(&b, "\n**The run stopped:** %s. Items after it were not tried.\n", r.Stopped)
+		fmt.Fprintf(&b, "\n**The run stopped:** %s. Items after it were not tried.\n", mdsafe.InlineText(r.Stopped))
 	}
 	for _, h := range sortedKeys(r.HostsBlocked) {
-		fmt.Fprintf(&b, "\n**Host given up:** %s: %s. Its items after that were not tried.\n", h, r.HostsBlocked[h])
+		fmt.Fprintf(&b, "\n**Host given up:** %s: %s. Its items after that were not tried.\n", mdsafe.InlineText(h), mdsafe.InlineText(r.HostsBlocked[h]))
 	}
 	for _, n := range r.Notes {
-		fmt.Fprintf(&b, "\n- %s", n)
+		fmt.Fprintf(&b, "\n- %s", mdsafe.InlineText(n))
 	}
 	type row struct {
 		it AuthzItem
@@ -61,8 +67,15 @@ func (r *AuthzReport) Markdown() string {
 		if x.t.Status != 0 {
 			trial = fmt.Sprintf("%d, %d B", x.t.Status, x.t.Size)
 		}
-		fmt.Fprintf(&b, "| %s | `%s` | %s | %s | %s | %s | %s | %s |\n", x.t.Verdict, x.it.Key, x.it.Class, x.t.Role, x.it.Sample, trial, ctl,
-			strings.ReplaceAll(x.t.Reason, "|", "/"))
+		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s | %s | %s |\n",
+			mdsafe.TableText(string(x.t.Verdict)),
+			mdsafe.TableCode(x.it.Key),
+			mdsafe.TableText(x.it.Class),
+			mdsafe.TableText(x.t.Role),
+			mdsafe.TableText(x.it.Sample),
+			mdsafe.TableText(trial),
+			mdsafe.TableText(ctl),
+			mdsafe.TableText(x.t.Reason))
 	}
 	b.WriteString("\nVerdicts: bypass, the lower role gets what the higher one gets; unauthenticated, so does a request with no identity; likely, nearly; needs-review, a success with another answer (filtered, its own object); enforced, refused; unclear, nothing to conclude (a control failed, a CSRF token went stale, a dead session…); skipped, not sent. The trial files (authz/trials/) hold the lower roles' live credentials.\n")
 	return b.String()

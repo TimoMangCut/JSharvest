@@ -18,6 +18,7 @@ import (
 	"github.com/TimoMangCut/JSharvest/internal/endpoints"
 	"github.com/TimoMangCut/JSharvest/internal/guard"
 	"github.com/TimoMangCut/JSharvest/internal/marker"
+	"github.com/TimoMangCut/JSharvest/internal/mdsafe"
 	"github.com/TimoMangCut/JSharvest/internal/replay"
 	"github.com/TimoMangCut/JSharvest/internal/traffic"
 )
@@ -1346,21 +1347,21 @@ func Markdown(rep *Report) string {
 	if rep.DryRun {
 		mode = "dry run: nothing sent, the plan below"
 	}
-	fmt.Fprintf(&b, "# jsharvest verify: %s (%s)\n\n%s; %d request(s)", rep.Target, rep.Role, mode, rep.Sent)
+	fmt.Fprintf(&b, "# jsharvest verify: %s (%s)\n\n%s; %d request(s)", mdsafe.InlineText(rep.Target), mdsafe.InlineText(rep.Role), mode, rep.Sent)
 	if rep.Stopped != "" {
-		fmt.Fprintf(&b, "; stopped: %s", rep.Stopped)
+		fmt.Fprintf(&b, "; stopped: %s", mdsafe.InlineText(rep.Stopped))
 	}
 	b.WriteString("\n\n")
 	for _, h := range slices.Sorted(mapsKeys(rep.HostsGated)) {
-		fmt.Fprintf(&b, "**Host gated:** %s: %s. Its other drafts are `host_gated`.\n\n", h, rep.HostsGated[h])
+		fmt.Fprintf(&b, "**Host gated:** %s: %s. Its other drafts are `host_gated`.\n\n", mdsafe.InlineText(h), mdsafe.InlineText(rep.HostsGated[h]))
 	}
 	for _, h := range slices.Sorted(mapsKeys(rep.HostsBlocked)) {
-		fmt.Fprintf(&b, "**Host given up:** %s: %s. Its drafts after that are `host_blocked`.\n\n", h, rep.HostsBlocked[h])
+		fmt.Fprintf(&b, "**Host given up:** %s: %s. Its drafts after that are `host_blocked`.\n\n", mdsafe.InlineText(h), mdsafe.InlineText(rep.HostsBlocked[h]))
 	}
 	counts := func(title string, m map[string]int) {
 		fmt.Fprintf(&b, "## %s\n\n| | |\n|---|---|\n", title)
 		for _, k := range slices.Sorted(mapsKeys(m)) {
-			fmt.Fprintf(&b, "| %s | %d |\n", k, m[k])
+			fmt.Fprintf(&b, "| %s | %d |\n", mdsafe.TableText(k), m[k])
 		}
 		b.WriteString("\n")
 	}
@@ -1373,7 +1374,7 @@ func Markdown(rep *Report) string {
 		if c.Answer != nil {
 			a = c.Answer.String()
 		}
-		fmt.Fprintf(&b, "| %s | %d | %s |\n", c.Prefix, c.Drafts, a)
+		fmt.Fprintf(&b, "| %s | %d | %s |\n", mdsafe.TableText(c.Prefix), c.Drafts, mdsafe.TableText(a))
 	}
 	b.WriteString("\n## Results\n\n| verdict | method | URL | note |\n|---|---|---|---|\n")
 	rs := slices.Clone(rep.Results)
@@ -1393,7 +1394,11 @@ func Markdown(rep *Report) string {
 		if u == "" {
 			u = r.Path
 		}
-		fmt.Fprintf(&b, "| %s | %s | %s | %s |\n", r.Verdict, r.Method, strings.ReplaceAll(u, "|", "%7C"), strings.ReplaceAll(strings.TrimSpace(note), "|", "/"))
+		fmt.Fprintf(&b, "| %s | %s | %s | %s |\n",
+			mdsafe.TableText(string(r.Verdict)),
+			mdsafe.TableText(r.Method),
+			mdsafe.TableText(u),
+			mdsafe.TableText(strings.TrimSpace(note)))
 	}
 	if len(rep.CloudChecks) > 0 {
 		b.WriteString("\n## Cloud Storage Checks\n\n| status | provider | bucket | URL |\n|---|---|---|---|\n")
@@ -1402,7 +1407,11 @@ func Markdown(rep *Report) string {
 			if st == "" && c.Error != "" {
 				st = "error"
 			}
-			fmt.Fprintf(&b, "| %s | %s | %s | %s |\n", st, c.Provider, c.Bucket, strings.ReplaceAll(c.URL, "|", "%7C"))
+			fmt.Fprintf(&b, "| %s | %s | %s | %s |\n",
+				mdsafe.TableText(st),
+				mdsafe.TableText(c.Provider),
+				mdsafe.TableText(c.Bucket),
+				mdsafe.TableText(c.URL))
 		}
 	}
 	return b.String()

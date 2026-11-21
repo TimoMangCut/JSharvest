@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/TimoMangCut/JSharvest/internal/flow"
+	"github.com/TimoMangCut/JSharvest/internal/mdsafe"
 )
 
 // What each class means for a tester, in the order of the report.
@@ -41,12 +42,16 @@ func (r *Report) Write(root string) error {
 // Markdown is the report for a person.
 func (r *Report) Markdown() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "# Roles of %s: %s\n\n", r.Host, strings.Join(r.Roles, " < "))
+	var safeRoles []string
+	for _, role := range r.Roles {
+		safeRoles = append(safeRoles, mdsafe.InlineText(role))
+	}
+	fmt.Fprintf(&b, "# Roles of %s: %s\n\n", mdsafe.InlineText(r.Host), strings.Join(safeRoles, " < "))
 	fmt.Fprintf(&b, "Generated %s. Each line: the item, its class, and the state of each role (lowest first).\n\n", r.Generated.Format("2006-01-02 15:04 UTC"))
 	if len(r.Warnings) > 0 {
 		b.WriteString("## Warnings\n\n")
 		for _, w := range r.Warnings {
-			fmt.Fprintf(&b, "- %s\n", w)
+			fmt.Fprintf(&b, "- %s\n", mdsafe.InlineText(w))
 		}
 		b.WriteString("\n")
 	}
@@ -58,21 +63,25 @@ func (r *Report) Markdown() string {
 				continue
 			}
 			if it.Class != last {
-				lines = append(lines, fmt.Sprintf("\n**%s**: %s\n", it.Class, classText[it.Class]))
+				lines = append(lines, fmt.Sprintf("\n**%s**: %s\n", mdsafe.InlineText(it.Class), classText[it.Class]))
 				last = it.Class
 			}
 			var st []string
 			for _, role := range r.Roles {
-				st = append(st, fmt.Sprintf("%s=%s", role, it.States[role]))
+				st = append(st, fmt.Sprintf("%s=%s", mdsafe.InlineText(role), mdsafe.InlineText(string(it.States[role]))))
 			}
 			extra := ""
 			if len(it.Also) > 0 {
-				extra = " (also " + strings.Join(it.Also, ", ") + ")"
+				var also []string
+				for _, a := range it.Also {
+					also = append(also, mdsafe.InlineText(a))
+				}
+				extra = " (also " + strings.Join(also, ", ") + ")"
 			}
 			if e := it.Evidence[it.Lowest]; e != nil && e.Label != "" {
-				extra += fmt.Sprintf(" — %q", e.Label)
+				extra += fmt.Sprintf(" — %q", mdsafe.InlineText(e.Label))
 			}
-			lines = append(lines, fmt.Sprintf("- `%s` %s%s", it.Key, strings.Join(st, " "), extra))
+			lines = append(lines, fmt.Sprintf("- %s %s%s", mdsafe.InlineCode(it.Key), strings.Join(st, " "), extra))
 		}
 		if len(lines) == 0 {
 			continue

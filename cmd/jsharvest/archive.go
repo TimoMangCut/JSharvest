@@ -19,6 +19,7 @@ import (
 
 	"github.com/TimoMangCut/JSharvest/internal/archive"
 	"github.com/TimoMangCut/JSharvest/internal/endpoints"
+	"github.com/TimoMangCut/JSharvest/internal/mdsafe"
 	"github.com/TimoMangCut/JSharvest/internal/netsafe"
 	"github.com/TimoMangCut/JSharvest/internal/replay"
 	"github.com/TimoMangCut/JSharvest/internal/scope"
@@ -198,7 +199,7 @@ func (e *archiveEnv) buildClients() error {
 	o := archive.Options{Dir: e.dir, Root: cfg.out, Host: hostOnly(cfg.target), InScope: e.in, Since: cfg.from, Live: cfg.live,
 		MaxFiles: cfg.maxFiles, MaxPages: cfg.maxPages, MaxHTML: cfg.maxHTML, MaxSourceFiles: cfg.maxSourceFiles, MaxStoreBytes: int64(cfg.maxStoreMB) << 20,
 		Vendor: cfg.vendor, MaxBody: 32 << 20, Workers: cfg.concurrency, Sources: strings.Split(cfg.sources, ","),
-		Log: func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) }}
+		Log: func(f string, a ...any) { fmt.Fprintln(os.Stderr, mdsafe.StripControls(fmt.Sprintf(f, a...))) }}
 
 	// Patient budgets (EDGI's client keeps under 0.4/s for the CDX server
 	// at its request); the gate shortens them.
