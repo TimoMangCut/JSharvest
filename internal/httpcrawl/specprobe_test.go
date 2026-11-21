@@ -79,8 +79,9 @@ function getInvoices() { return api.get("billing/v1/invoices"); }
 
 	var specs []string
 	res, err := Crawl(context.Background(), Options{
-		Target:  u,
-		InScope: func(string) bool { return true },
+		Target:   u,
+		InScope:  func(string) bool { return true },
+		Resolver: nxResolver,
 		Probe:   true,
 		Rate:    1000,
 		Script: func(s Script) {
@@ -177,11 +178,12 @@ func TestSpecProbeUniformGateAutoBrake(t *testing.T) {
 			u, _ := url.Parse(srv.URL + "/")
 
 			res, err := Crawl(context.Background(), Options{
-				Target:  u,
-				InScope: func(string) bool { return true },
-				Depth:   1,
-				Probe:   true,
-				Rate:    1000,
+				Target:   u,
+				InScope:  func(string) bool { return true },
+				Resolver: nxResolver,
+				Depth:    1,
+				Probe:    true,
+				Rate:     1000,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -274,6 +276,7 @@ fetch("http://api.unrelated.test:%s/v1/ping");
 			InScope:      inScope,
 			HostRules:    hostRules,
 			NoDNS:        true,
+			Resolver:     nxResolver,
 			AllowPrivate: true,
 			Probe:        true,
 			Rate:         1000,
@@ -335,6 +338,7 @@ fetch("http://api.unrelated.test:%s/v1/ping");
 		_, err := Crawl(context.Background(), Options{
 			Target:      u,
 			InScope:     func(string) bool { return true },
+			Resolver:    nxResolver,
 			Probe:       true,
 			NoSpecProbe: true,
 			Rate:        1000,
@@ -407,8 +411,9 @@ fetch("/v1/skipme");
 	u, _ := url.Parse(srv.URL + "/")
 
 	res, err := Crawl(context.Background(), Options{
-		Target:  u,
-		InScope: func(string) bool { return true },
+		Target:   u,
+		InScope:  func(string) bool { return true },
+		Resolver: nxResolver,
 		Probe:   true,
 		Rate:    1000,
 	})

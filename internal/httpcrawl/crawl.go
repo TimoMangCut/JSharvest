@@ -15,8 +15,10 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"slices"
@@ -440,11 +442,34 @@ func Crawl(ctx context.Context, o Options) (*Result, error) {
 	defer cancel()
 	base, _ := cookiejar.New(nil)
 	jar := &recJar{CookieJar: base}
-	policy := resolve.NewPolicy(o.Target.Hostname(), o.InScope, o.NoDNS)
+	rules, _ := netsafe.ParseHostRules(o.HostRules)
+	var policyLookup func(context.Context, string) ([]netip.Addr, error)
+	if len(rules) > 0 || o.Resolver != nil {
+		res := o.Resolver
+		if res == nil {
+			res = netsafe.SystemResolver
+		}
+		policyLookup = func(ctx context.Context, host string) ([]netip.Addr, error) {
+			if len(rules) > 0 {
+				probe := net.JoinHostPort(host, "0")
+				if m := rules.MapAddr(probe); m != probe {
+					if mh, _, err := net.SplitHostPort(m); err == nil {
+						mh = strings.Trim(mh, "[]")
+						if a, err := netip.ParseAddr(mh); err == nil {
+							return []netip.Addr{a}, nil
+						}
+						host = mh
+					}
+				}
+			}
+			return res(ctx, host)
+		}
+	}
+	policy := resolve.NewPolicyWithLookup(o.Target.Hostname(), o.InScope, o.NoDNS, policyLookup)
 	allowOffscope, _ := frontier.EffectiveProbeOffscope(o.ProbeOffscope, o.Proxy != nil)
-	specPolicy := resolve.NewPolicy(o.Target.Hostname(), func(h string) bool {
+	specPolicy := resolve.NewPolicyWithLookup(o.Target.Hostname(), func(h string) bool {
 		return !frontier.IsTrackerHost(h) && (allowOffscope || o.InScope == nil || o.InScope(h))
-	}, o.NoDNS)
+	}, o.NoDNS, policyLookup)
 	// Whether the target is internal is not the policy's answer (it takes a
 	// target with any private address for internal): every address private,
 	// a private literal, or a host rule to one; no lookup behind a proxy.

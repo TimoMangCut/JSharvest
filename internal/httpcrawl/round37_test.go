@@ -51,6 +51,7 @@ func TestRound37EarlyWorkerReclaimAvoidsHeadOfLineSerialization(t *testing.T) {
 	_, err := Crawl(context.Background(), Options{
 		Target:      u,
 		InScope:     func(string) bool { return true },
+		Resolver:    nxResolver,
 		Depth:       1,
 		Rate:        1000,
 		PageWorkers: 4,
@@ -137,6 +138,7 @@ func TestRound37SourceMapSingleflightDedupAndStrippedFallback(t *testing.T) {
 		Target:       u,
 		InScope:      func(h string) bool { return strings.HasSuffix(h, ".jsh.test") },
 		HostRules:    "MAP *.jsh.test 127.0.0.1",
+		Resolver:     nxResolver,
 		AllowPrivate: true,
 		Depth:        1,
 		Rate:         1000,

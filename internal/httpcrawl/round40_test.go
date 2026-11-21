@@ -67,6 +67,7 @@ func TestRound40SpecProbeScopeAndThirdPartyBlocking(t *testing.T) {
 			Target:    targetURL,
 			InScope:   inScope,
 			HostRules: fmt.Sprintf("MAP * 127.0.0.1:%s", port),
+			Resolver:  nxResolver,
 			Depth:     1,
 			Rate:      500,
 			Probe:     true,
@@ -151,8 +152,9 @@ func TestRound40Soft200SPAShellMarkedInSoftProbes(t *testing.T) {
 
 	uSPA, _ := url.Parse(spaSrv.URL + "/")
 	resSPA, err := Crawl(context.Background(), Options{
-		Target:  uSPA,
-		InScope: func(string) bool { return true },
+		Target:   uSPA,
+		InScope:  func(string) bool { return true },
+		Resolver: nxResolver,
 		Depth:   1,
 		Rate:    500,
 		Probe:   true,
@@ -194,8 +196,9 @@ func TestRound40Soft200SPAShellMarkedInSoftProbes(t *testing.T) {
 
 	uDoc, _ := url.Parse(docSrv.URL + "/")
 	resDoc, err := Crawl(context.Background(), Options{
-		Target:  uDoc,
-		InScope: func(string) bool { return true },
+		Target:   uDoc,
+		InScope:  func(string) bool { return true },
+		Resolver: nxResolver,
 		Depth:   1,
 		Rate:    500,
 		Probe:   true,

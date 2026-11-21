@@ -45,10 +45,20 @@ type Policy struct {
 // would leave the machine outside the proxy. Then only literal addresses are
 // checked; scope still holds every request to the target's domain.
 func NewPolicy(target string, inScope scope.Func, noDNS bool) *Policy {
-	p := &Policy{InScope: inScope, Lookup: lookup}
-	if noDNS {
-		p.Lookup = func(context.Context, string) ([]netip.Addr, error) { return nil, errNoDNS }
+	return NewPolicyWithLookup(target, inScope, noDNS, nil)
+}
+
+// NewPolicyWithLookup builds the policy using lookupFn when noDNS is false
+// and lookupFn is non-nil (falling back to net.DefaultResolver otherwise).
+func NewPolicyWithLookup(target string, inScope scope.Func, noDNS bool, lookupFn func(context.Context, string) ([]netip.Addr, error)) *Policy {
+	fn := lookup
+	if lookupFn != nil {
+		fn = lookupFn
 	}
+	if noDNS {
+		fn = func(context.Context, string) ([]netip.Addr, error) { return nil, errNoDNS }
+	}
+	p := &Policy{InScope: inScope, Lookup: fn}
 	p.TargetPublic = p.public(target)
 	return p
 }

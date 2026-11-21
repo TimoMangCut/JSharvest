@@ -74,6 +74,7 @@ func TestSpecProbeThirdPartyChallengeIsolatesPerHostAndXHTMLGuard(t *testing.T) 
 		HostRules:    hostRules,
 		AllowPrivate: true,
 		NoDNS:        true,
+		Resolver:     nxResolver,
 		Probe:        true,
 		Rate:         500,
 		Timeout:      5 * time.Second,
