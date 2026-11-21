@@ -59,6 +59,9 @@ docker build -t jsharvest .
 docker compose run --rm jsharvest help
 ```
 
+> [!IMPORTANT]
+> **noVNC Security (Interactive `login` in Docker):** When running interactive `login` inside a container, bind noVNC strictly to host loopback (`-p 127.0.0.1:6080:6080`) rather than `0.0.0.0:6080:6080`. If `JSHARVEST_VNC_PASSWORD` is not set, the generated password is written with `0600` permissions to `$HOME/vnc-password` inside the container (`docker exec <container> cat "$HOME/vnc-password"`) instead of container stderr logs.
+
 ### 2. Common Workflows
 
 ```bash

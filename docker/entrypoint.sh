@@ -60,9 +60,10 @@ if [ "$display" = 1 ]; then
   pass=${JSHARVEST_VNC_PASSWORD:-}
   if [ -z "$pass" ]; then
     pass=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 8)
-    echo "noVNC password: $pass" >&2
+    (umask 077 && mkdir -p "$HOME" && chmod 700 "$HOME" && printf '%s\n' "$pass" >"$HOME/vnc-password")
+    echo "noVNC password saved to $HOME/vnc-password (read with: docker exec <container> cat \"$HOME/vnc-password\", or pass JSHARVEST_VNC_PASSWORD)" >&2
   fi
-  x11vnc -storepasswd "$pass" "$HOME/.vncpass" >/dev/null 2>&1
+  (umask 077 && x11vnc -storepasswd "$pass" "$HOME/.vncpass" >/dev/null 2>&1)
   unset pass JSHARVEST_VNC_PASSWORD
 
   # noVNC on the container's own interfaces, to publish on the host's
