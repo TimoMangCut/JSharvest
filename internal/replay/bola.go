@@ -1129,6 +1129,9 @@ func (b *bola) trialFile(key, mode, from, to string, raw []byte) string {
 	// hosts' of one path, from overwriting each other.
 	_, host, _, _ := keyParts(key)
 	b.trialN++
+	if r := b.o.Sender.Redactor(); r != nil {
+		raw = []byte(RedactRaw(r, string(raw)))
+	}
 	name := fmt.Sprintf("trials/bola.%s.%s%s.n%d.%s-as-%s.http", slugRe.ReplaceAllString(strings.ToLower(host), "-"), slugKey(key), suffix, b.trialN, from, to)
 	p := filepath.Join(b.o.Out, name)
 	if os.MkdirAll(filepath.Dir(p), 0o700) != nil || os.WriteFile(p, raw, 0o600) != nil {

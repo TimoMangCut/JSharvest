@@ -35,7 +35,7 @@ func runReplay(args []string) error {
 	allowDestructive := fs.Bool("allow-destructive", false, "with -allow-write, send destructive requests too (DELETE, purge, remove…): never a logout")
 	keepIDs := fs.Bool("keep-ids", false, "take only credentials (a CSRF token) fresh; keep the ids and values earlier answers gave as recorded")
 	scopeMode := fs.String("scope", "fqdn", "rdn or fqdn: the hosts requests may go to")
-	rf := addReplayFlags(fs)
+	rf := addReplayFlags(fs, false)
 	fs.Parse(args)
 	if *target == "" || *action == "" {
 		return errors.New("replay: -target and -flow are required")

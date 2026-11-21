@@ -1,9 +1,11 @@
 package replay
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -335,5 +337,104 @@ func TestRound41PatchFailureAndReplayAsDropOwnerCredentials(t *testing.T) {
 	}
 	if len(res.Steps) != 3 || !res.Steps[1].Sent || res.Steps[2].Sent || res.Steps[2].Skipped == "" {
 		t.Fatalf("unexpected replay steps: %+v", res.Steps)
+	}
+}
+
+func TestRound41SentAndTrialsRedacted(t *testing.T) {
+	r := traffic.NewRedactor()
+
+	// 1. RedactRaw handles proxy-form userinfo, query token, headers, body, and Content-Length.
+	rawWire := "POST http://bob:hunter22pass@app.test/api/v1/login?access_token=qtok_999 HTTP/1.1\r\n" +
+		"Host: app.test\r\n" +
+		"Authorization: Bearer bearer_secret_123\r\n" +
+		"Cookie: sid=cookie_secret_456\r\n" +
+		"Content-Type: application/json\r\n" +
+		"Content-Length: 39\r\n\r\n" +
+		`{"password":"very_long_password_value"}`
+	scrubbed := RedactRaw(r, rawWire)
+	for _, leak := range []string{"hunter22pass", "qtok_999", "bearer_secret_123", "cookie_secret_456", "very_long_password_value"} {
+		if strings.Contains(scrubbed, leak) {
+			t.Fatalf("RedactRaw leaked %q:\n%s", leak, scrubbed)
+		}
+	}
+	parsedReq, err := http.ReadRequest(bufio.NewReader(strings.NewReader(scrubbed)))
+	if err != nil {
+		t.Fatalf("http.ReadRequest failed after RedactRaw: %v\n%s", err, scrubbed)
+	}
+	parsedBody, err := io.ReadAll(parsedReq.Body)
+	if err != nil || int64(len(parsedBody)) != parsedReq.ContentLength {
+		t.Fatalf("redacted body length mismatch: read=%d cl=%d err=%v", len(parsedBody), parsedReq.ContentLength, err)
+	}
+
+	// 2. Sender with Redactor scrubs Request, Set-Cookie, 64KB response body, Sent.Err, and HostsBlocked,
+	// while returning the unredacted Answer in memory to callers.
+	const respSecret = "resp_token_secret_7890"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Set-Cookie", "sid=new_server_cookie_abc; Path=/; HttpOnly")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"access_token":%q,"pad":%q}`, respSecret, strings.Repeat("p", 40_000))
+	}))
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL)
+
+	sentPath := filepath.Join(t.TempDir(), "sent.jsonl")
+	sender, err := NewSender(SenderOptions{
+		Hosts:        map[string]bool{u.Host: true, "127.0.0.1:1": true},
+		AllowPrivate: true,
+		Log:          sentPath,
+		Redactor:     r,
+		Timeout:      2 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wireOK := fmt.Sprintf("GET /api/me?api_key=live_key_xyz HTTP/1.1\r\nHost: %s\r\nCookie: sid=client_cookie_xyz\r\n\r\n", u.Host)
+	ans, err := sender.Send(context.Background(), []byte(wireOK), "http", "trial", "user", "GET /api/me", nil)
+	if err != nil {
+		t.Fatalf("Send OK: %v", err)
+	}
+	// In-memory answer stays intact so Judge / CSRF extraction still sees real bytes.
+	if !strings.Contains(string(ans.Body), respSecret) {
+		t.Fatalf("expected unredacted in-memory Answer.Body")
+	}
+
+	// Trigger 5 consecutive errors on dead port 127.0.0.1:1 with a query secret to test Sent.Err & HostsBlocked.
+	wireDead := "GET /cb?access_token=err_url_secret_321 HTTP/1.1\r\nHost: 127.0.0.1:1\r\n\r\n"
+	for range 5 {
+		_, _ = sender.Send(context.Background(), []byte(wireDead), "http", "trial", "user", "GET /cb", nil)
+	}
+	if err := sender.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Also verify authz trialFile writes redacted .http parseable by http.ReadRequest.
+	azOut := t.TempDir()
+	az := &authz{o: AuthzOptions{Out: azOut, Sender: sender}}
+	tf := az.trialFile("GET " + u.Host + "/api/me", "user", []byte(wireOK))
+	if tf == "" {
+		t.Fatal("expected trialFile written")
+	}
+	trialBytes, err := os.ReadFile(filepath.Join(azOut, tf))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(trialBytes))); err != nil {
+		t.Fatalf("trial .http invalid HTTP: %v", err)
+	}
+
+	sentDisk, err := os.ReadFile(sentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockedJSON, _ := json.Marshal(sender.BlockedHosts())
+	combined := string(sentDisk) + "\n" + string(trialBytes) + "\n" + string(blockedJSON) + "\n" + sender.Stopped()
+	for _, leak := range []string{"live_key_xyz", "client_cookie_xyz", "new_server_cookie_abc", respSecret, "err_url_secret_321"} {
+		if strings.Contains(combined, leak) {
+			t.Fatalf("disk/blocked output leaked %q:\n%s", leak, combined[:min(len(combined), 1000)])
+		}
+	}
+	if !strings.Contains(string(sentDisk), "REDACTED_") || !strings.Contains(string(trialBytes), "REDACTED_") {
+		t.Fatalf("expected REDACTED_ markers in sent.jsonl and trial .http")
 	}
 }

@@ -87,6 +87,9 @@ func ReplayFlow(ctx context.Context, o FlowOptions) (*FlowResult, error) {
 		return nil, fmt.Errorf("replay: no flow %s", o.Action)
 	}
 	res := &FlowResult{Run: run, Action: f.Action, Label: f.Label, As: o.As.Role}
+	if r := o.Sender.Redactor(); r != nil && res.Label != "" {
+		res.Label = r.Text(res.Label)
+	}
 
 	// The flow's requests, and the sources of their values in other flows,
 	// once each, in time order.
@@ -128,7 +131,11 @@ func ReplayFlow(ctx context.Context, o FlowOptions) (*FlowResult, error) {
 		ids = append(ids, id)
 	}
 	sort.Slice(ids, func(i, j int) bool {
-		return m.Request(run, ids[i]).Entry.Time.Before(m.Request(run, ids[j]).Entry.Time)
+		ti, tj := m.Request(run, ids[i]).Entry.Time, m.Request(run, ids[j]).Entry.Time
+		if !ti.Equal(tj) {
+			return ti.Before(tj)
+		}
+		return ids[i] < ids[j]
 	})
 
 	answers := map[int]Answer{}
@@ -243,6 +250,9 @@ func ReplayFlow(ctx context.Context, o FlowOptions) (*FlowResult, error) {
 			o.Sender.mu.Unlock()
 		}
 		st.Sent, st.Status, st.Error = true, ans.Status, ans.Err
+		if r := o.Sender.Redactor(); r != nil && st.Error != "" && st.Error != "dry run" {
+			st.Error = r.URL(st.Error)
+		}
 		st.Blocked = ans.Block.String()
 		answers[id], sent[id] = ans, true
 		res.Steps = append(res.Steps, st)

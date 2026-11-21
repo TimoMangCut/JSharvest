@@ -127,11 +127,19 @@ modes() { # name: the files of the run, 0600, in 0700 directories (no trial file
 check_run() { sent_matches "$1"; never "$1"; modes "$1"; }
 
 echo "== B. authz -peers alice,bob (same-org)"
-bola same alice,bob alice-bob-same-org -- -relation same-org
+bola same alice,bob alice-bob-same-org -- -redact=false -relation same-org
 check_run same
-bola reveal alice,bob alice-bob-same-org -reveal -- -relation same-org -reveal
+bola redacted alice,bob - -- -relation same-org
+check_run redacted
+grep -q "REDACTED_" "$work/bola-redacted/bola.sent.jsonl" || fail "bola default -redact: no REDACTED_ in bola.sent.jsonl"
+while IFS=$'\t' read -r _ cred; do
+  [ -z "$cred" ] && continue
+  grep -qF -- "$cred" "$work/bola-redacted/bola.sent.jsonl" "$work/bola-redacted"/trials/*.http 2>/dev/null &&
+    fail "bola default -redact: raw peer credential leaked into bola.sent.jsonl or trials/"
+done <"$work/creds.txt"
+bola reveal alice,bob alice-bob-same-org -reveal -- -redact=false -relation same-org -reveal
 check_run reveal
-bola private alice,bob alice-bob-same-org-private -- -relation same-org -private 'orgs/.*/projects'
+bola private alice,bob alice-bob-same-org-private -- -redact=false -relation same-org -private 'orgs/.*/projects'
 check_run private
 jq -e '[.items[] | select(.key | test("/projects/")) | .verdict] | all(. == "bypass")' "$work/bola-private/bola.json" >/dev/null ||
   fail "-private: the projects are not all bypass"
@@ -139,13 +147,13 @@ jq -e '[.items[] | select(.key | test("/projects/")) | .verdict] | all(. == "sha
   fail "same-org: the projects are not all shared"
 
 echo "== C. authz -peers alice,charlie (cross-org)"
-bola cross alice,charlie alice-charlie-cross-org -- -relation cross-org
+bola cross alice,charlie alice-charlie-cross-org -- -redact=false -relation cross-org
 check_run cross
-bola subst alice,charlie alice-charlie-cross-org-substitute -- -relation cross-org -substitute
+bola subst alice,charlie alice-charlie-cross-org-substitute -- -redact=false -relation cross-org -substitute
 check_run subst
 
 echo "== D. authz -peers alice,dave (cross-org): Bogus"
-bola dave alice,dave alice-dave-cross-org -- -relation cross-org
+bola dave alice,dave alice-dave-cross-org -- -redact=false -relation cross-org
 check_run dave
 # featured answers a Bogus id as it answers the trial: enforced (gd7 8 #5), so
 # nothing is stopped here; the fuse is tested in internal/replay.

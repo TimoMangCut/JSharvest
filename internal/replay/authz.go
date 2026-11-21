@@ -1050,6 +1050,9 @@ func (a *authz) trialFile(key, role string, raw []byte) string {
 	if a.o.Out == "" {
 		return ""
 	}
+	if r := a.o.Sender.Redactor(); r != nil {
+		raw = []byte(RedactRaw(r, string(raw)))
+	}
 	name := fmt.Sprintf("trials/%s.%s.http", slugKey(key), role)
 	p := filepath.Join(a.o.Out, name)
 	if os.MkdirAll(filepath.Dir(p), 0o700) != nil || os.WriteFile(p, raw, 0o600) != nil {

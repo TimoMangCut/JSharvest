@@ -22,6 +22,7 @@ import (
 	"github.com/TimoMangCut/JSharvest/internal/marker"
 	"github.com/TimoMangCut/JSharvest/internal/netsafe"
 	"github.com/TimoMangCut/JSharvest/internal/tlsutil"
+	"github.com/TimoMangCut/JSharvest/internal/traffic"
 	"github.com/TimoMangCut/JSharvest/internal/uahints"
 )
 
@@ -80,8 +81,9 @@ type SenderOptions struct {
 	// AIA completes the chains of servers that send their leaf alone (nil:
 	// one of the sender's own).
 	AIA    *tlsutil.AIA
-	Log    string // sent.jsonl
-	DryRun bool
+	Log      string // sent.jsonl
+	DryRun   bool
+	Redactor *traffic.Redactor // when non-nil, scrubs sent.jsonl and blocked reasons
 	// OnBlock is what a vendor's block does: OnBlockHost (""), OnBlockSkip
 	// or OnBlockStop (round 25H).
 	OnBlock string
@@ -259,6 +261,14 @@ func (s *Sender) Stopped() string {
 	return s.stopped
 }
 
+// Redactor returns the sender's optional credential redactor.
+func (s *Sender) Redactor() *traffic.Redactor {
+	if s == nil {
+		return nil
+	}
+	return s.o.Redactor
+}
+
 func (s *Sender) stop(why string) {
 	if s.stopped == "" {
 		s.stopped = why
@@ -295,6 +305,9 @@ func (s *Sender) hostOf(host string) *hostState {
 func (s *Sender) giveUpLocked(hs *hostState, host, why string) {
 	if hs.given != "" {
 		return
+	}
+	if r := s.o.Redactor; r != nil {
+		why = r.URL(why)
 	}
 	hs.given = why
 	s.blocked[host] = why
@@ -716,7 +729,73 @@ func (s *Sender) write(l Sent) {
 	if s.enc == nil {
 		return
 	}
+	if r := s.o.Redactor; r != nil {
+		l.Request = RedactRaw(r, l.Request)
+		l.Headers = r.Headers(l.Headers)
+		if l.Body != "" {
+			l.Body = r.Text(l.Body)
+		}
+		if l.Err != "" {
+			l.Err = r.URL(l.Err)
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.enc.Encode(l)
+}
+
+// RedactRaw scrubs credentials in an HTTP/1.x wire request (request-line,
+// headers, and body) while keeping Content-Length valid for http.ReadRequest.
+func RedactRaw(r *traffic.Redactor, raw string) string {
+	if r == nil || raw == "" {
+		return raw
+	}
+	sep, lineSep := "\r\n\r\n", "\r\n"
+	headPart, bodyPart, hasBody := strings.Cut(raw, sep)
+	if !hasBody {
+		if h, b, ok := strings.Cut(raw, "\n\n"); ok {
+			sep, lineSep = "\n\n", "\n"
+			headPart, bodyPart, hasBody = h, b, true
+		} else if !strings.Contains(raw, "\r\n") && strings.Contains(raw, "\n") {
+			lineSep = "\n"
+		}
+	}
+	if hasBody && bodyPart != "" {
+		bodyPart = r.Text(bodyPart)
+	}
+	lines := strings.Split(headPart, lineSep)
+	if len(lines) > 0 {
+		sp1 := strings.IndexByte(lines[0], ' ')
+		sp2 := strings.LastIndexByte(lines[0], ' ')
+		if sp1 > 0 && sp2 > sp1 {
+			method := lines[0][:sp1]
+			target := lines[0][sp1+1 : sp2]
+			proto := lines[0][sp2+1:]
+			lines[0] = method + " " + r.URL(target) + " " + proto
+		} else {
+			lines[0] = r.Text(lines[0])
+		}
+		for i := 1; i < len(lines); i++ {
+			if lines[i] == "" {
+				continue
+			}
+			name, val, ok := strings.Cut(lines[i], ":")
+			if !ok {
+				lines[i] = r.Text(lines[i])
+				continue
+			}
+			cleanName := strings.TrimSpace(name)
+			if hasBody && strings.EqualFold(cleanName, "content-length") {
+				lines[i] = fmt.Sprintf("%s: %d", cleanName, len(bodyPart))
+				continue
+			}
+			redVal := r.Headers(map[string]string{cleanName: strings.TrimSpace(val)})[cleanName]
+			lines[i] = cleanName + ": " + redVal
+		}
+	}
+	rebuilt := strings.Join(lines, lineSep)
+	if hasBody {
+		return rebuilt + sep + bodyPart
+	}
+	return rebuilt
 }

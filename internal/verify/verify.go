@@ -261,6 +261,20 @@ func Run(ctx context.Context, o Options) (*Report, error) {
 			}
 		}
 	}
+	if o.Sender != nil {
+		if r := o.Sender.Redactor(); r != nil {
+			for i := range rep.Results {
+				if rep.Results[i].URL != "" {
+					rep.Results[i].URL = r.URL(rep.Results[i].URL)
+				}
+			}
+			for i := range rep.Canaries {
+				if rep.Canaries[i].Err != "" {
+					rep.Canaries[i].Err = r.URL(rep.Canaries[i].Err)
+				}
+			}
+		}
+	}
 	rep.Ended = time.Now().UTC()
 	return rep, ctx.Err()
 }

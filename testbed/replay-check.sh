@@ -94,7 +94,7 @@ never() { # name pattern...
 }
 
 echo "== B. authz, reads only"
-authz read
+authz read -redact=false
 ./bin/testbed authzscore -truth "$app/authz.truth.json" -authz "$work/authz-read" -secrets "$work/secrets.txt" || fail "authzscore read"
 sent_matches read
 never read "/api/az/admin/cache" "/api/login" "/api/logout" "POST /api/az/admin/invite" "POST /api/az/admin/notes"
@@ -105,14 +105,14 @@ done
 verdicts() { jq -c '[.items[] | {key, trials: [.trials[] | {role, verdict}]}]' "$work/authz-$1/authz.json"; }
 
 echo "== B2. authz -concurrency 4"
-authz conc -concurrency 4 -rate 0
+authz conc -concurrency 4 -rate 0 -redact=false
 ./bin/testbed authzscore -truth "$app/authz.truth.json" -authz "$work/authz-conc" -secrets "$work/secrets.txt" || fail "authzscore conc"
 [ "$(verdicts conc)" = "$(verdicts read)" ] || fail "concurrency 4: verdicts differ from one at a time: $(diff <(verdicts read | jq .) <(verdicts conc | jq .) | head -20)"
 sent_matches conc
 never conc "/api/az/admin/cache" "/api/login" "/api/logout" "POST /api/az/admin/invite" "POST /api/az/admin/notes"
 
 echo "== B3. authz -concurrency 4 -rate 10: the pace holds"
-authz pace -concurrency 4 -rate 10
+authz pace -concurrency 4 -rate 10 -redact=false
 gap=$(jq -r '.ts' "$work/authz-pace/sent.jsonl" | python3 -c '
 import sys, re, datetime
 def at(l):  # RFC 3339 with up to 9 digits: microseconds are enough
@@ -123,8 +123,22 @@ print(min((b - a).total_seconds() for a, b in zip(ts, ts[1:])) if len(ts) > 1 el
 python3 -c "import sys; sys.exit(0 if $gap >= 0.09 else 1)" || fail "concurrency 4 at rate 10: two requests $gap s apart"
 [ "$(verdicts pace)" = "$(verdicts read)" ] || fail "rate 10: verdicts differ"
 
+echo "== B4. authz default (-redact=true): sent.jsonl and trials/*.http scrubbed"
+authz redacted
+[ "$(verdicts redacted)" = "$(verdicts read)" ] || fail "redacted: verdicts differ"
+grep -q "REDACTED_" "$work/authz-redacted/sent.jsonl" || fail "redacted: no REDACTED_ marker in sent.jsonl"
+{
+  cat "$work/secrets.txt"
+  jq -r '.cookies[] | select(.name == "session") | .value' "$work/profiles/127.0.0.1/user/jsharvest-session.json"
+} | sort -u >"$work/all-role-secrets.txt"
+while IFS= read -r s; do
+  [ -z "$s" ] && continue
+  grep -qF -- "$s" "$work/authz-redacted/sent.jsonl" "$work/authz-redacted"/trials/*.http 2>/dev/null &&
+    fail "redacted: raw credential leaked into sent.jsonl or trials/"
+done <"$work/all-role-secrets.txt"
+
 echo "== C. authz -allow-write"
-authz write -allow-write
+authz write -allow-write -redact=false
 ./bin/testbed authzscore -truth "$app/authz.truth.json" -authz "$work/authz-write" -write -secrets "$work/secrets.txt" || fail "authzscore write"
 sent_matches write
 never write "/api/az/admin/cache" "/api/login" "/api/logout"

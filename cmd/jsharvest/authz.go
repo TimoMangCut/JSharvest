@@ -18,6 +18,7 @@ import (
 	"github.com/TimoMangCut/JSharvest/internal/netsafe"
 	"github.com/TimoMangCut/JSharvest/internal/replay"
 	"github.com/TimoMangCut/JSharvest/internal/scope"
+	"github.com/TimoMangCut/JSharvest/internal/traffic"
 )
 
 // replayFlags are the safety and pace flags of the commands that send.
@@ -31,13 +32,14 @@ type replayFlags struct {
 	insecure   *bool
 	hosts      *string
 	dryRun     *bool
+	redact     *bool
 	timeout    *time.Duration
 	onBlock    *string
 	chrome     *string
 	hostRules  *string
 }
 
-func addReplayFlags(fs *flag.FlagSet) replayFlags {
+func addReplayFlags(fs *flag.FlagSet, defaultRedact bool) replayFlags {
 	return replayFlags{
 		allowWrite: fs.Bool("allow-write", false, "send writes too (POST, PUT, PATCH, GraphQL mutations, GETs that name an action): only on a target you may change"),
 		readAllow:  fs.String("read-allow", "", "regexp of URLs whose POSTs only read (a search): sent without -allow-write"),
@@ -48,6 +50,7 @@ func addReplayFlags(fs *flag.FlagSet) replayFlags {
 		insecure:   fs.Bool("insecure", false, "accept any TLS certificate"),
 		hosts:      fs.String("hosts", "", "the hosts (host:port as recorded) to send to, comma separated; default: those of the requests tried, in scope"),
 		dryRun:     fs.Bool("dry-run", false, "send nothing: write what would be sent to sent.jsonl"),
+		redact:     fs.Bool("redact", defaultRedact, "hide cookies, tokens, passwords and other credentials in sent.jsonl, trials/*.http and drafts/*.http"),
 		timeout:    fs.Duration("timeout", 20*time.Second, "a request's timeout (EventSource and long polls need more)"),
 		hostRules:  fs.String("host-resolver-rules", env("JSHARVEST_HOST_RESOLVER_RULES", ""), `Chrome host resolver rules, e.g. "MAP *.example.test 127.0.0.1": a host they map is reached where the rule says (env JSHARVEST_HOST_RESOLVER_RULES)`),
 		chrome:     fs.String("chrome", env("JSHARVEST_CHROME", ""), "the Chrome whose version the User-Agent and client hints follow when a request says none (env JSHARVEST_CHROME); default: search PATH"),
@@ -71,6 +74,9 @@ func (f replayFlags) sender(log string, concurrency int, ua, target string) (*re
 		}
 	}
 	o := replay.SenderOptions{Max: *f.max, Timeout: *f.timeout, Insecure: *f.insecure, Log: log, DryRun: *f.dryRun, Concurrency: concurrency, OnBlock: *f.onBlock, UserAgent: ua, ChromePath: *f.chrome}
+	if f.redact != nil && *f.redact {
+		o.Redactor = traffic.NewRedactor()
+	}
 	if _, err := replay.ParseOnBlock(o.OnBlock); err != nil {
 		return nil, p, err
 	}
@@ -118,7 +124,7 @@ func runAuthz(args []string) error {
 	substitute := fs.Bool("substitute", false, "with -peers: for a request with two ids or more that B's parent check refuses, put each id alone in B's own request (finds a leaf that forgets its parent)")
 	private := fs.String("private", "", "with -peers -relation same-org: regexp of the URLs or endpoint keys whose data is private to a person (a finding is then a bypass, not shared)")
 	reveal := fs.Bool("reveal", false, "with -peers: write the evidence's values as they are in bola.json and bola.md (else REDACTED_<hash>)")
-	rf := addReplayFlags(fs)
+	rf := addReplayFlags(fs, true)
 	fs.Parse(args)
 	if *target == "" {
 		return errors.New("authz: -target is required")

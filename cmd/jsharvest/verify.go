@@ -42,7 +42,7 @@ func runVerify(args []string) error {
 	concurrency := fs.Int("concurrency", 8, "hosts verified at once, each one request at a time unless -host-inflight > 1 (-rate stays the ceiling on all requests)")
 	hostInFlight := fs.Int("host-inflight", 1, "concurrent probes allowed on a single host when -concurrency > 1 (default 1; raise to 2-4 with a -rate above 1/RTT on high-RTT gateways). A host drops to one at a time on a 429, and while a gate is being counted (back to N once it answers otherwise); probes already in flight then still report their own verdict")
 	gateAfter := fs.Int("gate-after", 0, "probes in a row on a host that all answer alike, as their canaries (a login, a device or app header before every route): the host's other drafts are not sent (0: never)")
-	rf := addReplayFlags(fs)
+	rf := addReplayFlags(fs, true)
 	fs.Parse(args)
 	if *target == "" {
 		return errors.New("verify: -target is required")
@@ -124,7 +124,11 @@ func runVerify(args []string) error {
 	if err := verify.Write(dest, rep); err != nil {
 		return err
 	}
-	idx, err := verify.WriteDraftsFull(filepath.Join(dest, "drafts"), verify.WithUserAgent(drafts, ua), *includeDocs, *includeStrings, *includeSourceOnly, verify.AliveKeys(dest))
+	outDrafts := verify.WithUserAgent(drafts, ua)
+	if sender.Redactor() != nil {
+		outDrafts = verify.RedactDrafts(outDrafts, sender.Redactor())
+	}
+	idx, err := verify.WriteDraftsFull(filepath.Join(dest, "drafts"), outDrafts, *includeDocs, *includeStrings, *includeSourceOnly, verify.AliveKeys(dest))
 	if err != nil {
 		return err
 	}
