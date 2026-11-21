@@ -97,8 +97,8 @@ func TestScriptToolsListed(t *testing.T) {
 		if tool == nil {
 			t.Fatalf("%s not listed", n)
 		}
-		if !strings.HasSuffix(tool.Description, untrustedNote) {
-			t.Errorf("%s: description lacks the untrusted note", n)
+		if !strings.Contains(tool.Description, untrustedNote) || !strings.Contains(tool.Description, "fence:") {
+			t.Errorf("%s: description lacks the untrusted/fence note: %q", n, tool.Description)
 		}
 		if tool.Annotations == nil || !tool.Annotations.ReadOnlyHint {
 			t.Errorf("%s: not read-only", n)

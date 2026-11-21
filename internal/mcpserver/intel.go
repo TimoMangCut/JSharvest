@@ -147,7 +147,7 @@ func (s *server) getIntel(ctx context.Context, _ *mcp.CallToolRequest, in getInt
 			}
 		}
 	}
-	return reply(out)
+	return s.reply(out)
 }
 
 func take[T any](items []T, limit int, truncated *bool) []T {
@@ -264,7 +264,7 @@ func (s *server) getDiff(ctx context.Context, _ *mcp.CallToolRequest, in getDiff
 		}
 		out.Items = append(out.Items, s.redactDiffItem(it))
 	}
-	return reply(out)
+	return s.reply(out)
 }
 
 func (s *server) redactDiffItem(it roles.Item) roles.Item {

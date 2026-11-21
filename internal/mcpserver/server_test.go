@@ -439,7 +439,11 @@ func TestReplyUntrustedEnvelope(t *testing.T) {
 	if m["untrusted"] != "target" {
 		t.Fatalf("untrusted = %v, want target (in %s)", m["untrusted"], text)
 	}
-	if m["url"] != in.URL || m["body"] != in.Body || m["n"] != float64(in.N) || len(m) != 4 {
+	fence, _ := m["fence"].(string)
+	if len(fence) != 16 {
+		t.Fatalf("fence = %q, want 16-char hex nonce (in %s)", fence, text)
+	}
+	if m["url"] != in.URL || m["body"] != in.Body || m["n"] != float64(in.N) || len(m) != 5 {
 		t.Fatalf("payload changed: %+v", m)
 	}
 	// Check top-level keys via token stream so a nested/duplicate key is caught.

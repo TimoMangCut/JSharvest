@@ -119,10 +119,11 @@ type searchIn struct {
 }
 
 type searchHit struct {
-	SHA256  string `json:"sha256"`
-	URL     string `json:"url,omitempty"`
-	Offset  int    `json:"offset"`
-	Snippet string `json:"snippet"`
+	SHA256                 string `json:"sha256"`
+	URL                    string `json:"url,omitempty"`
+	Offset                 int    `json:"offset"`
+	Snippet                string `json:"snippet"`
+	SuspiciousInstructions bool   `json:"suspicious_instructions,omitempty"`
 }
 
 type skippedScript struct {
@@ -131,13 +132,14 @@ type skippedScript struct {
 }
 
 type searchOut struct {
-	Dir            string          `json:"dir"`
-	Matches        []searchHit     `json:"matches"`
-	TotalMatches   int             `json:"total_matches"`
-	ScriptsScanned int             `json:"scripts_scanned"`
-	BytesScanned   int64           `json:"bytes_scanned"`
-	Truncated      bool            `json:"truncated,omitempty"`
-	Skipped        []skippedScript `json:"skipped,omitempty"`
+	Dir                    string          `json:"dir"`
+	Matches                []searchHit     `json:"matches"`
+	TotalMatches           int             `json:"total_matches"`
+	ScriptsScanned         int             `json:"scripts_scanned"`
+	BytesScanned           int64           `json:"bytes_scanned"`
+	Truncated              bool            `json:"truncated,omitempty"`
+	Skipped                []skippedScript `json:"skipped,omitempty"`
+	SuspiciousInstructions bool            `json:"suspicious_instructions,omitempty"`
 }
 
 func (s *server) searchScripts(ctx context.Context, _ *mcp.CallToolRequest, in searchIn) (*mcp.CallToolResult, any, error) {
@@ -244,10 +246,14 @@ scan:
 			}
 			budget += len(snip) + len(ref.SHA256) + len(url) + 40
 			out.TotalMatches++
-			out.Matches = append(out.Matches, searchHit{SHA256: ref.SHA256, URL: s.url(url), Offset: l[0], Snippet: snip})
+			susp := hasPromptInjection(snip)
+			if susp {
+				out.SuspiciousInstructions = true
+			}
+			out.Matches = append(out.Matches, searchHit{SHA256: ref.SHA256, URL: s.url(url), Offset: l[0], Snippet: snip, SuspiciousInstructions: susp})
 		}
 	}
-	return reply(out)
+	return s.reply(out)
 }
 
 // snippet is data around [start, end), at most cx bytes on each side and the
@@ -276,13 +282,14 @@ type readIn struct {
 }
 
 type readOut struct {
-	SHA256     string   `json:"sha256"`
-	URLs       []string `json:"urls"`
-	Size       int64    `json:"size"`
-	Offset     int64    `json:"offset"`
-	Length     int      `json:"length"`
-	NextOffset *int64   `json:"next_offset"`
-	Content    string   `json:"content"`
+	SHA256                 string   `json:"sha256"`
+	URLs                   []string `json:"urls"`
+	Size                   int64    `json:"size"`
+	Offset                 int64    `json:"offset"`
+	Length                 int      `json:"length"`
+	NextOffset             *int64   `json:"next_offset"`
+	Content                string   `json:"content"`
+	SuspiciousInstructions bool     `json:"suspicious_instructions,omitempty"`
 }
 
 func (s *server) readScript(ctx context.Context, _ *mcp.CallToolRequest, in readIn) (*mcp.CallToolResult, any, error) {
@@ -350,7 +357,8 @@ func (s *server) readScript(ctx context.Context, _ *mcp.CallToolRequest, in read
 		out.NextOffset = &end
 	}
 	out.Content = s.scriptText(strings.ToValidUTF8(string(buf), "\uFFFD"))
-	return reply(out)
+	out.SuspiciousInstructions = hasPromptInjection(out.Content)
+	return s.reply(out)
 }
 
 // boundary is where a page that is not the last may end: not inside a

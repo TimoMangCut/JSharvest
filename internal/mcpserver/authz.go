@@ -108,7 +108,7 @@ func (s *server) getAuthz(ctx context.Context, _ *mcp.CallToolRequest, in getAut
 		out.Items = append(out.Items, s.maskAuthz(m, ""))
 	}
 	out.Report, _ = s.maskAuthz(rep, "").(map[string]any)
-	return reply(out)
+	return s.reply(out)
 }
 
 func verdictMatches(m map[string]any, want string) bool {
