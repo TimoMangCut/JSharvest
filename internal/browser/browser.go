@@ -87,8 +87,9 @@ func New(parent context.Context, o Options) (*Session, error) {
 			opts = append(opts, chromedp.ExecPath(o.ChromePath))
 		}
 		profile := o.ProfileDir
-		if profile == "" && (o.NoPrediction || o.Proxy != "") {
-			// The preference needs a profile to live in; make a throwaway one.
+		if profile == "" {
+			// Always own the throwaway profile dir so RegisterTempDir and
+			// sweepStaleProfiles manage it even when -guard=false and no proxy is set.
 			dir, err := os.MkdirTemp("", "jsharvest-profile-")
 			if err != nil {
 				return nil, err
@@ -243,6 +244,7 @@ func sweepStaleProfiles(tempDir string, now time.Time) {
 	if err != nil {
 		return
 	}
+	myHost, hostErr := os.Hostname()
 	for _, e := range entries {
 		name := e.Name()
 		if !strings.HasPrefix(name, "jsharvest-profile-") {
@@ -255,10 +257,16 @@ func sweepStaleProfiles(tempDir string, now time.Time) {
 		}
 		lockPath := filepath.Join(dir, "SingletonLock")
 		if target, err := os.Readlink(lockPath); err == nil {
-			if i := strings.LastIndexByte(target, '-'); i >= 0 {
-				if pid, err := strconv.Atoi(target[i+1:]); err == nil && pidAlive(pid) {
-					continue
-				}
+			i := strings.LastIndexByte(target, '-')
+			if i < 0 {
+				continue
+			}
+			lockHost := target[:i]
+			if hostErr != nil || lockHost != myHost {
+				continue
+			}
+			if pid, err := strconv.Atoi(target[i+1:]); err == nil && pidAlive(pid) {
+				continue
 			}
 		} else if lfi, err := os.Lstat(lockPath); err == nil && now.Sub(lfi.ModTime()) <= staleProfileMaxAge {
 			continue

@@ -92,7 +92,7 @@ func randomFence() string {
 	return hex.EncodeToString(b[:])
 }
 
-var promptInjectionRe = regexp.MustCompile(`(?i)ignore previous instructions|ignore all previous|disregard above|<\|im_start\|>|[\r\n](?:system|assistant):`)
+var promptInjectionRe = regexp.MustCompile(`(?i)ignore previous instructions|ignore all previous|disregard above|<\|im_start\|>|(?:^|[\r\n])\s*(?:system|assistant):`)
 
 func hasPromptInjection(s string) bool {
 	return s != "" && promptInjectionRe.MatchString(s)

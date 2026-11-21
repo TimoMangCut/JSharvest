@@ -293,9 +293,13 @@ func RunHTTP(ctx context.Context, cfg Config, ho HTTPOptions) (Record, error) {
 			}
 			n := 0
 			var storedRefs []httpcrawl.SourceRef
-			putFailed := false
+			putFailed := storeBudgetHit.Load()
 			var cappedHere int64
 			for _, f := range own {
+				if putFailed || storeBudgetHit.Load() {
+					putFailed = true
+					break
+				}
 				if !claimSourceSlot() {
 					cappedHere++
 					continue
@@ -306,6 +310,9 @@ func RunHTTP(ctx context.Context, cfg Config, ho HTTPOptions) (Record, error) {
 				if key == "" {
 					mapSourcesStored.Add(-1)
 					putFailed = true
+					if storeBudgetHit.Load() {
+						break
+					}
 					continue
 				}
 				n++

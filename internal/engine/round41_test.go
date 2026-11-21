@@ -491,3 +491,68 @@ func TestRound41WatchLANGuardWarningWhenGuardOff(t *testing.T) {
 		t.Fatalf("expected no warning when both guard and lan-guard are off, got %q", buf.String())
 	}
 }
+
+func TestRound41SourceMapStopsImmediatelyAtStoreBudget(t *testing.T) {
+	// Build a valid v3 sourcemap with 10 own files, each ~100 bytes.
+	var sources, contents []string
+	for i := range 10 {
+		sources = append(sources, fmt.Sprintf("src/mod%d.ts", i))
+		contents = append(contents, fmt.Sprintf("export const m%d = %q;", i, strings.Repeat("x", 100)))
+	}
+	mapJSON, err := json.Marshal(map[string]any{
+		"version":        3,
+		"sources":        sources,
+		"sourcesContent": contents,
+		"mappings":       "AAAA",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	jsBody := "console.log('ok');\n//# sourceMappingURL=/app.js.map\n"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<html><script src="/app.js"></script></html>`))
+		case "/app.js":
+			w.Header().Set("Content-Type", "application/javascript")
+			_, _ = w.Write([]byte(jsBody))
+		case "/app.js.map":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(mapJSON)
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outDir := t.TempDir()
+	// Allow enough bytes for app.js (~55B) + app.js.map (~1.5KB) + 1 source file (~120B),
+	// so the 2nd source file hits ErrStoreBudget and breaks the loop immediately.
+	budget := int64(len(jsBody) + len(mapJSON) + 150)
+	run, err := RunHTTP(context.Background(), Config{
+		Target:        u,
+		OutRoot:       outDir,
+		Role:          "anon",
+		ScopeMode:     "fqdn",
+		Depth:         1,
+		NavTimeout:    5 * time.Second,
+		MaxStoreBytes: budget,
+	}, HTTPOptions{Rate: 500, SourceMaps: true, NoSpecProbe: true})
+	if err != nil {
+		t.Fatalf("RunHTTP: %v", err)
+	}
+	if run.StoreErrors["store_budget"] == 0 {
+		t.Fatalf("expected store_budget error recorded, got %+v", run.StoreErrors)
+	}
+	// If the loop broke on the first ErrStoreBudget, store_budget errors from
+	// source puts should be 1 (not 9, one per remaining file).
+	if run.StoreErrors["store_budget"] > 2 {
+		t.Fatalf("SourceMap loop did not break early on store_budget: count=%d", run.StoreErrors["store_budget"])
+	}
+}
