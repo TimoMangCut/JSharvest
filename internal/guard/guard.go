@@ -506,6 +506,11 @@ func (g *Guard) TakeNavigations(frame string) []string {
 	return n
 }
 
+// LANOnly reports whether the guard is running in private-address-only mode.
+func (g *Guard) LANOnly() bool {
+	return g != nil && g.opts.Rules.LANOnly
+}
+
 // handle answers one paused request, on the stage that paused it (on: its
 // session, or nil for the browser's).
 func (g *Guard) handle(ev *fetch.EventRequestPaused, on context.Context) {
@@ -519,11 +524,11 @@ func (g *Guard) handle(ev *fetch.EventRequestPaused, on context.Context) {
 	}
 	req := ev.Request
 	headers := flat(req.Headers)
-	body := postData(req)
 	// Layer 1, before every rule (Allow too: -guard-allow lets writes pass,
 	// it does not open the internal network): a public page's request to a
 	// private address is failed.
 	if reason := g.privateRefused(ev, headers, on); reason != "" {
+		body := postData(req)
 		h := &held{ev: ev, headers: headers, reason: reason, on: on}
 		g.mu.Lock()
 		g.pending[ev.RequestID] = h
@@ -534,6 +539,12 @@ func (g *Guard) handle(ev *fetch.EventRequestPaused, on context.Context) {
 		g.record(ev, headers, body, Decision{Fail, reason})
 		return
 	}
+	if g.opts.Rules.LANOnly {
+		g.noteDocument(ev)
+		g.answer(on, fetch.ContinueRequestParams{RequestID: ev.RequestID})
+		return
+	}
+	body := postData(req)
 	d := g.opts.Rules.Classify(Request{
 		Method: req.Method, URL: req.URL, ContentType: headers["content-type"],
 		Body: body, ResourceType: string(ev.ResourceType), Override: OverrideHeader(headers),

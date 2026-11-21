@@ -148,7 +148,7 @@ func runFrontier(ctx context.Context, cfg Config, tab context.Context, g *guard.
 				return tabs[0].currentHarvest().Page() // a service worker's: the first tab captures it
 			})
 		}
-		if !cfg.AllowWebSocket {
+		if cfg.Guard && !cfg.AllowWebSocket {
 			for _, t := range tabs {
 				if _, err := guard.StubSockets(t.tab); err != nil {
 					return e.run, fmt.Errorf("guard: %w", err)
@@ -165,7 +165,7 @@ func runFrontier(ctx context.Context, cfg Config, tab context.Context, g *guard.
 	// budget; its counts are its own, summed at the end (NEW-C5-03).
 	xs := make([]*explorer, len(tabs))
 	if cfg.Explore {
-		if g == nil || e.traffic == nil || !cfg.Actions {
+		if !cfg.Guard || g == nil || e.traffic == nil || !cfg.Actions {
 			return e.run, fmt.Errorf("explore needs the guard, the recorder and actions")
 		}
 		sh, err := newExploreShared()
@@ -950,7 +950,7 @@ func (e *engine) recycleTab(pageCtx context.Context, x *explorer, popups *popupW
 	e.timedOut = false
 
 	lctx := e.resetListenCtx(pageCtx)
-	if e.guard != nil && !e.cfg.AllowWebSocket {
+	if e.cfg.Guard && e.guard != nil && !e.cfg.AllowWebSocket {
 		guard.StubSockets(tctx)
 	}
 	if e.keeper != nil {

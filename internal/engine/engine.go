@@ -68,6 +68,7 @@ type Config struct {
 	// guard). AllowWebSocket keeps page WebSockets, which the guard cannot
 	// inspect and otherwise stubs out.
 	Guard          bool
+	NoLANGuard     bool // -lan-guard=off: disable Layer 1 private-address interception when !Guard
 	GuardRules     guard.Rules
 	AllowWebSocket bool
 	// GuardScope is what the guard protects of the workers already running
@@ -596,10 +597,10 @@ func openBrowser(ctx context.Context, cfg Config) (*browser.Session, *guard.Guar
 			closeSess()
 		}
 	}
-	if !cfg.Guard {
+	if !cfg.Guard && cfg.NoLANGuard {
 		return sess, nil, nil
 	}
-	if bo.Attach != "" {
+	if cfg.Guard && bo.Attach != "" {
 		slog.Warn("guard: speculative prefetch cannot be turned off in an attached browser; turn off \"Preload pages\" in its settings")
 	}
 	in := cfg.GuardScope
@@ -617,7 +618,11 @@ func openBrowser(ctx context.Context, cfg Config) (*browser.Session, *guard.Guar
 		sess.Close()
 		return nil, nil, err
 	}
-	g, err := guard.Start(sess.Tab, guard.Options{Rules: cfg.GuardRules, Attach: bo.Attach != "", InScope: in, HostRules: hostRules})
+	rules := cfg.GuardRules
+	if !cfg.Guard {
+		rules = guard.Rules{LANOnly: true}
+	}
+	g, err := guard.Start(sess.Tab, guard.Options{Rules: rules, Attach: bo.Attach != "", InScope: in, HostRules: hostRules})
 	if err != nil {
 		sess.Close()
 		return nil, nil, err
@@ -679,7 +684,7 @@ func runPage(ctx context.Context, cfg Config, tab context.Context, g *guard.Guar
 		if !e.shared {
 			g.SetPage(e.harvest.Page)
 		}
-		if !cfg.AllowWebSocket {
+		if cfg.Guard && !cfg.AllowWebSocket {
 			if _, err := guard.StubSockets(tab); err != nil {
 				return e.run, fmt.Errorf("guard: %w", err)
 			}
@@ -1054,7 +1059,7 @@ func (e *engine) startOn(tab context.Context) (*capture.Capture, string, error) 
 			SensitiveWindow: func() bool { return e.keeper.isRelogging() },
 		}
 	}
-	if g := e.guard; g != nil {
+	if g := e.guard; g != nil && e.cfg.Guard {
 		opts.OnClearSiteData = func(id string) {
 			e.csdSeen.Add(1)
 			g.NoteClearSiteData(id)
@@ -1335,11 +1340,13 @@ func (r *runState) finishRun(ctx context.Context, tabs []*engine) error {
 		if r.shared {
 			gs = e.ownGuardStats(gs, records)
 		}
-		r.run.Guard = &gs
-		if gs.ClearSiteDataSeen > 0 {
+		if r.cfg.Guard || gs.Blocked > 0 {
+			r.run.Guard = &gs
+		}
+		if r.cfg.Guard && gs.ClearSiteDataSeen > 0 {
 			r.warn(fmt.Sprintf("guard: %d response(s) carried Clear-Site-Data, which interception cannot stop; the session may have been wiped", gs.ClearSiteDataSeen))
 		}
-		if gs.WebSocketsSeen > 0 {
+		if r.cfg.Guard && gs.WebSocketsSeen > 0 {
 			r.warn(fmt.Sprintf("guard: %d WebSocket(s) opened that it could not hold back", gs.WebSocketsSeen))
 		}
 	}

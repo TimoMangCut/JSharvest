@@ -102,16 +102,16 @@ for p in /lan/fetch /lan/num /lan/localhost; do
   grep -q " GET $p" "$lan" && fail "host rules opened $p, a literal"
 done
 
-echo "== 3. layer 2 alone: -guard off (layer 1 does not run), Chrome's Local Network Access"
+echo "== 3. layer 2 alone: -guard off -lan-guard off (layer 1 does not run), Chrome's Local Network Access"
 : >"$lan"
 out="$work/three"
-timeout 120 ./bin/jsharvest crawl -u http://198.51.100.10:8770/ -guard off -page-dwell 3s -o "$out" </dev/null >"$work/three.log" 2>&1
+timeout 120 ./bin/jsharvest crawl -u http://198.51.100.10:8770/ -guard off -lan-guard off -page-dwell 3s -o "$out" </dev/null >"$work/three.log" 2>&1
 code=$?
 [ "$code" = 0 ] || { fail "exit $code, want 0"; tail -5 "$work/three.log"; }
 for p in /lan/fetch /lan/img /lan/num /lan/localhost /lan/sw; do
-  grep -q " GET $p" "$lan" && fail "-guard off: the internal server saw $p (LNA did not refuse it)"
+  grep -q " GET $p" "$lan" && fail "-guard off -lan-guard off: the internal server saw $p (LNA did not refuse it)"
 done
-grep -q " GET /ok" "$pub" || fail "-guard off: the page's own /ok did not go through"
+grep -q " GET /ok" "$pub" || fail "-guard off -lan-guard off: the page's own /ok did not go through"
 runjson=$(find "$out" -name run.json 2>/dev/null | head -1)
 # An http public page: Chrome 156 refuses its local requests itself
 # (InsecureLocalNetwork, stats.lna_insecure); the permission jsharvest
@@ -121,6 +121,23 @@ n=$([ -n "$runjson" ] && jq '(.stats.lna_denied // 0) + (.stats.lna_insecure // 
 [ "$n" -gt 0 ] || fail "run.json counts no request refused by LNA (got $n)"
 [ -n "$runjson" ] && jq -e '(.warnings // []) | map(select(startswith("Local Network Access could not be denied"))) | length == 0' "$runjson" >/dev/null ||
   fail "Chrome took neither LNA permission name: $(jq -c '.warnings' "$runjson")"
-[ -n "$(blocked "$out")" ] && grep -q private-address "$(blocked "$out")" && fail "-guard off: blocked.jsonl holds layer 1's records"
+[ -n "$(blocked "$out")" ] && grep -q private-address "$(blocked "$out")" && fail "-guard off -lan-guard off: blocked.jsonl holds layer 1's records"
+
+echo "== 4. default -guard off keeps -lan-guard on (layer 1 still refuses private literals)"
+: >"$lan"
+: >"$pub"
+out="$work/four"
+timeout 120 ./bin/jsharvest crawl -u http://198.51.100.10:8770/ -guard off -page-dwell 6s -o "$out" </dev/null >"$work/four.log" 2>&1
+code=$?
+[ "$code" = 0 ] || { fail "case 4 exit $code, want 0"; tail -5 "$work/four.log"; }
+for p in /lan/fetch /lan/img /lan/num /lan/localhost /lan/sw; do
+  grep -q " GET $p" "$lan" && fail "-guard off (default -lan-guard on): the internal server saw $p"
+done
+b=$(blocked "$out")
+for p in /lan/fetch /lan/img /lan/num /lan/localhost; do
+  [ -n "$b" ] && jq -e --arg p "$p" 'select((.url | endswith($p)) and .reason == "private-address")' "$b" >/dev/null 2>&1 ||
+    fail "case 4: blocked.jsonl has no private-address record for $p"
+done
+grep -q " GET /ok" "$pub" || fail "case 4: the page's own /ok did not go through"
 
 [ "$failed" = 0 ] && echo "lan-check: ok" || { echo "lan-check: FAILED"; exit 1; }

@@ -191,6 +191,7 @@ func runCrawl(args []string) error {
 	resolveRate := fs.Float64("resolve-rate", 5, "resolver requests per second")
 	resolveMax := fs.Int("resolve-max", 0, "most resolver requests per run (0: unlimited)")
 	guardMode := fs.String("guard", "auto", "hold back writes, logouts and destructive calls, and record them: on, off, or auto (on with -profile or -attach)")
+	lanGuard := fs.String("lan-guard", "on", "with -guard off, still block requests from public pages to private/LAN literals: on or off")
 	guardAllow := fs.String("guard-allow", "", "regexp of URLs the guard always lets through")
 	guardDeny := fs.String("guard-deny", "", "regexp of extra URLs the guard holds back")
 	allowWrite := fs.Bool("allow-write", false, "let writes through the guard (destructive URLs are still held back); only on systems where that is agreed")
@@ -319,6 +320,11 @@ func runCrawl(args []string) error {
 	case "auto", "on", "off":
 	default:
 		return fmt.Errorf("-probe-offscope: want auto, on or off, got %q", *probeOffscope)
+	}
+	switch *lanGuard {
+	case "on", "off":
+	default:
+		return fmt.Errorf("-lan-guard: want on or off, got %q", *lanGuard)
 	}
 	if *depth > 0 && *urlsFile != "" {
 		return errors.New("crawl: -depth goes with -u; -urls harvests each URL on its own")
@@ -464,6 +470,7 @@ func runCrawl(args []string) error {
 		NoDebugger: *noDebugger,
 
 		Guard:          guardOn,
+		NoLANGuard:     *lanGuard == "off",
 		GuardRules:     rules,
 		AllowWebSocket: *allowWS,
 
@@ -789,6 +796,7 @@ func runWatch(args []string) error {
 	out := fs.String("o", env("JSHARVEST_OUTPUT", "output"), "output root (env JSHARVEST_OUTPUT)")
 	role := fs.String("role", "anon", "role label; output goes to <output>/<host>/<role>")
 	guardMode := fs.String("guard", "", "required: on (hold back writes, logouts and destructive calls) or off")
+	lanGuard := fs.String("lan-guard", "on", "with -guard off, still block requests from public pages to private/LAN literals: on or off")
 	guardAllow := fs.String("guard-allow", "", "regexp of URLs the guard always lets through")
 	guardDeny := fs.String("guard-deny", "", "regexp of extra URLs the guard holds back")
 	allowWrite := fs.Bool("allow-write", false, "let writes through the guard (destructive URLs are still held back)")
@@ -819,6 +827,11 @@ func runWatch(args []string) error {
 	case "off":
 	default:
 		return errors.New("watch: choose -guard on or -guard off: the tab is someone's real session, and the choice is theirs")
+	}
+	switch *lanGuard {
+	case "on", "off":
+	default:
+		return fmt.Errorf("-lan-guard: want on or off, got %q", *lanGuard)
 	}
 	switch traffic.Mode(*record) {
 	case traffic.API, traffic.All:
@@ -873,7 +886,7 @@ func runWatch(args []string) error {
 		MaxBody:       *maxBody,
 		MaxStoreBytes: int64(*maxStoreMB) << 20,
 		NavTimeout:    30 * time.Second, Idle: 1500 * time.Millisecond, IdleMax: 30 * time.Second,
-		Guard: guardOn, GuardRules: rules, AllowWebSocket: *allowWS,
+		Guard: guardOn, NoLANGuard: *lanGuard == "off", GuardRules: rules, AllowWebSocket: *allowWS,
 		Record: traffic.Mode(*record), RecordBody: *recordBody, Redact: *redact,
 		NoTagger: !*flowTag,
 	}

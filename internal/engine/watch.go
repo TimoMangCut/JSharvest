@@ -86,7 +86,7 @@ func Watch(ctx context.Context, cfg Config, w WatchOptions) error {
 	if g != nil {
 		e.guardAt = g.Stats()
 		g.SetPage(e.harvest.Page)
-		if !cfg.AllowWebSocket {
+		if cfg.Guard && !cfg.AllowWebSocket {
 			if stub, err = guard.StubSockets(tab); err != nil {
 				return fmt.Errorf("guard: %w", err)
 			}
@@ -104,7 +104,7 @@ func Watch(ctx context.Context, cfg Config, w WatchOptions) error {
 	default:
 		slog.Warn("watch: handlers the page registered before now are not traced; their requests are grouped by time. Use -reload to trace them all")
 	}
-	if g != nil {
+	if cfg.Guard {
 		slog.Warn("watch: the guard holds back writes of every worker, service worker and frame in this browser it cannot place, other tabs' too; use a browser profile for this target only")
 	}
 	if err := e.writeLive(time.Now().UTC()); err != nil {
@@ -113,7 +113,7 @@ func Watch(ctx context.Context, cfg Config, w WatchOptions) error {
 	// After finish has written flows.jsonl: until then, a reader goes by
 	// the snapshot.
 	defer results.RemoveLive(e.st.Dir())
-	slog.Info("watching; act in the tab, and stop with Ctrl-C", "tab", logURL(tabURL), "guard", g != nil)
+	slog.Info("watching; act in the tab, and stop with Ctrl-C", "tab", logURL(tabURL), "guard", cfg.Guard)
 
 	why := e.watchUntil(ctx, id, w.Duration)
 	slog.Info("watch stopped", "why", why)
@@ -216,7 +216,7 @@ func (e *engine) writeLive(at time.Time) error {
 	n, heard := len(e.summary), e.heard
 	e.mu.Unlock()
 	l := results.Live{Run: e.run.RunID, PID: os.Getpid(), Tab: e.harvest.Page(), Started: e.run.Started, Updated: at, Scope: e.run.Scope,
-		Guard: e.guard != nil, Requests: n, LastEvent: heard}
+		Guard: e.cfg.Guard, Requests: n, LastEvent: heard}
 	if l.Tab == "" {
 		l.Tab = e.cfg.Target.String()
 	}

@@ -83,6 +83,9 @@ type Rules struct {
 	Allow      *regexp.Regexp // URLs that always pass
 	Deny       *regexp.Regexp // extra URLs to block, on top of the destructive words
 	AllowWrite bool           // let writes through; destructive URLs are still blocked
+	// LANOnly disables write/logout/destructive classification so only Layer 1
+	// and Layer 3 private-address enforcement run when -guard is off.
+	LANOnly bool
 	// Explore: the crawl clicks every control by itself, and accepts every
 	// confirm(). A DELETE, or a GraphQL mutation that names a destructive
 	// action, is destructive even with AllowWrite; a script's GET whose path
@@ -91,6 +94,9 @@ type Rules struct {
 }
 
 func (r Rules) Classify(req Request) Decision {
+	if r.LANOnly {
+		return Decision{Pass, "lan-only"}
+	}
 	// Deny first: a URL both denied and allowed is held back (an Allow
 	// that is too wide, or the user's own refresh rule, never reopens it).
 	if r.Deny != nil && r.Deny.MatchString(req.URL) {
