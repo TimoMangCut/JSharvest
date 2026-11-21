@@ -64,7 +64,7 @@ func TestPipelinedPagesAreDeterministic(t *testing.T) {
 		defer func() { maxPagesInFlight = 4 }()
 		var out []string
 		res, err := Crawl(context.Background(), Options{Target: u, InScope: func(h string) bool { return h == u.Hostname() || strings.HasSuffix(h, ".x.test") },
-			Depth: 2, Rate: 1000, MaxPages: 40, Probe: true, NoDNS: true,
+			Depth: 2, Rate: 1000, MaxPages: 40, Probe: true, NoDNS: true, Resolver: nxResolver,
 			Script: func(Script) {},
 			Page: func(p Page) {
 				mu.Lock()
@@ -274,8 +274,8 @@ func TestAssetChallengeNamesItsPage(t *testing.T) {
 		srv := httptest.NewServer(mux)
 		u, _ := url.Parse(srv.URL + "/")
 		res, _ := Crawl(context.Background(), Options{Target: u, InScope: func(h string) bool { return h == u.Hostname() }, Depth: 1, Rate: 1000, NoDNS: true,
-			HostRules: "MAP cdn.other.test " + u.Host,
-			Script:    func(Script) {}, Page: func(Page) {}, Log: func(string, ...any) {}})
+			HostRules: "MAP cdn.other.test " + u.Host, Resolver: nxResolver,
+			Script: func(Script) {}, Page: func(Page) {}, Log: func(string, ...any) {}})
 		srv.Close()
 		var got []string
 		for _, c := range res.Challenged {

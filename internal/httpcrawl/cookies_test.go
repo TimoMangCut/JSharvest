@@ -81,8 +81,8 @@ func TestCrawlCookiesPathsAndDomains(t *testing.T) {
 	_, port, _ := strings.Cut(host, ":")
 	u, _ := url.Parse("http://a.x.test:" + port + "/")
 	res, err := Crawl(context.Background(), Options{Target: u, InScope: func(h string) bool { return strings.HasSuffix(h, "x.test") }, Depth: 1, Rate: 1000, NoDNS: true,
-		HostRules: "MAP *.x.test 127.0.0.1",
-		Script:    func(Script) {}, Page: func(Page) {}, Log: func(string, ...any) {}})
+		HostRules: "MAP *.x.test 127.0.0.1", Resolver: nxResolver,
+		Script: func(Script) {}, Page: func(Page) {}, Log: func(string, ...any) {}})
 	if err != nil {
 		t.Fatal(err)
 	}

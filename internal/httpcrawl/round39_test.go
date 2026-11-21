@@ -70,11 +70,13 @@ func TestRound39PreAuthSSRManifestsBypassLoginGateAndDotfileBlock(t *testing.T) 
 	var scriptMu sync.Mutex
 	var gotScripts []string
 	_, err := Crawl(context.Background(), Options{
-		Target:  u,
-		InScope: func(h string) bool { return h == u.Hostname() },
-		Depth:   1,
-		Rate:    500,
-		Probe:   true,
+		Target:   u,
+		InScope:  func(h string) bool { return h == u.Hostname() },
+		Depth:    1,
+		Rate:     500,
+		Probe:    true,
+		NoDNS:    true,
+		Resolver: nxResolver,
 		Script: func(s Script) {
 			scriptMu.Lock()
 			gotScripts = append(gotScripts, strings.TrimPrefix(s.URL, srv.URL))
@@ -160,12 +162,14 @@ func TestRound39OriginSpecPathsSwaggerUIAndAppLinks(t *testing.T) {
 	var resMu sync.Mutex
 	var storedURLs []string
 	res, err := Crawl(context.Background(), Options{
-		Target:  u,
-		InScope: func(h string) bool { return h == u.Hostname() },
-		Depth:   2,
-		Rate:    500,
-		Probe:   true,
-		Extract: func(b []byte, _ string) jsapi.Result { return jsapi.Extract(b) },
+		Target:   u,
+		InScope:  func(h string) bool { return h == u.Hostname() },
+		Depth:    2,
+		Rate:     500,
+		Probe:    true,
+		NoDNS:    true,
+		Resolver: nxResolver,
+		Extract:  func(b []byte, _ string) jsapi.Result { return jsapi.Extract(b) },
 		Script: func(s Script) {
 			resMu.Lock()
 			storedURLs = append(storedURLs, strings.TrimPrefix(s.URL, srv.URL))

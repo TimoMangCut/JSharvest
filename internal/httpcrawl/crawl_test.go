@@ -329,7 +329,7 @@ func TestSeedRedirectAcrossPageScopeAndOutOfScope(t *testing.T) {
 	var scripts []string
 	res, err := Crawl(context.Background(), Options{
 		Target: u, InScope: inScope, PageScope: pageScope, Depth: 1, Rate: 1000, Probe: true,
-		HostRules: rules, NoDNS: true,
+		HostRules: rules, NoDNS: true, Resolver: nxResolver,
 		Script: func(s Script) {
 			mu.Lock()
 			scripts = append(scripts, s.URL)
@@ -353,7 +353,7 @@ func TestSeedRedirectAcrossPageScopeAndOutOfScope(t *testing.T) {
 	uOut, _ := url.Parse("http://sub.jsh.test/out")
 	resOut, err := Crawl(context.Background(), Options{
 		Target: uOut, InScope: inScope, PageScope: pageScope, Depth: 1, Rate: 1000, Probe: true,
-		HostRules: rules, NoDNS: true,
+		HostRules: rules, NoDNS: true, Resolver: nxResolver,
 	})
 	if err != nil {
 		t.Fatal(err)

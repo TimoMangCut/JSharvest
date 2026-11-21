@@ -16,6 +16,10 @@ import (
 	"github.com/TimoMangCut/JSharvest/internal/netsafe"
 )
 
+func nxResolver(_ context.Context, host string) ([]netip.Addr, error) {
+	return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
+}
+
 func fetch(t *testing.T, o Options, raw string) answer {
 	t.Helper()
 	o.Rate, o.MaxBody = 100, 1<<20
@@ -41,8 +45,7 @@ func TestClientNetsafe(t *testing.T) {
 		t.Fatalf("metadata: %v", a.Err)
 	}
 	// DNS failure refuses.
-	nx := func(context.Context, string) ([]netip.Addr, error) { return nil, errors.New("nx") }
-	if a := fetch(t, Options{Resolver: nx}, "http://nx.example/x"); a.Err == nil {
+	if a := fetch(t, Options{Resolver: nxResolver}, "http://nx.example/x"); a.Err == nil {
 		t.Fatal("a DNS failure was not a refusal")
 	}
 	// A public target's loopback is refused; an internal target's is allowed.
@@ -67,7 +70,7 @@ func TestClientNetsafe(t *testing.T) {
 	px := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("via proxy")) }))
 	defer px.Close()
 	pu, _ := url.Parse(px.URL)
-	if a := fetch(t, Options{Proxy: pu, Resolver: nx}, "http://anything.example/x"); a.Err != nil || string(a.Body) != "via proxy" {
+	if a := fetch(t, Options{Proxy: pu, Resolver: nxResolver}, "http://anything.example/x"); a.Err != nil || string(a.Body) != "via proxy" {
 		t.Fatalf("proxy: %v %q", a.Err, a.Body)
 	}
 }
