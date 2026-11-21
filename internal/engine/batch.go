@@ -78,7 +78,7 @@ func RunURLs(ctx context.Context, cfg Config, urls []*url.URL, rate float64) err
 	if cfg.Tabs > 1 && cfg.Browser.Attach != "" {
 		return errors.New("-tabs: not with -attach (the browser is the user's)")
 	}
-	sess, g, err := openBrowser(ctx, cfg)
+	sess, g, err := openBrowser(context.WithoutCancel(ctx), cfg)
 	if err != nil {
 		return err
 	}

@@ -540,7 +540,7 @@ func Run(ctx context.Context, cfg Config) error {
 
 // RunRecord is Run, with the run's record.
 func RunRecord(ctx context.Context, cfg Config) (Record, error) {
-	sess, g, err := openBrowser(ctx, cfg)
+	sess, g, err := openBrowser(context.WithoutCancel(ctx), cfg)
 	if err != nil {
 		return Record{}, err
 	}

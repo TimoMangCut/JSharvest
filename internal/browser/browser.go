@@ -10,6 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/chromedp/cdproto/target"
@@ -66,6 +69,7 @@ func New(parent context.Context, o Options) (*Session, error) {
 	if o.Attach != "" {
 		allocCtx, allocCancel = remote.NewAllocator(parent, o.Attach)
 	} else {
+		sweepStaleProfiles(os.TempDir(), time.Now())
 		opts := append([]chromedp.ExecAllocatorOption{}, chromedp.DefaultExecAllocatorOptions[:]...)
 		opts = append(opts, processOptions()...)
 		if o.Headful {
@@ -89,7 +93,11 @@ func New(parent context.Context, o Options) (*Session, error) {
 			if err != nil {
 				return nil, err
 			}
-			profile, cleanup = dir, func() { os.RemoveAll(dir) }
+			unreg := RegisterTempDir(dir)
+			profile, cleanup = dir, func() {
+				unreg()
+				os.RemoveAll(dir)
+			}
 		}
 		if profile != "" {
 			// An error from here to the start of Chrome removes a throwaway
@@ -187,4 +195,74 @@ func noPrediction(profile string) error {
 	netPrefs["network_prediction_options"] = 2
 	prefs["net"] = netPrefs
 	return writePrefs(path, prefs)
+}
+
+var (
+	tempCleanupsMu sync.Mutex
+	tempCleanups   = map[string]func(){}
+)
+
+// RegisterTempDir registers a temporary directory to be removed if a third
+// interrupt forces immediate process exit. Calling the returned function
+// unregisters it once normal cleanup completes.
+func RegisterTempDir(dir string) func() {
+	if dir == "" {
+		return func() {}
+	}
+	tempCleanupsMu.Lock()
+	tempCleanups[dir] = func() { _ = os.RemoveAll(dir) }
+	tempCleanupsMu.Unlock()
+	return func() {
+		tempCleanupsMu.Lock()
+		delete(tempCleanups, dir)
+		tempCleanupsMu.Unlock()
+	}
+}
+
+// RunTempCleanups removes all currently registered temporary directories.
+func RunTempCleanups() {
+	tempCleanupsMu.Lock()
+	fns := make([]func(), 0, len(tempCleanups))
+	for k, fn := range tempCleanups {
+		fns = append(fns, fn)
+		delete(tempCleanups, k)
+	}
+	tempCleanupsMu.Unlock()
+	for _, fn := range fns {
+		fn()
+	}
+}
+
+const staleProfileMaxAge = 24 * time.Hour
+
+// sweepStaleProfiles removes orphaned jsharvest-profile-* directories in
+// tempDir whose mtime is older than 24h and whose SingletonLock does not
+// reference a live process.
+func sweepStaleProfiles(tempDir string, now time.Time) {
+	entries, err := os.ReadDir(tempDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasPrefix(name, "jsharvest-profile-") {
+			continue
+		}
+		dir := filepath.Join(tempDir, name)
+		fi, err := os.Lstat(dir)
+		if err != nil || !fi.IsDir() || now.Sub(fi.ModTime()) <= staleProfileMaxAge {
+			continue
+		}
+		lockPath := filepath.Join(dir, "SingletonLock")
+		if target, err := os.Readlink(lockPath); err == nil {
+			if i := strings.LastIndexByte(target, '-'); i >= 0 {
+				if pid, err := strconv.Atoi(target[i+1:]); err == nil && pidAlive(pid) {
+					continue
+				}
+			}
+		} else if lfi, err := os.Lstat(lockPath); err == nil && now.Sub(lfi.ModTime()) <= staleProfileMaxAge {
+			continue
+		}
+		_ = os.RemoveAll(dir)
+	}
 }

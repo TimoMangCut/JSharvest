@@ -441,7 +441,7 @@ func runCrawl(args []string) error {
 		}
 		slog.Info("guard: the login's saved allow rules are in force", "rules", len(extra))
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := notifyCleanupSignals()
 	defer stop()
 
 	cfg := engine.Config{
@@ -875,11 +875,8 @@ func runWatch(args []string) error {
 		}
 		w.Open = u
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := notifyCleanupSignals()
 	defer stop()
-	// The first Ctrl-C ends the watch and writes the results; a second one,
-	// with the default handling back, stops at once.
-	go func() { <-ctx.Done(); stop() }()
 	cfg := engine.Config{
 		OutRoot: *out, Role: *role, ScopeMode: *scopeMode,
 		Browser:       browser.Options{Attach: *attach},
@@ -1022,4 +1019,54 @@ func setFlagProvided(fs *flag.FlagSet, name string) bool {
 		}
 	})
 	return found
+}
+
+func notifyCleanupSignals() (context.Context, func()) {
+	ch := make(chan os.Signal, 3)
+	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+	ctx, stop := handleCleanupSignals(context.Background(), ch, os.Stderr, os.Exit)
+	return ctx, func() {
+		signal.Stop(ch)
+		stop()
+	}
+}
+
+func handleCleanupSignals(parent context.Context, sigs <-chan os.Signal, errOut io.Writer, forceExit func(int)) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(parent)
+	done := make(chan struct{})
+	var once sync.Once
+	go func() {
+		count := 0
+		for {
+			select {
+			case <-done:
+				return
+			case _, ok := <-sigs:
+				if !ok {
+					return
+				}
+				count++
+				switch count {
+				case 1:
+					cancel()
+				case 2:
+					if errOut != nil {
+						fmt.Fprintln(errOut, "cleaning up; press Ctrl-C again to force exit (held requests in -attach may be sent)")
+					}
+				default:
+					browser.RunTempCleanups()
+					if forceExit != nil {
+						forceExit(130)
+					}
+					return
+				}
+			}
+		}
+	}()
+	return ctx, func() {
+		once.Do(func() {
+			close(done)
+			cancel()
+		})
+	}
 }

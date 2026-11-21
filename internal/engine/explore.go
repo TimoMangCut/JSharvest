@@ -29,6 +29,7 @@ import (
 	"github.com/chromedp/cdproto/target"
 	"github.com/chromedp/chromedp"
 
+	"github.com/TimoMangCut/JSharvest/internal/browser"
 	"github.com/TimoMangCut/JSharvest/internal/explore"
 	"github.com/TimoMangCut/JSharvest/internal/flow"
 	"github.com/TimoMangCut/JSharvest/internal/frontier"
@@ -85,6 +86,7 @@ type exploreShared struct {
 	seen    map[string]bool // signatures used, or taken by a tab about to use them
 	started time.Time
 	dir     string
+	unreg   func()
 }
 
 func newExploreShared() (*exploreShared, error) {
@@ -92,7 +94,7 @@ func newExploreShared() (*exploreShared, error) {
 	if err != nil {
 		return nil, err
 	}
-	sh := &exploreShared{seen: map[string]bool{}, started: time.Now(), dir: dir}
+	sh := &exploreShared{seen: map[string]bool{}, started: time.Now(), dir: dir, unreg: browser.RegisterTempDir(dir)}
 	if err := os.WriteFile(filepath.Join(dir, "document.txt"), []byte("test upload\n"), 0o600); err != nil {
 		sh.close()
 		return nil, err
@@ -108,7 +110,12 @@ func newExploreShared() (*exploreShared, error) {
 	return sh, nil
 }
 
-func (sh *exploreShared) close() { os.RemoveAll(sh.dir) }
+func (sh *exploreShared) close() {
+	if sh.unreg != nil {
+		sh.unreg()
+	}
+	os.RemoveAll(sh.dir)
+}
 
 func (sh *exploreShared) used(sig string) bool {
 	sh.mu.Lock()
