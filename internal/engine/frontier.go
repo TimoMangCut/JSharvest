@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"os"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -30,6 +29,7 @@ import (
 	"github.com/TimoMangCut/JSharvest/internal/resolve"
 	"github.com/TimoMangCut/JSharvest/internal/scope"
 	"github.com/TimoMangCut/JSharvest/internal/store"
+	"github.com/TimoMangCut/JSharvest/internal/traffic"
 )
 
 // Page is one line of pages.jsonl: a page the crawl visited, or a URL it
@@ -202,7 +202,7 @@ func runFrontier(ctx context.Context, cfg Config, tab context.Context, g *guard.
 		q.Add(frontier.Found{URL: s, How: frontier.Seed, Visit: true}, 0, "")
 	}
 
-	pages, err := os.OpenFile(filepath.Join(e.st.Dir(), "pages.jsonl"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	pages, err := traffic.AppendOpen(filepath.Join(e.st.Dir(), "pages.jsonl"))
 	if err != nil {
 		return e.run, err
 	}

@@ -29,12 +29,8 @@ func Append(dir string, records []Record) error {
 	if len(records) == 0 {
 		return nil
 	}
-	f, err := os.OpenFile(filepath.Join(dir, "blocked.jsonl"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	f, err := traffic.AppendOpen(filepath.Join(dir, "blocked.jsonl"))
 	if err != nil {
-		return err
-	}
-	if err := f.Chmod(0o600); err != nil {
-		f.Close()
 		return err
 	}
 	enc := json.NewEncoder(f)

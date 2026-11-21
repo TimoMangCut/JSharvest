@@ -99,6 +99,9 @@ func writeFileAtomic(path string, data []byte) error {
 		return err
 	}
 	_, err = tmp.Write(data)
+	if err == nil {
+		err = tmp.Sync()
+	}
 	if cerr := tmp.Close(); err == nil {
 		err = cerr
 	}

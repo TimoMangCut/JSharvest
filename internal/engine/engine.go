@@ -849,16 +849,18 @@ func (e *engine) buildFlows() []flow.Flow {
 // what they quote of URLs and pages when redacting. It holds no values,
 // only where they are.
 func (e *engine) writeFlows(fs []flow.Flow, name string, appendTo bool) error {
-	flags := os.O_CREATE | os.O_WRONLY | os.O_TRUNC
-	if appendTo {
-		flags = os.O_CREATE | os.O_WRONLY | os.O_APPEND
-	}
 	path := filepath.Join(e.st.Dir(), name)
 	tmp := path
-	if !appendTo {
+	var (
+		f   *os.File
+		err error
+	)
+	if appendTo {
+		f, err = traffic.AppendOpen(path)
+	} else {
 		tmp = path + ".tmp"
+		f, err = os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	}
-	f, err := os.OpenFile(tmp, flags, 0o600)
 	if err != nil {
 		return err
 	}
@@ -1610,7 +1612,7 @@ func writeRun(dir string, run Record) error {
 	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(filepath.Join(dir, "runs.jsonl"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	f, err := traffic.AppendOpen(filepath.Join(dir, "runs.jsonl"))
 	if err != nil {
 		return err
 	}

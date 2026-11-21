@@ -9,7 +9,6 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -116,7 +115,7 @@ func RunHTTP(ctx context.Context, cfg Config, ho HTTPOptions) (Record, error) {
 			return run, fmt.Errorf("request log: %w", err)
 		}
 	}
-	pages, err := os.OpenFile(filepath.Join(st.Dir(), "pages.jsonl"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	pages, err := traffic.AppendOpen(filepath.Join(st.Dir(), "pages.jsonl"))
 	if err != nil {
 		return run, err
 	}

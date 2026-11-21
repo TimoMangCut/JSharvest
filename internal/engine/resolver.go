@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net/url"
-	"os"
 	"path"
 	"path/filepath"
 	"slices"
@@ -24,6 +23,7 @@ import (
 	"github.com/TimoMangCut/JSharvest/internal/detect"
 	"github.com/TimoMangCut/JSharvest/internal/marker"
 	"github.com/TimoMangCut/JSharvest/internal/resolve"
+	"github.com/TimoMangCut/JSharvest/internal/traffic"
 )
 
 const (
@@ -449,7 +449,7 @@ func (e *engine) externalRef(c resolve.Candidate, reason string) {
 	if err != nil {
 		return
 	}
-	f, err := os.OpenFile(filepath.Join(e.st.Dir(), "external_refs.jsonl"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	f, err := traffic.AppendOpen(filepath.Join(e.st.Dir(), "external_refs.jsonl"))
 	if err != nil {
 		return
 	}

@@ -1,6 +1,9 @@
 package traffic
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -98,5 +101,64 @@ func TestRound41LogURLMasksTokens(t *testing.T) {
 	}
 	if !reflect.DeepEqual(gotLabels, wantLabels) {
 		t.Fatalf("LogBundleLabels = %#v, want %#v", gotLabels, wantLabels)
+	}
+}
+
+func TestRound41AppendOpenIsolatesTruncatedLine(t *testing.T) {
+	dir := t.TempDir()
+	reqPath := filepath.Join(dir, "requests.jsonl")
+
+	// 1. Existing 0-byte file: Create/AppendOpen must NOT write a leading '\n'.
+	if err := os.WriteFile(reqPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w1, err := Create(dir, "r1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w1.Write(Entry{Method: "GET", URL: "https://app.example/one", Outcome: "ok"})
+	if err := w1.Close(); err != nil {
+		t.Fatal(err)
+	}
+	b0, err := os.ReadFile(reqPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b0) == 0 || b0[0] == '\n' {
+		t.Fatalf("0-byte file got unexpected leading newline: %q", string(b0))
+	}
+
+	// 2. Append a truncated half-JSON line (simulating SIGKILL mid-write without '\n').
+	raw, err := os.OpenFile(reqPath, os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = raw.WriteString(`{"run":"r2","id":1,"method":"POST","url":"https://app.example/crashed`)
+	_ = raw.Close()
+
+	// 3. Next run uses Create -> AppendOpen: inserts '\n' before writing r3's first entry.
+	w3, err := Create(dir, "r3", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w3.Write(Entry{Method: "GET", URL: "https://app.example/three", Outcome: "ok"})
+	if err := w3.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	after, err := os.ReadFile(reqPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(after), "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("expected 3 physical lines (r1, truncated r2, clean r3), got %d:\n%s", len(lines), string(after))
+	}
+	var e1, e3 Entry
+	if err := json.Unmarshal([]byte(lines[0]), &e1); err != nil || e1.URL != "https://app.example/one" {
+		t.Fatalf("line 0 corrupted: %v (%q)", err, lines[0])
+	}
+	if err := json.Unmarshal([]byte(lines[2]), &e3); err != nil || e3.Run != "r3" || e3.URL != "https://app.example/three" {
+		t.Fatalf("line 2 was not isolated onto its own clean JSON line: %v (%q)", err, lines[2])
 	}
 }

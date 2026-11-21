@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"maps"
 	"os"
 	"path/filepath"
@@ -380,16 +381,32 @@ type RunInfo struct {
 
 // Finished reads runs.jsonl: the runs that ended.
 func (d *Dir) Finished() []RunInfo {
-	b, err := os.ReadFile(filepath.Join(d.Path, "runs.jsonl"))
+	path := filepath.Join(d.Path, "runs.jsonl")
+	f, err := os.Open(path)
 	if err != nil {
 		return nil
 	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 64<<10), 64<<20)
 	var out []RunInfo
-	for _, line := range bytes.Split(b, []byte{'\n'}) {
-		var r RunInfo
-		if len(line) > 0 && json.Unmarshal(line, &r) == nil && r.RunID != "" {
-			out = append(out, r)
+	corrupt := 0
+	for sc.Scan() {
+		line := bytes.TrimSpace(sc.Bytes())
+		if len(line) == 0 {
+			continue
 		}
+		var r RunInfo
+		if err := json.Unmarshal(line, &r); err != nil || r.RunID == "" {
+			corrupt++
+			continue
+		}
+		out = append(out, r)
+	}
+	if err := sc.Err(); err != nil {
+		slog.Warn("reading runs.jsonl stopped early", "path", path, "err", err)
+	} else if corrupt > 0 {
+		slog.Debug("skipped corrupt lines in runs.jsonl", "path", path, "corrupt", corrupt)
 	}
 	return out
 }

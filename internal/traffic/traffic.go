@@ -199,16 +199,45 @@ type Writer struct {
 	err      error
 }
 
-// Create opens dir/requests.jsonl for appending. A nil redactor keeps the
-// values as they were.
-func Create(dir, run string, redact *Redactor) (*Writer, error) {
-	f, err := os.OpenFile(filepath.Join(dir, "requests.jsonl"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+// AppendOpen opens path for appending JSONL records (0600). If a previous run
+// crashed mid-line leaving a non-empty file that does not end with '\n',
+// AppendOpen writes a trailing '\n' first so the next record starts on its own
+// line instead of concatenating onto the truncated fragment.
+func AppendOpen(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o600)
 	if err != nil {
 		return nil, err
 	}
-	// An older file may have been created with wider permissions.
 	if err := f.Chmod(0o600); err != nil {
 		f.Close()
+		return nil, err
+	}
+	st, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	if st.Size() > 0 {
+		var last [1]byte
+		if _, err := f.ReadAt(last[:], st.Size()-1); err != nil {
+			f.Close()
+			return nil, err
+		}
+		if last[0] != '\n' {
+			if _, err := f.Write([]byte{'\n'}); err != nil {
+				f.Close()
+				return nil, err
+			}
+		}
+	}
+	return f, nil
+}
+
+// Create opens dir/requests.jsonl for appending. A nil redactor keeps the
+// values as they were.
+func Create(dir, run string, redact *Redactor) (*Writer, error) {
+	f, err := AppendOpen(filepath.Join(dir, "requests.jsonl"))
+	if err != nil {
 		return nil, err
 	}
 	return &Writer{f: f, enc: json.NewEncoder(f), run: run, next: 1, redact: redact}, nil

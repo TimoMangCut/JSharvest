@@ -514,17 +514,21 @@ func (s *Store) AutoFlush(ctx context.Context, every time.Duration) {
 	}
 }
 
-// Flush rewrites index.jsonl. It writes a temp file and renames it, so an
-// interrupted flush leaves the previous index intact. A background flush
-// that failed is retried here, so a successful Flush means the index on disk
-// is complete.
+// Flush rewrites index.jsonl and fsyncs it before rename. It writes a temp
+// file and renames it, so an interrupted flush leaves the previous index
+// intact. A background flush that failed is retried here, so a successful
+// Flush means the index on disk is complete.
 func (s *Store) Flush() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.flushLocked()
+	return s.flushSyncLocked(true)
 }
 
 func (s *Store) flushLocked() error {
+	return s.flushSyncLocked(false)
+}
+
+func (s *Store) flushSyncLocked(syncDisk bool) error {
 	tmp, err := os.CreateTemp(s.dir, ".index-*.jsonl")
 	if err != nil {
 		return err
@@ -543,7 +547,16 @@ func (s *Store) flushLocked() error {
 		tmp.Close()
 		return err
 	}
+	if syncDisk {
+		if err := tmp.Sync(); err != nil {
+			tmp.Close()
+			return err
+		}
+	}
 	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp.Name(), 0o600); err != nil {
 		return err
 	}
 	if err := os.Rename(tmp.Name(), filepath.Join(s.dir, "index.jsonl")); err != nil {
