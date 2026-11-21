@@ -115,3 +115,110 @@ func TestRound41ReloginBodyAndDelayedSweepRedacted(t *testing.T) {
 		t.Fatalf("normal entry outside relogin window was altered: tags=%v body=%q", normalEntry.Tags, normalEntry.Body.Body)
 	}
 }
+
+func TestRound41SensitiveWindowRedactsResponseAndSharesHMAC(t *testing.T) {
+	const respTok = "secret-jwt-value"
+	const sidCookie = "secret-sid-42"
+	const oauthCode = "oauth_secret_code_99"
+
+	// 1. Default -redact=false (Redactor: nil), only SensitiveWindow active:
+	// response body, Set-Cookie, Location, and Page are all redacted.
+	var inWindow atomic.Bool
+	inWindow.Store(true)
+	var got []traffic.Entry
+	clk := &clock{t: time.Unix(3000, 0)}
+	r := newRecorder(&session{c: &Capture{}, kind: "page", targetURL: "https://idp.example.test/cb?code=" + oauthCode}, RecordOptions{
+		Mode:            traffic.All,
+		MaxBody:         4096,
+		Sink:            func(e traffic.Entry) { got = append(got, e) },
+		SensitiveWindow: inWindow.Load,
+	})
+	r.now = clk.now
+
+	r.onSentExtra(&network.EventRequestWillBeSentExtraInfo{
+		RequestID: "auth-1",
+		Headers:   network.Headers{"cookie": "sid=" + sidCookie},
+	})
+	r.onSent(&network.EventRequestWillBeSent{
+		RequestID:   "auth-1",
+		Type:        "Fetch",
+		Timestamp:   1,
+		DocumentURL: "https://idp.example.test/cb?code=" + oauthCode,
+		Request: &network.Request{
+			Method: "POST",
+			URL:    "https://app.example.test/auth/login",
+		},
+	})
+	r.onResponseExtra(&network.EventResponseReceivedExtraInfo{
+		RequestID:  "auth-1",
+		StatusCode: 200,
+		Headers: network.Headers{
+			"content-type": "image/png",
+			"set-cookie":   "sid=" + sidCookie + "; HttpOnly; Path=/",
+			"location":     "https://app.example.test/done?code=" + oauthCode,
+		},
+	})
+	r.onResponse(&network.EventResponseReceived{
+		RequestID:    "auth-1",
+		Type:         "Fetch",
+		HasExtraInfo: true,
+		Response:     &network.Response{URL: "https://app.example.test/auth/login", Status: 200, MimeType: "image/png"},
+	})
+	// Simulate fetched response body already stored on exchange.
+	r.mu.Lock()
+	r.xs["auth-1"].body = &traffic.Body{Body: `{"access_token":"` + respTok + `"}`}
+	r.mu.Unlock()
+	r.onFinished(&network.EventLoadingFinished{RequestID: "auth-1", Timestamp: 2})
+
+	clk.t = clk.t.Add(settle + time.Millisecond)
+	r.sweep(false)
+	if len(got) != 1 {
+		t.Fatalf("got %d entries, want 1", len(got))
+	}
+	e := got[0]
+	if e.Response == nil {
+		t.Fatal("expected Response on recorded entry")
+	}
+	for _, secret := range []string{respTok, sidCookie, oauthCode} {
+		if strings.Contains(e.Page, secret) ||
+			strings.Contains(e.Response.Body.Body, secret) ||
+			strings.Contains(e.Response.Headers["set-cookie"], secret) ||
+			strings.Contains(e.Response.Headers["location"], secret) {
+			t.Fatalf("SensitiveWindow leaked %q: page=%q respHdr=%v respBody=%q",
+				secret, e.Page, e.Response.Headers, e.Response.Body.Body)
+		}
+	}
+
+	// 2. Shared Redactor passed in RecordOptions produces identical HMAC tokens.
+	shared := traffic.NewRedactor()
+	var gotShared []traffic.Entry
+	r2 := newRecorder(&session{c: &Capture{}, kind: "page"}, RecordOptions{
+		Mode:            traffic.All,
+		MaxBody:         4096,
+		Sink:            func(e traffic.Entry) { gotShared = append(gotShared, e) },
+		SensitiveWindow: inWindow.Load,
+		Redactor:        shared,
+	})
+	r2.now = clk.now
+	r2.onSent(&network.EventRequestWillBeSent{
+		RequestID: "auth-2",
+		Type:      "Fetch",
+		Timestamp: 1,
+		Request:   &network.Request{Method: "POST", URL: "https://app.example.test/auth/login?token=" + respTok},
+	})
+	r2.onResponse(&network.EventResponseReceived{
+		RequestID: "auth-2",
+		Type:      "Fetch",
+		Response:  &network.Response{URL: "https://app.example.test/auth/login", Status: 200, MimeType: "image/png"},
+	})
+	r2.onFinished(&network.EventLoadingFinished{RequestID: "auth-2", Timestamp: 2})
+	clk.t = clk.t.Add(settle + time.Millisecond)
+	r2.sweep(false)
+	if len(gotShared) != 1 {
+		t.Fatalf("shared got %d entries, want 1", len(gotShared))
+	}
+	wantURL := shared.URL("https://app.example.test/auth/login?token=" + respTok)
+	if gotShared[0].URL != wantURL {
+		t.Fatalf("shared Redactor HMAC mismatch: got %q, want %q", gotShared[0].URL, wantURL)
+	}
+}

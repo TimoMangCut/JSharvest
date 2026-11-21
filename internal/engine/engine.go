@@ -1059,6 +1059,7 @@ func (e *engine) startOn(tab context.Context) (*capture.Capture, string, error) 
 			MaxBody:         e.cfg.RecordBody,
 			Sink:            e.record,
 			SensitiveWindow: func() bool { return e.keeper.isRelogging() },
+			Redactor:        e.redactor,
 		}
 	}
 	if g := e.guard; g != nil && e.cfg.Guard {

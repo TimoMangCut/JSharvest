@@ -25,7 +25,8 @@ type RecordOptions struct {
 	Mode            traffic.Mode
 	MaxBody         int // bytes kept of each request and response body; 0 keeps none
 	Sink            func(traffic.Entry)
-	SensitiveWindow func() bool // when true (e.g. re-login), request credentials are always redacted
+	SensitiveWindow func() bool       // when true (e.g. re-login), request credentials are always redacted
+	Redactor        *traffic.Redactor // optional shared redactor (used for SensitiveWindow when -redact is on)
 }
 
 const (
@@ -104,8 +105,8 @@ type hop struct {
 }
 
 func newRecorder(s *session, o RecordOptions) *recorder {
-	var red *traffic.Redactor
-	if o.SensitiveWindow != nil {
+	red := o.Redactor
+	if red == nil && o.SensitiveWindow != nil {
 		red = traffic.NewRedactor()
 	}
 	return &recorder{s: s, opts: o, red: red, xs: map[network.RequestID]*exchange{}, now: time.Now}
@@ -503,9 +504,7 @@ func (r *recorder) entries(id network.RequestID, x *exchange) []traffic.Entry {
 			}
 		}
 		if x.sensitive && r.red != nil {
-			e.URL = r.red.URL(e.URL)
-			e.Headers = r.red.Headers(e.Headers)
-			e.Body = r.red.Body(e.Body)
+			r.red.Entry(&e)
 		}
 		out = append(out, e)
 	}
