@@ -324,7 +324,35 @@ func Authz(ctx context.Context, o AuthzOptions) (*AuthzReport, error) {
 			a.out.Summary[string(t.Verdict)]++
 		}
 	}
+	if o.Sender != nil {
+		if r := o.Sender.Redactor(); r != nil {
+			scrubAuthzReport(a.out, r)
+		}
+	}
 	return a.out, nil
+}
+
+func scrubAuthzReport(rep *AuthzReport, r *traffic.Redactor) {
+	if rep.Stopped != "" {
+		rep.Stopped = r.URL(rep.Stopped)
+	}
+	for i, n := range rep.Notes {
+		if n != "" {
+			rep.Notes[i] = r.URL(n)
+		}
+	}
+	for k, v := range rep.HostsBlocked {
+		if v != "" {
+			rep.HostsBlocked[k] = r.URL(v)
+		}
+	}
+	for i := range rep.Items {
+		for j := range rep.Items[i].Trials {
+			if rep.Items[i].Trials[j].Reason != "" {
+				rep.Items[i].Trials[j].Reason = r.URL(rep.Items[i].Trials[j].Reason)
+			}
+		}
+	}
 }
 
 func (rc *roleCtx) hasCookies() bool {

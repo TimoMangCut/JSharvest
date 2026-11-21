@@ -278,10 +278,34 @@ func Run(ctx context.Context, o Options) (*Report, error) {
 				if rep.Results[i].URL != "" {
 					rep.Results[i].URL = r.URL(rep.Results[i].URL)
 				}
+				if rep.Results[i].Reason != "" {
+					rep.Results[i].Reason = r.URL(rep.Results[i].Reason)
+				}
 			}
 			for i := range rep.Canaries {
 				if rep.Canaries[i].Err != "" {
 					rep.Canaries[i].Err = r.URL(rep.Canaries[i].Err)
+				}
+			}
+			for i := range rep.CloudChecks {
+				if rep.CloudChecks[i].URL != "" {
+					rep.CloudChecks[i].URL = r.URL(rep.CloudChecks[i].URL)
+				}
+				if rep.CloudChecks[i].Error != "" {
+					rep.CloudChecks[i].Error = r.URL(rep.CloudChecks[i].Error)
+				}
+			}
+			if rep.Stopped != "" {
+				rep.Stopped = r.URL(rep.Stopped)
+			}
+			for h, why := range rep.HostsBlocked {
+				if why != "" {
+					rep.HostsBlocked[h] = r.URL(why)
+				}
+			}
+			for h, why := range rep.HostsGated {
+				if why != "" {
+					rep.HostsGated[h] = r.URL(why)
 				}
 			}
 		}

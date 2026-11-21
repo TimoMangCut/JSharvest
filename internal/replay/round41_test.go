@@ -543,3 +543,150 @@ func TestRound41PolicyLenientFormMultipartAndBatch(t *testing.T) {
 		t.Fatalf("70-item JSON-RPC batch with 68th logout got %+v, want Never", d)
 	}
 }
+
+func TestRound41JudgePeerKeptNeverBypass(t *testing.T) {
+	ctl := Answer{Status: 200, Header: map[string]string{"content-type": "application/json"}, Body: []byte(`{"secret":"alice-secret-val"}`)}
+	ctl2 := Answer{Status: 200, Header: map[string]string{"content-type": "application/json"}, Body: []byte(`{"secret":"alice-secret-val"}`)}
+
+	for _, tc := range []struct {
+		name string
+		c    PeerCase
+	}{
+		{
+			name: "read_200_kept",
+			c:    PeerCase{Relation: RelCrossOrg, AliveA: true, Trial: ctl, Controls: []Answer{ctl, ctl2}, Kept: true},
+		},
+		{
+			name: "write_200_kept",
+			c:    PeerCase{Relation: RelCrossOrg, Write: true, AliveA: true, Trial: Answer{Status: 200, Header: map[string]string{"content-type": "application/json"}, Body: []byte(`{"ok":true}`)}, Kept: true},
+		},
+	} {
+		j := JudgePeer(tc.c)
+		if j.Verdict != Unclear {
+			t.Errorf("%s: JudgePeer returned %s (%s), want Unclear", tc.name, j.Verdict, j.Reason)
+		}
+	}
+}
+
+func TestRound41AuthzAndBolaScrubRedirectLocations(t *testing.T) {
+	const tok = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIn0.sigabcdef123456"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ck := r.Header.Get("Cookie")
+		switch r.URL.Path {
+		case "/api/me":
+			w.Header().Set("Content-Type", "application/json")
+			switch {
+			case strings.Contains(ck, "role=admin"), strings.Contains(ck, "role=alice"):
+				io.WriteString(w, `{"user":"owner"}`)
+			case strings.Contains(ck, "role=user"), strings.Contains(ck, "role=bob"):
+				io.WriteString(w, `{"user":"peer"}`)
+			default:
+				w.WriteHeader(401)
+			}
+		case "/api/items/101":
+			if strings.Contains(ck, "role=admin") || strings.Contains(ck, "role=alice") {
+				w.Header().Set("Content-Type", "application/json")
+				io.WriteString(w, `{"id":101,"owner_secret":"only-owner-val"}`)
+				return
+			}
+			w.Header().Set("Location", "https://idp.example.test/cb?access_token="+tok)
+			w.WriteHeader(http.StatusFound)
+		case "/api/items/202":
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, `{"id":202,"owner_secret":"only-bob-val"}`)
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+	host := strings.TrimPrefix(srv.URL, "http://")
+
+	root := t.TempDir()
+	now := time.Now().UTC()
+	writeRole := func(name, cookie string, extra ...traffic.Entry) {
+		rdir := filepath.Join(root, name)
+		if err := os.MkdirAll(rdir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		entries := append([]traffic.Entry{{
+			Run: "R1", ID: 1, Method: "GET", URL: srv.URL + "/api/me", ResourceType: "Fetch", Outcome: "ok", Time: now,
+			Headers:  map[string]string{"host": host, "cookie": cookie},
+			Response: &traffic.Response{Status: 200, MIME: "application/json", Headers: map[string]string{"content-type": "application/json"}, Body: traffic.Body{Body: `{"ok":true}`}},
+		}}, extra...)
+		var buf bytes.Buffer
+		var refs []flow.Ref
+		for _, e := range entries {
+			b, _ := json.Marshal(e)
+			buf.Write(append(b, '\n'))
+			refs = append(refs, flow.Ref{ID: e.ID})
+		}
+		if err := os.WriteFile(filepath.Join(rdir, "requests.jsonl"), buf.Bytes(), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		fl := flow.Flow{Run: "R1", Action: "a1", Kind: "load", Started: now, Ended: now, Requests: refs}
+		fb, _ := json.Marshal(fl)
+		if err := os.WriteFile(filepath.Join(rdir, "flows.jsonl"), append(fb, '\n'), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	writeRole("user", "role=user")
+	writeRole("admin", "role=admin", traffic.Entry{
+		Run: "R1", ID: 2, Method: "GET", URL: srv.URL + "/api/items/101", ResourceType: "Fetch", Outcome: "ok", Time: now,
+		Headers:  map[string]string{"host": host, "cookie": "role=admin"},
+		Response: &traffic.Response{Status: 200, MIME: "application/json", Headers: map[string]string{"content-type": "application/json"}, Body: traffic.Body{Body: `{"id":101,"owner_secret":"only-owner-val"}`}},
+	})
+	writeRole("alice", "role=alice", traffic.Entry{
+		Run: "R1", ID: 2, Method: "GET", URL: srv.URL + "/api/items/101", ResourceType: "Fetch", Outcome: "ok", Time: now,
+		Headers:  map[string]string{"host": host, "cookie": "role=alice"},
+		Response: &traffic.Response{Status: 200, MIME: "application/json", Headers: map[string]string{"content-type": "application/json"}, Body: traffic.Body{Body: `{"id":101,"owner_secret":"only-owner-val"}`}},
+	})
+	writeRole("bob", "role=bob", traffic.Entry{
+		Run: "R1", ID: 2, Method: "GET", URL: srv.URL + "/api/items/202", ResourceType: "Fetch", Outcome: "ok", Time: now,
+		Headers:  map[string]string{"host": host, "cookie": "role=bob"},
+		Response: &traffic.Response{Status: 200, MIME: "application/json", Headers: map[string]string{"content-type": "application/json"}, Body: traffic.Body{Body: `{"id":202,"owner_secret":"only-bob-val"}`}},
+	})
+
+	diff := roles.Report{
+		Host:  host,
+		Roles: []string{"user", "admin"},
+		Items: []roles.Item{{Layer: "endpoint", Key: "GET " + host + "/api/items/{int}", Class: roles.HigherOnly, States: map[string]roles.State{"admin": roles.Used}}},
+	}
+	db, _ := json.Marshal(diff)
+	if err := os.WriteFile(filepath.Join(root, "diff.json"), db, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := filepath.Join(root, "authz")
+	sender, err := NewSender(SenderOptions{AllowPrivate: true, Max: 50, Log: filepath.Join(outDir, "sent.jsonl"), Redactor: traffic.NewRedactor()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sender.Close()
+
+	authzRep, err := Authz(context.Background(), AuthzOptions{Root: root, Sender: sender, InScope: func(string) bool { return true }, Out: outDir, Now: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := authzRep.Write(outDir); err != nil {
+		t.Fatal(err)
+	}
+
+	bolaRep, err := Bola(context.Background(), BolaOptions{Root: root, Peers: [2]string{"alice", "bob"}, Relation: RelCrossOrg, Sender: sender, InScope: func(string) bool { return true }, Out: outDir, Now: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bolaRep.Write(outDir); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, fname := range []string{"authz.json", "authz.md", "bola.json", "bola.md"} {
+		raw, err := os.ReadFile(filepath.Join(outDir, fname))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(raw), tok) {
+			t.Fatalf("%s leaked 302 Location access_token:\n%s", fname, string(raw))
+		}
+	}
+}

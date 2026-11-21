@@ -232,7 +232,38 @@ loop:
 	for _, it := range b.rep.Items {
 		b.rep.Summary[string(it.Verdict)]++
 	}
+	if o.Sender != nil {
+		if r := o.Sender.Redactor(); r != nil {
+			scrubBolaReport(b.rep, r)
+		}
+	}
 	return b.rep, nil
+}
+
+func scrubBolaReport(rep *BolaReport, r *traffic.Redactor) {
+	if rep.Stopped != "" {
+		rep.Stopped = r.URL(rep.Stopped)
+	}
+	for i, n := range rep.Notes {
+		if n != "" {
+			rep.Notes[i] = r.URL(n)
+		}
+	}
+	for k, v := range rep.HostsBlocked {
+		if v != "" {
+			rep.HostsBlocked[k] = r.URL(v)
+		}
+	}
+	for k, v := range rep.StoppedEndpoints {
+		if v != "" {
+			rep.StoppedEndpoints[k] = r.URL(v)
+		}
+	}
+	for i := range rep.Items {
+		if rep.Items[i].Reason != "" {
+			rep.Items[i].Reason = r.URL(rep.Items[i].Reason)
+		}
+	}
 }
 
 func (b *bola) note(s string) { b.rep.Notes = append(b.rep.Notes, s) }

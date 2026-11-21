@@ -162,3 +162,45 @@ func TestRound41AppendOpenIsolatesTruncatedLine(t *testing.T) {
 		t.Fatalf("line 2 was not isolated onto its own clean JSON line: %v (%q)", err, lines[2])
 	}
 }
+
+func TestRound41RedactorURLPercentEncodedAndTokenUserinfo(t *testing.T) {
+	r := NewRedactor()
+
+	u1 := r.URL("https://admin:p%40ss%3A1@example.test/p")
+	if strings.Contains(u1, "p%40ss") || strings.Contains(u1, "p@ss") {
+		t.Fatalf("Redactor.URL leaked percent-encoded password: %q", u1)
+	}
+	if !strings.HasPrefix(u1, "https://admin:REDACTED_") {
+		t.Fatalf("Redactor.URL unexpected format for user:pass: %q", u1)
+	}
+
+	u2 := r.URL("https://custom_pat_token_12345@example.test/p")
+	if strings.Contains(u2, "custom_pat_token_12345") {
+		t.Fatalf("Redactor.URL leaked single-token userinfo: %q", u2)
+	}
+
+	u3 := r.URL(`302 -> https://admin:p%40ss@idp.example.test/cb?code=secret_code_9`)
+	if strings.Contains(u3, "p%40ss") || strings.Contains(u3, "secret_code_9") {
+		t.Fatalf("Redactor.URL leaked embedded URL secret in reason text: %q", u3)
+	}
+
+	// Ensure /@user path is NOT treated as userinfo.
+	u4 := r.URL("https://example.test/@alice/profile")
+	if u4 != "https://example.test/@alice/profile" {
+		t.Fatalf("Redactor.URL corrupted @path segment: %q", u4)
+	}
+
+	l1 := LogURL("https://example.test/cb?next=https%3A%2F%2Fuser%3Ap%2540ss%40internal.example.test%2F")
+	if strings.Contains(l1, "user") || strings.Contains(l1, "p%40ss") || strings.Contains(l1, "p%2540ss") {
+		t.Fatalf("LogURL leaked nested userinfo in query param: %q", l1)
+	}
+
+	// Standard base64 token starting with '/' and ending with '=' padding must be masked, while '/assets/main.js' stays.
+	l2 := LogURL("https://example.test/cb?sig=/9j/4AAQSkZJRgABAQEAYABgAA==&asset=/assets/app_bundle_1234567890.js")
+	if strings.Contains(l2, "4AAQSkZJRg") {
+		t.Fatalf("LogURL missed /-prefixed padded base64 token: %q", l2)
+	}
+	if !strings.Contains(l2, "asset=/assets/app_bundle_1234567890.js") {
+		t.Fatalf("LogURL masked normal asset path: %q", l2)
+	}
+}

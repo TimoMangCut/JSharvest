@@ -232,15 +232,88 @@ func replaceSub(re *regexp.Regexp, s string, f func([]string) string) string {
 	return re.ReplaceAllStringFunc(s, func(m string) string { return f(re.FindStringSubmatch(m)) })
 }
 
-// URL hides a password in the user info and credentials in the query or
-// path.
+// URL hides passwords or tokens in raw authority userinfo and credentials in
+// the query or path, both on standalone URLs and on embedded URLs inside text.
 func (r *Redactor) URL(raw string) string {
-	if u, err := url.Parse(raw); err == nil && u.User != nil {
-		if p, ok := u.User.Password(); ok {
-			raw = strings.Replace(raw, ":"+p+"@", ":"+r.mask(p)+"@", 1)
+	return r.Text(r.redactRawUserinfo(raw))
+}
+
+func (r *Redactor) redactRawUserinfo(raw string) string {
+	var b strings.Builder
+	wrote := false
+	pos := 0
+	for pos < len(raw) {
+		rel := strings.Index(raw[pos:], "://")
+		if rel < 0 {
+			break
 		}
+		schemeEnd := pos + rel
+		schemeStart := schemeEnd
+		for schemeStart > pos && isSchemeByte(raw[schemeStart-1]) {
+			schemeStart--
+		}
+		if schemeStart == schemeEnd {
+			pos = schemeEnd + 3
+			continue
+		}
+		authStart := schemeEnd + 3
+		authEnd := authStart
+		for authEnd < len(raw) {
+			c := raw[authEnd]
+			if c == '/' || c == '?' || c == '#' || c == ' ' || c == '\t' || c == '\r' || c == '\n' ||
+				c == '"' || c == '\'' || c == ')' || c == '>' || c == ']' || c == '\\' {
+				break
+			}
+			authEnd++
+		}
+		auth := raw[authStart:authEnd]
+		at := strings.LastIndexByte(auth, '@')
+		if at > 0 {
+			userinfo := auth[:at]
+			var repl string
+			if rawUser, rawPass, hasColon := strings.Cut(userinfo, ":"); hasColon {
+				decPass := rawPass
+				if d, err := url.PathUnescape(rawPass); err == nil {
+					decPass = d
+				}
+				maskedUser := rawUser
+				decUser := rawUser
+				if d, err := url.PathUnescape(rawUser); err == nil {
+					decUser = d
+				}
+				if Sensitive(rawUser) || Sensitive(decUser) || looksLikeLogToken(rawUser) || looksLikeLogToken(decUser) {
+					maskedUser = r.mask(decUser)
+				}
+				repl = maskedUser + ":" + r.mask(decPass)
+			} else {
+				decUser := userinfo
+				if d, err := url.PathUnescape(userinfo); err == nil {
+					decUser = d
+				}
+				repl = r.mask(decUser)
+			}
+			if !wrote {
+				b.Grow(len(raw) + 16)
+				wrote = true
+			}
+			b.WriteString(raw[pos:authStart])
+			b.WriteString(repl)
+			b.WriteByte('@')
+			b.WriteString(auth[at+1:])
+			pos = authEnd
+			continue
+		}
+		pos = authEnd
 	}
-	return r.Text(raw)
+	if !wrote {
+		return raw
+	}
+	b.WriteString(raw[pos:])
+	return b.String()
+}
+
+func isSchemeByte(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '+' || c == '-' || c == '.'
 }
 
 var logQueryRedactor = NewRedactor()
@@ -382,7 +455,7 @@ func maskLogQuerySeg(seg string) string {
 	if vErr != nil || Sensitive(k) || Sensitive(rawK) || looksLikeLogToken(v) || looksLikeLogToken(rawV) {
 		return rawK + "=…"
 	}
-	if logQueryRedactor.Text(v) != v {
+	if logQueryRedactor.URL(v) != v || logQueryRedactor.URL(rawV) != rawV {
 		return rawK + "=…"
 	}
 	return seg
@@ -397,7 +470,7 @@ func looksLikeLogToken(v string) bool {
 	}
 	trimmed := strings.TrimRight(v, "=")
 	pad := len(v) - len(trimmed)
-	if len(trimmed) < 24 || pad > 2 || strings.HasPrefix(trimmed, "/") {
+	if len(trimmed) < 24 || pad > 2 || (pad == 0 && strings.HasPrefix(trimmed, "/")) {
 		return false
 	}
 	allHex := pad == 0

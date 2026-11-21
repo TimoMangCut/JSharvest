@@ -500,6 +500,9 @@ func JudgePeer(c PeerCase) PeerJudgement {
 		case status >= 300 && status < 400 && c.IsLogin != nil && c.IsLogin(t.Header["location"]):
 			return refuse("sent to the login page")
 		case status >= 200 && status < 300:
+			if c.Kept {
+				return out.with(Unclear, fmt.Sprintf("%d, with a foreign credential still on the request", status))
+			}
 			if bodyErrors(t.Body, nil) != errNone {
 				return out.with(NeedsReview, "a success with an error in its body")
 			}
@@ -547,6 +550,9 @@ func JudgePeer(c PeerCase) PeerJudgement {
 	}
 
 	// A success.
+	if c.Kept {
+		return out.with(Unclear, fmt.Sprintf("%d, with a foreign credential still on the request", status))
+	}
 	switch bodyErrors(t.Body, c1.Body) {
 	case errAll:
 		return refuse("a success whose body says it failed")

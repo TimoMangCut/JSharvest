@@ -133,3 +133,61 @@ func TestRound41CloudProbeRespectsRateBudgetAndLogsSent(t *testing.T) {
 		t.Fatalf("sent.jsonl leaked cloud query/body secret:\n%s", string(rawSent))
 	}
 }
+
+func TestRound41VerifyScrubsReasonsAndRedirectLocations(t *testing.T) {
+	const tok = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIn0.sigabcdef123456"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/api/secret-redir"):
+			w.Header().Set("Location", "https://idp.example.test/cb?access_token="+tok)
+			w.WriteHeader(http.StatusFound)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	sender, err := replay.NewSender(replay.SenderOptions{
+		AllowPrivate: true,
+		Max:          20,
+		Log:          filepath.Join(dir, "sent.jsonl"),
+		Redactor:     traffic.NewRedactor(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sender.Close()
+
+	rep, err := Run(context.Background(), Options{
+		Target:  "app.example.test",
+		Role:    "anon",
+		Sender:  sender,
+		InScope: func(string) bool { return true },
+		Dir:     dir,
+		Drafts: []Draft{{
+			ID:         "d1",
+			Source:     "static",
+			Method:     "GET",
+			Path:       "/api/secret-redir",
+			Confidence: "call",
+			Tier:       "tier1",
+			URL:        srv.URL + "/api/secret-redir",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Write(dir, rep); err != nil {
+		t.Fatal(err)
+	}
+	for _, fname := range []string{"verify.json", "verify.md"} {
+		raw, err := os.ReadFile(filepath.Join(dir, fname))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(raw), tok) {
+			t.Fatalf("%s leaked redirect access_token:\n%s", fname, string(raw))
+		}
+	}
+}
