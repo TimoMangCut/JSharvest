@@ -1,4 +1,4 @@
-# Lịch sử các Giai đoạn và Đợt phát triển (`GĐ1` → `Đợt 33`)
+# Lịch sử các Giai đoạn và Đợt phát triển (`GĐ1` → `Đợt 41`)
 
 Đây là chỉ mục tóm tắt gọn các mốc phát triển. Bản ghi nguyên văn đầy đủ GĐ1 → Đợt 30 lưu tại [rounds-history-full.md](archive/rounds-history-full.md). Khi có xung đột, [CLAUDE.md](../CLAUDE.md) và [CURRENT.md](CURRENT.md) có hiệu lực cao hơn.
 
@@ -26,7 +26,7 @@
 | **Đợt 26A–26H** | `35–42` | v24–v30 | OOP `classes.go`, kiểm mù #1 Keycloak (thành dev), #2 `@appwrite/console` (`1.070/1.098`), #3 `@medusajs/dashboard` (`300/420`), #4 `@directus/app` (`89/136` → `93/136`). |
 | **Đợt 27A–27F** | `43–48` | v31–v35 | Liên kết xuyên script `deferred.go` (`PrepareModule`), `urlreturn.go` (Appwrite `1.087/1.098`), kiểm mù #5 Jellyfin Web 12.4 (`3/364` → `302/364`, thành dev), `descriptor.go`. |
 
-## 3. Các Đợt Gần Nhất (`Đợt 28–33`)
+## 3. Các Đợt Gần Nhất (`Đợt 28–41`)
 
 - **Đợt 28–30 (`2026-11-15 → 16`, [plan-28.md](plan-28.md), [gd7-bola-design.md](gd7-bola-design.md), `jsapi v36`):**
   - Hợp nhất bộ kết luận SFC + mã lỗi số trong body 200 + GraphQL theo từng operation.
@@ -69,3 +69,7 @@
   - `specProbe` (`R40-B1`): khoá `SpecCollector.Plan` (`plan.Bases`/`plan.Services`) và `OriginSpecPaths` (HTTP + CDP) theo `inScope`, mở rộng `nonAPIInfraDomains` làm lớp phụ chặn IdP/SDK/map/schema XML (giữ probe gốc D2);
   - `verify` (`R40-A3`): nạp `http.spa_origins` từ `run.json`, mở rộng ứng viên `[l.Origin, extBases...]` cho API tương đối trên origin SPA (reverse-proxy chốt `l.Origin`, decoupled SPA tự cắt tỉa `l.Origin` sau 16 path chết);
   - `engine` & `httpcrawl` (`R40-B3`, `R40-B2`): bổ sung bộ đếm request vào `EscalatedRun` + khối `totals` trong `run.json` (giữ nguyên số liệu riêng của run HTTP, `unique_scripts = st.Len() + Σ er.NewScripts`); đánh dấu soft-200 SPA fallback trong `http.soft_probes` (giữ `http.probes`).
+- **Đợt 41 (`2026-11-21`, [plan-41.md](plan-41.md), [threat-model-2026-11-20.md](threat-model-2026-11-20.md)):**
+  - **(41A — An toàn cốt lõi & DoS AST):** tuyến tính hoá tra dòng + trần `maxLooseMatches`/`maxLooseEndpoints` (`H1`); cầu chì độ sâu ngoặc `maxEsbuildNesting = 400` trên mọi nhánh `esbuild` (`M7`) + ngân sách fallback tất định mỗi script (`M13`, snapshot `jsapi` trùng 100% HEAD); tự động gỡ hoặc giữ `Unclear` credential query/body của role cao không làm mới được + vá `Patch` lỗi & `Judge` `c.Kept` (`M1`); `verify` trước `snap.Save` + `SensitiveWindow` cho `relogin` (`M6`); ghi nguyên tử & khoá `monitor` tôn trọng `-dry-run` (`M10`); `traffic.LogURL` che token/userinfo/fragment trên log (`M5`); UA Chrome cho AIA (`L1`) và `nxResolver` cho test `httpcrawl` (`L9`).
+  - **(41B — Đĩa, Redact, Scope & LAN Guard):** trần 2 tầng cho sourcemap + `-max-source-files 50000` đồng bộ singleflight `NoteStored` + flush hình học `store` (`H3`); ngân sách đĩa `-max-store-mb 2048` cho `crawl`/`watch`/`archive` + trần manifest tất định `10.000` O(N log N) (`M11`); bật mặc định `-redact=true` cho `authz` & `verify` phủ `sent.jsonl`, `trials/*.http`, `drafts/*.http`, `Result.URL` (`H2`); cờ `-probe-offscope=auto|on|off` tự tắt sau `-proxy` và khoá cả follow-up Swagger UI (`M2`/`M4`); bật mặc định Lớp 1 `-lan-guard=on` (`URLPattern: "*"`) khi `-guard off` (`M3`).
+  - **(41C — MCP, Tín hiệu, Báo cáo & Hoàn thiện bề mặt):** nonce `fence` 16-hex mỗi phiên MCP + cờ `suspicious_instructions` (`M8`); giữ CDP qua `context.WithoutCancel(ctx)`, cảnh báo ở tín hiệu thứ 2, dọn thư mục tạm ở tín hiệu thứ 3 + quét profile mồ côi `> 24h` (`M9`); xét `BodyActionFields` + GraphQL mutation phá huỷ vô điều kiện trong `guard` và xếp logout body/GraphQL là `Never` trong `replay` (`M12`); marker dẫn xuất theo seed build + `-archive-ua` (`L2`); `mdsafe` escape cho 5 báo cáo `.md` + lọc C0/C1 ở stderr (`L3`); kiểm `Content-Length`/cụt bản ghi WARC (`L4`); `traffic.AppendOpen` cô lập dòng JSONL cụt + `Scanner` đọc `runs.jsonl` + `fsync` lúc đóng run (`L5`); `crawl` khoá profile trước `loadLogin` (`L6`); lưu mật khẩu VNC Docker vào `$HOME/vnc-password` `0600` (`L7`); `.gitignore` + quét secret `gitleaks` ghim SHA-256 trong CI (`L8`); nối `ProbeCloud` qua `Sender.DoExternal` (`L10`); chặn `fec0::/10` trong `netsafe` (`L11`).

@@ -1,16 +1,33 @@
-# Trạng thái Hiện hành (`jsharvest` — Sau Đợt 40)
+# Trạng thái Hiện hành (`jsharvest` — Sau Đợt 41)
 
-Tài liệu nhập ngữ cảnh nhanh cho session mới (~5–9 KB). Đọc cùng [CLAUDE.md](../CLAUDE.md) (bất biến & quy trình gate); chỉ mở [rounds-history.md](rounds-history.md), [plan-40.md](plan-40.md), [plan-39.md](plan-39.md), [plan-38.md](plan-38.md) hoặc [plan-34.md](plan-34.md) khi cần chi tiết lịch sử/thiết kế cũ.
+Tài liệu nhập ngữ cảnh nhanh cho session mới (~6–10 KB). Đọc cùng [CLAUDE.md](../CLAUDE.md) (bất biến & quy trình gate); chỉ mở [rounds-history.md](rounds-history.md), [plan-41.md](plan-41.md), [threat-model-2026-11-20.md](threat-model-2026-11-20.md), [plan-40.md](plan-40.md), [plan-39.md](plan-39.md), [plan-38.md](plan-38.md) hoặc [plan-34.md](plan-34.md) khi cần chi tiết lịch sử/thiết kế cũ.
 
-## 1. Quy mô & Trạng thái Mốc Đợt 34
+## 1. Quy mô & Trạng thái Mốc Đợt 41
 
-- **Mã nguồn:** Go 1.25.4 (`CGO_ENABLED=0`, single binary, không thêm phụ thuộc ngoài); Đợt 34 bổ sung bộ điều khiển Độ lợi Thông tin Biên (`ΔInformation`), kiến trúc Streaming Archive DAG + Bộ nhớ đệm RAM có trần (`-mem-cache-mb`), lập lịch công bằng Weighted DRR đa tầng, nén Gzip chỉ mục CDX và hiệu chuẩn sâu `verify`/`detect`.
+- **Mã nguồn:** Go 1.25.4 (`CGO_ENABLED=0`, single binary, không thêm phụ thuộc ngoài); Đợt 41 hoàn tất gia cố an ninh, OpSec, độ tin cậy vận hành và trần tài nguyên toàn diện theo [plan-41.md](plan-41.md) & [threat-model-2026-11-20.md](threat-model-2026-11-20.md) (`H1`–`H3`, `M1`–`M13`, `L1`–`L11`).
 - **Trạng thái kiểm định:**
-  - `go vet ./...` (trên cả `darwin/arm64` và `linux/amd64`) & `go test -race ./...`: **100% PASS** toàn bộ package.
-  - `bin/testbed perfgate` (2.000 script, `43.1 MB`): `~1.6–2.5 s` trên macOS ARM64 / `~9.2–11.7 s` trên Linux x86_64, peak RSS `~354–364 MB` (trần cứng: `<= 15.0 s`, `<= 500.0 MB`).
-  - Gate tích hợp `endpoints-check.sh`, `verify-check.sh`, `crosscheck-check.sh`, `archive-check.sh`, `pipeline-check.sh`, `waf-check.sh`, `frontier-check.sh`, `frontier-tabs-check.sh`, `monitor-check.sh`: **PASS 100%** (`precision 1.000`, `recall 1.000`, kể cả tạm dừng `SIGINT` & resume, `-tabs 1 == -tabs 3`).
-  - Kiểm tra hygiene đường dẫn & dữ liệu sạch (`.github/workflows/ci.yml`): **`0` vi phạm**.
+  - `go vet ./...` & `go test -race ./cmd/... ./internal/...`: **100% PASS** toàn bộ package.
+  - `bin/testbed perfgate` (2.000 script, `43.1 MB`): `~10.8–11.6 s` trên Linux x86_64, peak RSS `~375–392 MB` (trần cứng: `<= 15.0 s`, `<= 500.0 MB`); snapshot `jsapi` trên 2.568 script trùng khớp 100% với HEAD.
+  - Toàn bộ gate tích hợp của Đợt 41A/41B/41C (`endpoints-check`, `replay-check`, `bola-check`, `verify-check`, `session-check`, `monitor-check`, `attach-guard`, `waf-check`, `pipeline-check`, `lan-check`, `frontier-check`, `archive-check`, `proxy-check`, `flows-gate`, `explore-check`, `roles-check`): **PASS 100%**.
+  - Kiểm tra hygiene đường dẫn & quét secret đã ghim phiên bản (`.github/workflows/ci.yml` + `.gitleaks.toml`): **`0` vi phạm**.
 - **Phiên bản extractor:** `jsapi.Version = 46`.
+
+## 1a. Gia cố An ninh, OpSec, Độ tin cậy & Giới hạn Tài nguyên (Đợt 41; [plan-41.md](plan-41.md))
+
+- **Đầu vào thù địch & Trần tài nguyên (`H1`, `H3`, `M7`, `M11`, `M13`, `L4`):**
+  - `internal/jsapi`: bảng offset dòng tuyến tính + tra nhị phân và trần `maxLooseMatches = 50_000` / `maxLooseEndpoints = 20_000` (`loose_truncated`); cầu chì `maxEsbuildNesting = 400` ở mọi nhánh gọi `esbuild` (kể cả `.ts`/`.tsx`, `.vue`/`.svelte`, sourcemap và `deferred.go`); ngân sách fallback `esbuild` tất định mỗi script (`maxEsbuildFallbacks = 4`).
+  - `sourcemap` & `store`: trần 2 tầng cho sourcemap (`maxTotalMapSources = 100_000`, `maxOwnSourcesPerMap = 5_000`, `maxVendorSourcesPerMap = 5_000`), trần `-max-source-files 50000` mỗi run trên HTTP/CDP/`archive` đồng bộ với singleflight `NoteStored` (`sighting_missing == 0`), flush hình học `max(50, len(order)/10)` + `5 s` và `SaveMap` nguyên tử; ngân sách đĩa `-max-store-mb 2048` mặc định cho `crawl`, `watch`, `archive` (tính gộp cả `js/` và `maps/*.map`); trần tất định `MaxManifestEntries = 10_000` O(N log N) trong `resolve`.
+  - `archive`: kiểm chặt `Content-Length` WARC (`0 <= n <= max + 1 MiB`), bắt buộc đủ `n` byte (`io.ErrUnexpectedEOF` khi cụt) và đóng `gzip.Reader`.
+- **Đúng đắn `authz`/`replay`, Guard, Egress & SSRF (`M1`, `M2`/`M4`, `M3`, `M12`, `L10`, `L11`):**
+  - `replay`/`authz`: tự động gỡ credential query/body của role cao không làm mới được trong `authz` dọc và quét lại — nếu còn sót (`multipart`, key trùng, `>= 200` param) thì giữ lại thành `Unclear` (không gửi, không ghi `trials/*.http`); sửa nhánh `Patch` lỗi ở cả `authz` lẫn `replay -as`; chặn `c.Kept` ở đầu nhánh 2xx/3xx/404 của `Judge`.
+  - `-probe-offscope=auto|on|off` trên `crawl`: `auto` tự tắt khi có `-proxy`, giữ quy tắc Đợt 40.1 khi không có proxy; khoá đồng nhất Phase 1, Phase 2 và `SwaggerUIURLs`/`SwaggerResources`/`SwaggerConfigURLs` trên cả HTTP lẫn CDP (`config.probe_offscope` trong `run.json`).
+  - `-lan-guard=on|off` (mặc định `on` trên `crawl` và `watch`): bật Lớp 1 chặn IP private/loopback/metadata (`URLPattern: "*"` phủ cả `ftp://`) ngay cả khi `-guard off`, tách sạch `cfg.Guard` khỏi `g != nil`; bổ sung `fec0::/10` (RFC 3879 site-local) vào `netsafe.PrivateAddr`.
+  - `guard` & `replay`: xét `BodyActionFields` (`operationParams` gồm cả `command`, duyệt đệ quy JSON/JSON-RPC batch + form) và GraphQL mutation phá huỷ vô điều kiện (kể cả khi `-allow-write` hoặc cửa sổ `AllowWrites` lúc `relogin`); xếp logout trong body/GraphQL thành `Never` ở `replay.Policy`; nối `verify` `ProbeCloud` qua `Sender.DoExternal` để tuân thủ `-rate`, `-max`, `Stopped()` và ghi `sent.jsonl`.
+- **Bảo vệ Bí mật, Phiên, MCP & Vận hành (`H2`, `M5`, `M6`, `M8`, `M9`, `M10`, `L1`–`L3`, `L5`–`L9`):**
+  - Bật mặc định `-redact=true` cho `authz` và `verify` (giữ `-redact=false` cho `replay`), che toàn diện `Sent.Item`/`Request`/`Headers`/`Body`/`Err`, `HostsBlocked`, `authz/trials/*.http`, `verify/drafts/*.http` và `Result.URL`; lọc userinfo, query nhạy cảm và `#fragment` qua `traffic.LogURL` ở toàn bộ log `guard`/`engine`/`capture`/`cli`.
+  - `session`: deep-clone `Storage`, `verify` phiên thành công trước khi `snap.Save`, khôi phục `setScript` nếu thất bại, và chốt cờ `SensitiveWindow` ngay tại `onSent` để redact request `relogin` kể cả khi `-redact` tắt; `crawl` phân giải và `flock` thư mục profile trước `loadLogin` cho cả `-u` lẫn `-urls`.
+  - `mcp`: sinh nonce `fence` 16-hex ngẫu nhiên mỗi phiên ở JSON gốc (bảo toàn 100% byte offset `Content`/`Snippet`) kèm cờ cảnh báo `suspicious_instructions` khi gặp mẫu prompt injection.
+  - Tín hiệu & độ bền file: giữ CDP qua `context.WithoutCancel(ctx)` ở Ctrl-C thứ nhất, cảnh báo ở Ctrl-C thứ hai, dọn thư mục tạm + `os.Exit(130)` ở Ctrl-C thứ ba, quét profile mồ côi `> 24h`; cô lập dòng JSONL cụt (`traffic.AppendOpen`), đọc `runs.jsonl` bằng `Scanner`, `fsync` khi chốt `run.json`/`index.jsonl`; `monitor` ghi nguyên tử, phục hồi `.sending`, bỏ qua snapshot hỏng và tôn trọng `-dry-run`; AIA gửi UA Chrome (`uahints`), hỗ trợ marker theo seed build + `-archive-ua`, escape đủ 5 báo cáo `.md` + lọc C0/C1 ở stderr, lưu mật khẩu VNC Docker vào `$HOME/vnc-password` (`0600`), và dùng `nxResolver` cho test tổng hợp.
 
 ## 1b. Đợt 37, 37.1, 38, 39 & 40 (tốc độ, độ phủ pre-auth & decoupled SPA; [plan-40.md](plan-40.md), [plan-39.md](plan-39.md), [plan-38.md](plan-38.md), [plan-37.1.md](plan-37.1.md))
 
@@ -68,6 +85,7 @@ Tài liệu nhập ngữ cảnh nhanh cho session mới (~5–9 KB). Đọc cùn
 ## 3. Quyết định & Lưu ý Vận hành Hiện tại
 
 - **`D1`–`D4` giữ nguyên hiệu lực**; cầu chì `D3` của Spec Probe 2 pha đã được vá nhánh `neterr` và chờ ghi nhận thực địa (`P2.1` / `P5.T`) trên target có phép.
+- **Bảo vệ dữ liệu nhạy cảm trên đĩa:** các tệp trong `output/` và `profiles/` (session snapshot `jsharvest-session.json`, profile Chrome `password-store=basic`, `requests.jsonl`, `blocked.jsonl`, hoặc `sent.jsonl`/`trials/*.http` khi truyền `-redact=false` / `-reveal`) chỉ được bảo vệ ở tầng OS bằng quyền `0600`/`0700`. Khi vận hành trên mục tiêu thực tế, luôn đặt `output/` và `profiles/` trên phân vùng mã hoá (LUKS/dm-crypt, FileVault, hoặc volume mã hoá riêng) và bật `-redact` khi cần lưu trữ/chia sẻ kết quả crawl.
 - **Ubuntu 24.04+ AppArmor `userns`:** sau mỗi lần reboot máy Linux, chạy `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` trước khi chạy `testbed/regress.sh`.
 
 ## 4. Lộ trình Dài hạn (chưa thực hiện, chỉ mở khi có nhu cầu thực tế)
