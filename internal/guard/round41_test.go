@@ -224,3 +224,105 @@ func TestRound41BodyAndGraphQLDeleteHeld(t *testing.T) {
 		t.Fatalf("unexpected relogin guard stats/records: stats=%+v records=%+v", g.stats, g.records)
 	}
 }
+
+func TestRound41FormSemicolonAndBadPercent(t *testing.T) {
+	r := Rules{AllowWrite: true}
+	for _, req := range []Request{
+		{Method: "POST", URL: "https://app.example/form", ContentType: "application/x-www-form-urlencoded", Body: "note=a;b&action=delete"},
+		{Method: "POST", URL: "https://app.example/form", ContentType: "application/x-www-form-urlencoded", Body: "bad=%ZZ&action=logout"},
+		{Method: "POST", URL: "https://app.example/form", ContentType: "application/x-www-form-urlencoded", Body: "_method=DELETE;x=1"},
+		{Method: "POST", URL: "https://app.example/form?_method=DELETE;x=1", ContentType: "application/x-www-form-urlencoded", Body: "ok=1"},
+	} {
+		d := r.Classify(req)
+		if d.Action != Fake || d.Reason != "destructive" {
+			t.Errorf("Classify(%s %s %s) = %+v, want {Fake, destructive}", req.Method, req.URL, req.Body, d)
+		}
+	}
+
+	exp := Rules{Explore: true}
+	if d := exp.Classify(Request{Method: "GET", URL: "https://app.example/rpc?note=%ZZ&action=approve", ResourceType: "Fetch"}); d.Action != Fake || d.Reason != "explore-verb" {
+		t.Errorf("Explore GET with bad percent query = %+v, want {Fake, explore-verb}", d)
+	}
+}
+
+func TestRound41MultipartDestructiveAndLogout(t *testing.T) {
+	r := Rules{AllowWrite: true}
+	fullDestroy := "--b1\r\nContent-Disposition: form-data; name=\"action\"\r\n\r\ndestroy\r\n--b1--\r\n"
+	fullLogout := "--b2\r\nContent-Disposition: form-data; name=\"op\"\r\n\r\nsign_out\r\n--b2--\r\n"
+	truncDestroy := "--b3\r\nContent-Disposition: form-data; name=\"note\"\r\n\r\nhi\r\n--b3\r\nContent-Disposition: form-data; name=\"action\"\r\n\r\ndestroy"
+	noBoundaryHeader := "--b4\r\nContent-Disposition: form-data; name=\"op\"\r\n\r\nlogout\r\n"
+	methodDelete := "--b5\r\nContent-Disposition: form-data; name=\"_method\"\r\n\r\nDELETE\r\n--b5--\r\n"
+
+	for _, req := range []Request{
+		{Method: "POST", URL: "https://app.example/up", ContentType: "multipart/form-data; boundary=b1", Body: fullDestroy},
+		{Method: "POST", URL: "https://app.example/up", ContentType: "multipart/form-data; boundary=b2", Body: fullLogout},
+		{Method: "POST", URL: "https://app.example/up", ContentType: "multipart/form-data; boundary=b3", Body: truncDestroy},
+		{Method: "POST", URL: "https://app.example/up", ContentType: "multipart/form-data", Body: noBoundaryHeader},
+		{Method: "POST", URL: "https://app.example/up", ContentType: "multipart/form-data; boundary=b5", Body: methodDelete},
+	} {
+		d := r.Classify(req)
+		if d.Action != Fake || d.Reason != "destructive" {
+			t.Errorf("Classify(multipart %q) = %+v, want {Fake, destructive}", req.Body, d)
+		}
+	}
+
+	// File upload filename containing "delete" must not trigger BodyActionFields,
+	// and _method=GET with no destructive fields is read.
+	safeFile := "--b6\r\nContent-Disposition: form-data; name=\"file\"; filename=\"delete.txt\"\r\nContent-Type: text/plain\r\n\r\nhi\r\n--b6--\r\n"
+	if d := (Rules{AllowWrite: true}).Classify(Request{Method: "POST", URL: "https://app.example/up", ContentType: "multipart/form-data; boundary=b6", Body: safeFile}); d.Action != Pass {
+		t.Errorf("safe multipart file upload = %+v, want Pass", d)
+	}
+	methodGet := "--b7\r\nContent-Disposition: form-data; name=\"_method\"\r\n\r\nGET\r\n--b7--\r\n"
+	if d := (Rules{AllowWrite: false}).Classify(Request{Method: "POST", URL: "https://app.example/search", ContentType: "multipart/form-data; boundary=b7", Body: methodGet}); d.Action != Pass || d.Reason != "read" {
+		t.Errorf("multipart _method=GET = %+v, want {Pass, read}", d)
+	}
+}
+
+func TestRound41JSONRPCBatch65thDestructive(t *testing.T) {
+	var b strings.Builder
+	b.WriteByte('[')
+	for i := 1; i <= 70; i++ {
+		if i > 1 {
+			b.WriteByte(',')
+		}
+		if i == 68 {
+			b.WriteString(`{"jsonrpc":"2.0","method":"user.delete","id":68}`)
+		} else {
+			b.WriteString(`{"jsonrpc":"2.0","method":"ping","id":1}`)
+		}
+	}
+	b.WriteByte(']')
+
+	d := (Rules{AllowWrite: true}).Classify(Request{
+		Method:      "POST",
+		URL:         "https://app.example/rpc",
+		ContentType: "application/json",
+		Body:        b.String(),
+	})
+	if d.Action != Fake || d.Reason != "destructive" {
+		t.Fatalf("70-item JSON-RPC batch with 68th delete = %+v, want {Fake, destructive}", d)
+	}
+}
+
+func TestRound41GraphQLReadQueryWithFilterAction(t *testing.T) {
+	r := Rules{AllowWrite: false}
+	readReq := Request{
+		Method:      "POST",
+		URL:         "https://app.example/graphql",
+		ContentType: "application/json",
+		Body:        `{"query":"query ListAudit($f: Filter){ logs(filter: $f){ id } }","variables":{"f":{"action":"delete"}}}`,
+	}
+	if d := r.Classify(readReq); d.Action != Pass || d.Reason != "read" {
+		t.Fatalf("GraphQL read query with filter.action=delete got %+v, want {Pass, read}", d)
+	}
+
+	mutReq := Request{
+		Method:      "POST",
+		URL:         "https://app.example/graphql",
+		ContentType: "application/json",
+		Body:        `{"query":"mutation RunAudit($f: Filter){ run(filter: $f){ id } }","variables":{"f":{"action":"delete"}}}`,
+	}
+	if d := (Rules{AllowWrite: true}).Classify(mutReq); d.Action != Fake || d.Reason != "destructive" {
+		t.Fatalf("GraphQL mutation with filter.action=delete got %+v, want {Fake, destructive}", d)
+	}
+}

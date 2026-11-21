@@ -6,6 +6,9 @@ package guard
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime"
+	"mime/multipart"
 	"net/url"
 	"regexp"
 	"regexp/syntax"
@@ -58,16 +61,46 @@ func EffectiveMethod(method, override, rawURL, contentType, body string) string 
 		return strings.ToUpper(override)
 	}
 	if u, err := url.Parse(rawURL); err == nil {
-		if m := u.Query().Get("_method"); m != "" {
+		var m string
+		ForEachFormField(u.RawQuery, func(k, v string) bool {
+			if k == "_method" && v != "" {
+				m = v
+				return false
+			}
+			return true
+		})
+		if m != "" {
 			return strings.ToUpper(m)
 		}
 	}
-	if strings.Contains(contentType, "x-www-form-urlencoded") || strings.Contains(contentType, "multipart/") {
-		if f, err := url.ParseQuery(body); err == nil && f.Get("_method") != "" {
-			return strings.ToUpper(f.Get("_method"))
+	ct := strings.ToLower(contentType)
+	switch {
+	case isMultipartBody(body, ct):
+		var m string
+		ForEachMultipartField(body, contentType, func(k, v string) bool {
+			if k == "_method" && v != "" {
+				m = v
+				return false
+			}
+			return true
+		})
+		if m != "" {
+			return strings.ToUpper(m)
 		}
 		if strings.Contains(body, `name="_method"`) {
-			return "POST+OVERRIDE" // a multipart override: not a read, whatever it names
+			return "POST+OVERRIDE" // a multipart override whose value could not be parsed: not a read
+		}
+	case strings.Contains(ct, "x-www-form-urlencoded"):
+		var m string
+		ForEachFormField(body, func(k, v string) bool {
+			if k == "_method" && v != "" {
+				m = v
+				return false
+			}
+			return true
+		})
+		if m != "" {
+			return strings.ToUpper(m)
 		}
 	}
 	return strings.ToUpper(method)
@@ -111,16 +144,19 @@ func (r Rules) Classify(req Request) Decision {
 	if Destructive(req.URL) {
 		return Decision{Fake, "destructive"}
 	}
-	for _, v := range BodyActionFields(req.Body, req.ContentType) {
-		if hasWord(destructiveRe, v) {
-			return Decision{Fake, "destructive"}
-		}
-	}
 	method := EffectiveMethod(req.Method, req.Override, req.URL, req.ContentType, req.Body)
 	if method == "DELETE" && !strings.EqualFold(req.Method, "DELETE") {
 		return Decision{Fake, "destructive"} // a DELETE disguised as another method
 	}
-	if gql, write, _ := graphQL(method, req); gql && write && hasWord(destructiveRe, req.Body+" "+req.URL) {
+	gql, gqlWrite, gqlReason := graphQL(method, req)
+	if !(gql && !gqlWrite) {
+		for _, v := range BodyActionFields(req.Body, req.ContentType) {
+			if hasWord(destructiveRe, v) {
+				return Decision{Fake, "destructive"}
+			}
+		}
+	}
+	if gql && gqlWrite && hasWord(destructiveRe, req.Body+" "+req.URL) {
 		return Decision{Fake, "destructive"}
 	}
 	if strings.EqualFold(req.Method, "POST") && method == "POST" && !isGraphQL(method, req) && refreshGrant(req) {
@@ -135,8 +171,8 @@ func (r Rules) Classify(req Request) Decision {
 		}
 	}
 	if !r.AllowWrite {
-		if gql, write, reason := graphQL(method, req); gql && write {
-			return Decision{Fake, reason}
+		if gql && gqlWrite {
+			return Decision{Fake, gqlReason}
 		} else if gql {
 			return Decision{Pass, "read"}
 		}
@@ -240,9 +276,201 @@ func isOperationParam(k string) bool {
 	return false
 }
 
+const (
+	maxActionJSONNodes    = 10_000
+	maxMultipartParts     = 64
+	maxMultipartPartBytes = 4096
+)
+
+// ForEachFormField parses an application/x-www-form-urlencoded body or raw
+// query string leniently: it splits on both '&' and ';' and unescapes each
+// token without discarding the whole body on a malformed %XX escape.
+func ForEachFormField(raw string, fn func(key, val string) bool) {
+	for i := 0; i < len(raw); {
+		j := i
+		for j < len(raw) && raw[j] != '&' && raw[j] != ';' {
+			j++
+		}
+		part := raw[i:j]
+		i = j + 1
+		if part == "" {
+			continue
+		}
+		rawK, rawV := part, ""
+		if eq := strings.IndexByte(part, '='); eq >= 0 {
+			rawK, rawV = part[:eq], part[eq+1:]
+		}
+		if !fn(queryUnescapeLenient(rawK), queryUnescapeLenient(rawV)) {
+			return
+		}
+	}
+}
+
+func queryUnescapeLenient(s string) string {
+	if u, err := url.QueryUnescape(s); err == nil {
+		return u
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '+':
+			b.WriteByte(' ')
+		case '%':
+			if i+2 < len(s) {
+				if hi, ok1 := unhex(s[i+1]); ok1 {
+					if lo, ok2 := unhex(s[i+2]); ok2 {
+						b.WriteByte(hi<<4 | lo)
+						i += 2
+						continue
+					}
+				}
+			}
+			b.WriteByte('%')
+		default:
+			b.WriteByte(s[i])
+		}
+	}
+	return b.String()
+}
+
+func unhex(c byte) (byte, bool) {
+	switch {
+	case c >= '0' && c <= '9':
+		return c - '0', true
+	case c >= 'a' && c <= 'f':
+		return c - 'a' + 10, true
+	case c >= 'A' && c <= 'F':
+		return c - 'A' + 10, true
+	default:
+		return 0, false
+	}
+}
+
+func isMultipartBody(body, ctLower string) bool {
+	if strings.Contains(ctLower, "multipart/") {
+		return true
+	}
+	t := strings.TrimSpace(strings.TrimPrefix(body, "\ufeff"))
+	return strings.HasPrefix(t, "--") && strings.Contains(strings.ToLower(t), "content-disposition:") && strings.Contains(strings.ToLower(t), "form-data")
+}
+
+// ForEachMultipartField extracts bounded non-file text fields from a
+// multipart/form-data body, falling back to boundary/header scanning if the
+// Content-Type boundary is missing or the body is truncated.
+func ForEachMultipartField(body, contentType string, fn func(name, val string) bool) {
+	boundary := ""
+	if contentType != "" {
+		if _, params, err := mime.ParseMediaType(contentType); err == nil {
+			boundary = params["boundary"]
+		}
+	}
+	if boundary == "" {
+		t := strings.TrimLeft(strings.TrimPrefix(body, "\ufeff"), " \t\r\n")
+		if strings.HasPrefix(t, "--") {
+			if nl := strings.IndexAny(t, "\r\n"); nl > 2 {
+				boundary = strings.TrimSpace(t[2:nl])
+			}
+		}
+	}
+	count := 0
+	if boundary != "" {
+		mr := multipart.NewReader(strings.NewReader(body), boundary)
+		for range maxMultipartParts {
+			p, err := mr.NextPart()
+			if err != nil {
+				break
+			}
+			name := p.FormName()
+			isFile := p.FileName() != ""
+			var val string
+			if !isFile && name != "" {
+				b, _ := io.ReadAll(io.LimitReader(p, maxMultipartPartBytes))
+				val = string(b)
+			}
+			_ = p.Close()
+			if isFile || name == "" {
+				continue
+			}
+			count++
+			if !fn(name, val) {
+				return
+			}
+		}
+		if count > 0 {
+			return
+		}
+	}
+	scanMultipartFallback(body, fn)
+}
+
+func scanMultipartFallback(body string, fn func(name, val string) bool) {
+	lower := strings.ToLower(body)
+	parts := 0
+	for pos := 0; pos < len(lower) && parts < maxMultipartParts; {
+		idx := strings.Index(lower[pos:], "content-disposition:")
+		if idx < 0 {
+			return
+		}
+		hdrStart := pos + idx
+		sepIdx := -1
+		sepLen := 0
+		if rnrn := strings.Index(body[hdrStart:], "\r\n\r\n"); rnrn >= 0 {
+			sepIdx = hdrStart + rnrn
+			sepLen = 4
+		}
+		if nn := strings.Index(body[hdrStart:], "\n\n"); nn >= 0 && (sepIdx < 0 || hdrStart+nn < sepIdx) {
+			sepIdx = hdrStart + nn
+			sepLen = 2
+		}
+		if sepIdx < 0 {
+			return
+		}
+		hdr := body[hdrStart:sepIdx]
+		hdrLower := lower[hdrStart:sepIdx]
+		pos = sepIdx + sepLen
+		if !strings.Contains(hdrLower, "form-data") || strings.Contains(hdrLower, "filename=") {
+			continue
+		}
+		name := extractDispositionName(hdr)
+		if name == "" {
+			continue
+		}
+		valEnd := len(body)
+		if nextRN := strings.Index(body[pos:], "\r\n--"); nextRN >= 0 && pos+nextRN < valEnd {
+			valEnd = pos + nextRN
+		}
+		if nextN := strings.Index(body[pos:], "\n--"); nextN >= 0 && pos+nextN < valEnd {
+			valEnd = pos + nextN
+		}
+		if valEnd-pos > maxMultipartPartBytes {
+			valEnd = pos + maxMultipartPartBytes
+		}
+		val := strings.TrimRight(body[pos:valEnd], "\r\n")
+		parts++
+		if !fn(name, val) {
+			return
+		}
+		pos = valEnd
+	}
+}
+
+func extractDispositionName(hdr string) string {
+	// Parse within Content-Disposition header parameters; handles name="foo".
+	for _, seg := range strings.Split(hdr, ";") {
+		seg = strings.TrimSpace(seg)
+		if len(seg) >= 5 && strings.EqualFold(seg[:5], "name=") {
+			v := strings.TrimSpace(seg[5:])
+			v = strings.Trim(v, `"'`)
+			return v
+		}
+	}
+	return ""
+}
+
 // BodyActionFields extracts string values assigned to operation discriminator
 // keys (action, method, op, cmd, command, operation, func, function, task, do)
-// in URL-encoded forms or JSON objects/arrays (including JSON-RPC batches).
+// in URL-encoded forms, multipart forms, or JSON objects/arrays (including JSON-RPC batches).
 func BodyActionFields(body, contentType string) []string {
 	t := strings.TrimSpace(strings.TrimPrefix(body, "\ufeff"))
 	if t == "" || len(t) > 1<<20 {
@@ -254,36 +482,40 @@ func BodyActionFields(body, contentType string) []string {
 	case t[0] == '{' || t[0] == '[':
 		var v any
 		if json.Unmarshal([]byte(t), &v) == nil {
-			walkActionJSON(v, "", 0, &out)
+			visited := 0
+			walkActionJSON(v, "", 0, &visited, &out)
 		}
-	case strings.Contains(ct, "x-www-form-urlencoded") || (!strings.Contains(ct, "multipart/") && !strings.ContainsAny(t, " \t\r\n<")):
-		if f, err := url.ParseQuery(t); err == nil {
-			for k, vs := range f {
-				if isOperationParam(k) {
-					for _, v := range vs {
-						if v != "" && len(v) <= 200 {
-							out = append(out, v)
-						}
-					}
-				}
+	case isMultipartBody(t, ct):
+		ForEachMultipartField(body, contentType, func(k, v string) bool {
+			if isOperationParam(k) && v != "" && len(v) <= 200 {
+				out = append(out, v)
 			}
-		}
+			return true
+		})
+	case strings.Contains(ct, "x-www-form-urlencoded") || !strings.ContainsAny(t, " \t\r\n<"):
+		ForEachFormField(t, func(k, v string) bool {
+			if isOperationParam(k) && v != "" && len(v) <= 200 {
+				out = append(out, v)
+			}
+			return true
+		})
 	}
 	return out
 }
 
-func walkActionJSON(v any, key string, depth int, out *[]string) {
-	if depth > 20 || len(*out) >= 64 {
+func walkActionJSON(v any, key string, depth int, visited *int, out *[]string) {
+	if depth > 20 || *visited >= maxActionJSONNodes {
 		return
 	}
+	*visited++
 	switch x := v.(type) {
 	case map[string]any:
 		for k, y := range x {
-			walkActionJSON(y, k, depth+1, out)
+			walkActionJSON(y, k, depth+1, visited, out)
 		}
 	case []any:
 		for _, y := range x {
-			walkActionJSON(y, key, depth+1, out)
+			walkActionJSON(y, key, depth+1, visited, out)
 		}
 	case string:
 		if x != "" && len(x) <= 200 && isOperationParam(key) {
@@ -299,13 +531,15 @@ func operationVerb(raw string) bool {
 	if err != nil {
 		return false
 	}
-	q := u.Query()
-	for _, p := range operationParams {
-		if v := q.Get(p); v != "" && hasWord(actionVerbRe, v) {
-			return true
+	found := false
+	ForEachFormField(u.RawQuery, func(k, v string) bool {
+		if isOperationParam(k) && v != "" && hasWord(actionVerbRe, v) {
+			found = true
+			return false
 		}
-	}
-	return false
+		return true
+	})
+	return found
 }
 
 // scriptRequest reports whether a request is a script's (fetch, XHR,

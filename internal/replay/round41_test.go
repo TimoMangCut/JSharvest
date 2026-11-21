@@ -479,3 +479,67 @@ func TestRound41BodyAndGraphQLLogoutNever(t *testing.T) {
 		t.Fatalf("free-form body text falsely classified as Never: %+v", d)
 	}
 }
+
+func TestRound41PolicyLenientFormMultipartAndBatch(t *testing.T) {
+	var p Policy
+
+	// 1. Semicolon and malformed %ZZ in form body.
+	for _, tc := range []struct {
+		name string
+		e    traffic.Entry
+		want Kind
+	}{
+		{
+			"form_semicolon_delete",
+			traffic.Entry{Method: "POST", URL: "https://app.example/form", Headers: map[string]string{"content-type": "application/x-www-form-urlencoded"}, Body: traffic.Body{Body: "note=a;b&action=delete"}},
+			Destructive,
+		},
+		{
+			"form_bad_percent_logout",
+			traffic.Entry{Method: "POST", URL: "https://app.example/form", Headers: map[string]string{"content-type": "application/x-www-form-urlencoded"}, Body: traffic.Body{Body: "bad=%ZZ&action=logout"}},
+			Never,
+		},
+		{
+			"form_semicolon_method_delete",
+			traffic.Entry{Method: "POST", URL: "https://app.example/form", Headers: map[string]string{"content-type": "application/x-www-form-urlencoded"}, Body: traffic.Body{Body: "_method=DELETE;x=1"}},
+			Destructive,
+		},
+		{
+			"multipart_sign_out",
+			traffic.Entry{Method: "POST", URL: "https://app.example/up", Headers: map[string]string{"content-type": "multipart/form-data; boundary=b1"}, Body: traffic.Body{Body: "--b1\r\nContent-Disposition: form-data; name=\"op\"\r\n\r\nsign_out\r\n--b1--\r\n"}},
+			Never,
+		},
+		{
+			"multipart_truncated_destroy",
+			traffic.Entry{Method: "POST", URL: "https://app.example/up", Headers: map[string]string{"content-type": "multipart/form-data; boundary=b2"}, Body: traffic.Body{Body: "--b2\r\nContent-Disposition: form-data; name=\"action\"\r\n\r\ndestroy"}},
+			Destructive,
+		},
+	} {
+		if d := p.Classify(tc.e, false); d.Kind != tc.want {
+			t.Errorf("%s: got %+v, want Kind=%s", tc.name, d, tc.want)
+		}
+	}
+
+	// 2. 68th element in JSON-RPC batch triggers Never for logout / Destructive for delete.
+	var b strings.Builder
+	b.WriteByte('[')
+	for i := 1; i <= 70; i++ {
+		if i > 1 {
+			b.WriteByte(',')
+		}
+		if i == 68 {
+			b.WriteString(`{"jsonrpc":"2.0","method":"session.logout","id":68}`)
+		} else {
+			b.WriteString(`{"jsonrpc":"2.0","method":"ping","id":1}`)
+		}
+	}
+	b.WriteByte(']')
+	if d := p.Classify(traffic.Entry{
+		Method:  "POST",
+		URL:     "https://app.example/rpc",
+		Headers: map[string]string{"content-type": "application/json"},
+		Body:    traffic.Body{Body: b.String()},
+	}, false); d.Kind != Never {
+		t.Fatalf("70-item JSON-RPC batch with 68th logout got %+v, want Never", d)
+	}
+}

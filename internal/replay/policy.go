@@ -231,43 +231,56 @@ func stripGQLComments(doc string) string {
 	return b.String()
 }
 
+const maxPolicyJSONNodes = 10_000
+
 // bodyValues are the string values of a form or JSON body: JSON-RPC's
 // "method", an "action" field, a value naming what to do.
 func bodyValues(body, ct string) []string {
 	t := strings.TrimSpace(body)
 	var out []string
+	ctLower := strings.ToLower(ct)
 	switch {
 	case strings.HasPrefix(t, "{") || strings.HasPrefix(t, "["):
 		var v any
 		if json.Unmarshal([]byte(t), &v) == nil {
+			visited := 0
 			walk(v, func(k, s string) {
 				if k != "query" { // a GraphQL document: read as one
 					out = append(out, s)
 				}
-			}, "", 0)
+			}, "", 0, &visited)
 		}
-	case strings.Contains(ct, "x-www-form-urlencoded") || (t != "" && !strings.ContainsAny(t, " \n<")):
-		if f, err := url.ParseQuery(t); err == nil {
-			for _, vs := range f {
-				out = append(out, vs...)
+	case strings.Contains(ctLower, "multipart/") || (strings.HasPrefix(t, "--") && strings.Contains(strings.ToLower(t), "content-disposition:")):
+		guard.ForEachMultipartField(body, ct, func(_, v string) bool {
+			if v != "" && len(v) <= 200 {
+				out = append(out, v)
 			}
-		}
+			return true
+		})
+	case strings.Contains(ctLower, "x-www-form-urlencoded") || (t != "" && !strings.ContainsAny(t, " \n<")):
+		guard.ForEachFormField(t, func(_, v string) bool {
+			if len(v) <= 200 {
+				out = append(out, v)
+			}
+			return true
+		})
 	}
 	return out
 }
 
-func walk(v any, f func(key, s string), key string, depth int) {
-	if depth > 20 {
+func walk(v any, f func(key, s string), key string, depth int, visited *int) {
+	if depth > 20 || *visited >= maxPolicyJSONNodes {
 		return
 	}
+	*visited++
 	switch x := v.(type) {
 	case map[string]any:
 		for k, y := range x {
-			walk(y, f, k, depth+1)
+			walk(y, f, k, depth+1, visited)
 		}
 	case []any:
 		for _, y := range x {
-			walk(y, f, key, depth+1)
+			walk(y, f, key, depth+1, visited)
 		}
 	case string:
 		if len(x) <= 200 {
