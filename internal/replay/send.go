@@ -731,7 +731,7 @@ func (s *Sender) write(l Sent) {
 	}
 	if r := s.o.Redactor; r != nil {
 		if l.Item != "" {
-			l.Item = r.Text(l.Item)
+			l.Item = r.URL(l.Item)
 		}
 		l.Request = RedactRaw(r, l.Request)
 		l.Headers = r.Headers(l.Headers)
@@ -800,8 +800,6 @@ func (s *Sender) DoExternal(ctx context.Context, client *http.Client, req *http.
 		s.mu.Unlock()
 		return nil, ErrBudget
 	}
-	s.n++
-	n := s.n
 	s.mu.Unlock()
 
 	select {
@@ -825,9 +823,21 @@ func (s *Sender) DoExternal(ctx context.Context, client *http.Client, req *http.
 			return nil, ctx.Err()
 		}
 	}
-	if why := s.Stopped(); why != "" {
+
+	s.mu.Lock()
+	if s.stopped != "" {
+		why := s.stopped
+		s.mu.Unlock()
 		return nil, fmt.Errorf("%w: %s", errStopped, why)
 	}
+	if s.o.Max > 0 && s.n >= s.o.Max {
+		s.stop(ErrBudget.Error())
+		s.mu.Unlock()
+		return nil, ErrBudget
+	}
+	s.n++
+	n := s.n
+	s.mu.Unlock()
 
 	line := Sent{
 		N:       n,

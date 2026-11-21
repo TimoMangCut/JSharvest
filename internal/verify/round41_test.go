@@ -191,3 +191,75 @@ func TestRound41VerifyScrubsReasonsAndRedirectLocations(t *testing.T) {
 		}
 	}
 }
+
+func TestRound41DoExternalCancelWhileRateLimitedDoesNotCount(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	sentPath := filepath.Join(dir, "sent.jsonl")
+	sender, err := replay.NewSender(replay.SenderOptions{
+		AllowPrivate: true,
+		Rate:         500 * time.Millisecond,
+		Max:          2,
+		Log:          sentPath,
+		Redactor:     traffic.NewRedactor(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req1, _ := http.NewRequest("GET", srv.URL+"/one", nil)
+	resp1, err := sender.DoExternal(context.Background(), srv.Client(), req1, "cloud", "https://admin:p%40ss@example.test/one")
+	if err != nil {
+		t.Fatalf("req1 failed: %v", err)
+	}
+	_ = resp1.Body.Close()
+
+	// Request 2 cancels while waiting on 500ms rate limit; must NOT increment s.n or write sent.jsonl.
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel2()
+	req2, _ := http.NewRequest("GET", srv.URL+"/two", nil)
+	if resp2, err := sender.DoExternal(ctx2, srv.Client(), req2, "cloud", "https://example.test/two"); err == nil {
+		_ = resp2.Body.Close()
+		t.Fatal("expected req2 to fail on context deadline while rate limited")
+	}
+
+	// Request 3 must still succeed within Max=2!
+	req3, _ := http.NewRequest("GET", srv.URL+"/three", nil)
+	resp3, err := sender.DoExternal(context.Background(), srv.Client(), req3, "cloud", "https://example.test/three")
+	if err != nil {
+		t.Fatalf("req3 failed after canceled req2: %v", err)
+	}
+	_ = resp3.Body.Close()
+
+	if sender.Count() != 2 {
+		t.Fatalf("sender.Count() = %d, want 2", sender.Count())
+	}
+	if err := sender.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := os.ReadFile(sentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("sent.jsonl has %d lines, want 2:\n%s", len(lines), string(raw))
+	}
+	for i, ln := range lines {
+		var s replay.Sent
+		if err := json.Unmarshal([]byte(ln), &s); err != nil {
+			t.Fatalf("line %d invalid JSON: %v", i, err)
+		}
+		if s.N != i+1 {
+			t.Fatalf("line %d N = %d, want %d", i, s.N, i+1)
+		}
+	}
+	if strings.Contains(string(raw), "p%40ss") || strings.Contains(string(raw), "p@ss") {
+		t.Fatalf("sent.jsonl leaked Sent.Item userinfo password:\n%s", string(raw))
+	}
+}
