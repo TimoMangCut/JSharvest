@@ -85,6 +85,9 @@ docker run --rm --network host -e JSHARVEST_ENGINE --user 1234:1234 -v "$root/$w
 [ "$(stat -c '%u %a' "$work/other/127.0.0.1" 2>/dev/null)" = "1234 700" ] || fail "as uid 1234: $(stat -c '%u %a' "$work/other/127.0.0.1" 2>&1), want 1234 700"
 docker run --rm --user 1234:1234 -v "$root/$work/other:/output" "$img" sh -c 'test -s /output/127.0.0.1/anon/requests.jsonl' || fail "as uid 1234: no request log"
 docker run --rm --user 1234:1234 -v "$root/$work/other:/output" "$img" sh -c 'rm -rf /output/*' # theirs to remove
+# A writable bind-mounted $HOME owned by another uid must not fail entrypoint's chmod.
+docker run --rm --user 1234:1234 -e HOME=/nonowned-home -v "$root/$work/other:/nonowned-home" "$img" help | grep -q "jsharvest crawl" ||
+  fail "entrypoint failed with non-owned writable HOME"
 
 echo "== 3. Chrome's sandbox"
 # Docker's default seccomp: no user namespaces, so --no-sandbox, said so.
@@ -136,6 +139,7 @@ docker exec jsh-login sh -c 'cat /proc/net/tcp /proc/net/tcp6' | awk '$4 == "0A"
   grep -vE '^(0100007F|00000000000000000000000001000000):' && fail "VNC listens beyond the loopback"
 docker exec jsh-login sh -c 'cat /proc/net/tcp /proc/net/tcp6' | awk '$4 == "0A" && $2 ~ /:170C$/' | grep -q . || fail "VNC does not listen"
 docker exec jsh-login sh -c 'ls -A /tmp/.X11-unix; cat /proc/net/unix' | grep -q '@/tmp/.X11-unix/X99' && fail "Xvfb listens on an abstract socket"
+[ "$(docker exec jsh-login sh -c 'stat -c "%a" "$HOME/.Xauthority"' 2>/dev/null)" = 600 ] || fail ".Xauthority is not mode 0600"
 sleep 3
 procs=$(docker exec jsh-login sh -c 'for p in /proc/[0-9]*/cmdline; do tr "\0" " " <$p; echo; done' | grep -E '(^| )(/opt/chrome-linux64/chrome|/usr/local/bin/chrome|/usr/lib/chromium/chromium|/usr/bin/chromium)' || true)
 [ -n "$procs" ] || fail "no Chrome in the login"

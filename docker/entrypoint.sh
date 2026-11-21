@@ -15,7 +15,8 @@ esac
 if [ ! -w "${HOME:-/nonexistent}" ]; then
   export HOME=/tmp/jsharvest-home
 fi
-mkdir -p "$HOME"
+(umask 077 && mkdir -p "$HOME")
+chmod 700 "$HOME" 2>/dev/null || true
 
 # Chrome's sandbox when the container may make user namespaces (a
 # seccomp profile that allows them, as docker-compose.yml sets); else
@@ -50,7 +51,7 @@ if [ "$display" = 1 ]; then
   # Xvfb with a cookie, and no socket but its file: on the host's network
   # an abstract socket would let any process of the host type into it.
   export DISPLAY=:99 XAUTHORITY="$HOME/.Xauthority"
-  touch "$XAUTHORITY"
+  (umask 077 && : >"$XAUTHORITY")
   xauth -f "$XAUTHORITY" add :99 . "$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
   Xvfb :99 -screen 0 1366x900x24 -auth "$XAUTHORITY" -nolisten tcp -nolisten local >/tmp/xvfb.log 2>&1 &
   for _ in $(seq 30); do [ -e /tmp/.X11-unix/X99 ] && break; sleep 0.2; done
@@ -60,7 +61,7 @@ if [ "$display" = 1 ]; then
   pass=${JSHARVEST_VNC_PASSWORD:-}
   if [ -z "$pass" ]; then
     pass=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 8)
-    (umask 077 && mkdir -p "$HOME" && chmod 700 "$HOME" && printf '%s\n' "$pass" >"$HOME/vnc-password")
+    (umask 077 && mkdir -p "$HOME" && printf '%s\n' "$pass" >"$HOME/vnc-password")
     echo "noVNC password saved to $HOME/vnc-password (read with: docker exec <container> cat \"$HOME/vnc-password\", or pass JSHARVEST_VNC_PASSWORD)" >&2
   fi
   (umask 077 && x11vnc -storepasswd "$pass" "$HOME/.vncpass" >/dev/null 2>&1)
