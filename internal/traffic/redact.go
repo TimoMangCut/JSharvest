@@ -143,8 +143,8 @@ var (
 	// single-quoted or unquoted keys, and JSON escaped inside a string
 	// (\"password\":\"x\").
 	codePairRe = regexp.MustCompile(`([A-Za-z_$][\w$.-]{0,100})(\\?['"]?\s*[:=]\s*)(\\"(?:[^"\\]|\\[^"])*\\"|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*')`)
-	// name=value, in a query, a form body or a URL inside other text.
-	formPairRe = regexp.MustCompile(`(^|[?&;\s"'(])([^=&?;\s"'()<>]{1,100})=([^&\s;#"'<>]*)`)
+	// name=value, in a query, a form body, XML/HTML text or a URL inside other text.
+	formPairRe = regexp.MustCompile(`(^|[?&;\s"'(>])([^=&?;\s"'()<>]{1,100})=([^&\s;#"'<>]*)`)
 	// A multipart part: its name, then its value after a blank line.
 	multipartRe = regexp.MustCompile(`(name="([^"]{1,100})"[^\r\n]*\r?\n(?:[^\r\n]+\r?\n)*\r?\n)((?s:.*?))(\r?\n--|$)`)
 	// An HTML input with a name and a value, in either order.

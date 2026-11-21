@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -234,7 +235,7 @@ func Run(ctx context.Context, o Options) (*Report, error) {
 			rep.HostsGated[h] = g.why
 		}
 	}
-	if !o.NoCloudProbe && o.Sender != nil && !o.Sender.DryRun() && ctx.Err() == nil {
+	if !o.NoCloudProbe && o.Sender != nil && !o.Sender.DryRun() && o.Sender.Stopped() == "" && ctx.Err() == nil {
 		intelDir := o.IntelDir
 		if intelDir == "" && filepath.Base(o.Dir) == "verify" {
 			intelDir = filepath.Dir(o.Dir)
@@ -255,9 +256,18 @@ func Run(ctx context.Context, o Options) (*Report, error) {
 				Insecure:     so.Insecure,
 				Resolver:     so.Resolver,
 				UserAgent:    so.UserAgent,
+				Do: func(reqCtx context.Context, client *http.Client, req *http.Request) (*http.Response, error) {
+					resp, err := o.Sender.DoExternal(reqCtx, client, req, "cloud", req.URL.String())
+					if replay.IsStoppedOrBudget(err) {
+						return nil, endpoints.ErrCloudProbeStopped
+					}
+					return resp, err
+				},
 			})
 			rep.CloudChecks = checks
-			if intelDir != "" {
+			rep.Sent = o.Sender.Count()
+			rep.Stopped = o.Sender.Stopped()
+			if intelDir != "" && len(checks) > 0 {
 				_ = endpoints.UpdateIntelCloud(intelDir, probed)
 			}
 		}

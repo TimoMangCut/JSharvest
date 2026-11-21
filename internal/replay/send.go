@@ -730,6 +730,9 @@ func (s *Sender) write(l Sent) {
 		return
 	}
 	if r := s.o.Redactor; r != nil {
+		if l.Item != "" {
+			l.Item = r.Text(l.Item)
+		}
 		l.Request = RedactRaw(r, l.Request)
 		l.Headers = r.Headers(l.Headers)
 		if l.Body != "" {
@@ -742,6 +745,129 @@ func (s *Sender) write(l Sent) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.enc.Encode(l)
+}
+
+type bodyReadCloser struct {
+	io.Reader
+	io.Closer
+}
+
+func formatExternalRequest(req *http.Request) string {
+	uri := req.URL.RequestURI()
+	if uri == "" {
+		uri = "/"
+	}
+	host := req.Host
+	if host == "" {
+		host = req.URL.Host
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s %s HTTP/1.1\r\nHost: %s\r\n", req.Method, uri, host)
+	keys := make([]string, 0, len(req.Header))
+	for k := range req.Header {
+		if !strings.EqualFold(k, "host") {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		for _, v := range req.Header[k] {
+			fmt.Fprintf(&b, "%s: %s\r\n", k, v)
+		}
+	}
+	b.WriteString("\r\n")
+	return b.String()
+}
+
+// IsStoppedOrBudget reports whether err is a Sender stop or -max budget halt.
+func IsStoppedOrBudget(err error) bool {
+	return errors.Is(err, ErrBudget) || errors.Is(err, errStopped)
+}
+
+// DoExternal executes an unauthenticated external HTTP request (such as
+// verify's cloud storage ACL probe) through client while enforcing Stopped(),
+// the -max request budget, concurrency slots, and -rate pacing, and logging a
+// Sent entry to sent.jsonl (passing through Redactor when enabled).
+func (s *Sender) DoExternal(ctx context.Context, client *http.Client, req *http.Request, purpose, item string) (*http.Response, error) {
+	s.mu.Lock()
+	if s.stopped != "" {
+		why := s.stopped
+		s.mu.Unlock()
+		return nil, fmt.Errorf("%w: %s", errStopped, why)
+	}
+	if s.o.Max > 0 && s.n >= s.o.Max {
+		s.stop(ErrBudget.Error())
+		s.mu.Unlock()
+		return nil, ErrBudget
+	}
+	s.n++
+	n := s.n
+	s.mu.Unlock()
+
+	select {
+	case s.slots <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	defer func() { <-s.slots }()
+
+	s.mu.Lock()
+	turn := time.Now()
+	if s.next.After(turn) {
+		turn = s.next
+	}
+	s.next = turn.Add(s.o.Rate)
+	s.mu.Unlock()
+	if wait := time.Until(turn); wait > 0 {
+		select {
+		case <-time.After(wait):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	if why := s.Stopped(); why != "" {
+		return nil, fmt.Errorf("%w: %s", errStopped, why)
+	}
+
+	line := Sent{
+		N:       n,
+		Time:    time.Now().UTC(),
+		Purpose: purpose,
+		Role:    "none",
+		Item:    item,
+		Request: formatExternalRequest(req),
+		DryRun:  s.o.DryRun,
+	}
+	if s.o.DryRun {
+		s.write(line)
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: http.NoBody, Request: req}, nil
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		line.Err = err.Error()
+		s.write(line)
+		return nil, err
+	}
+	hb, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if readErr != nil && !errors.Is(readErr, io.EOF) {
+		_ = resp.Body.Close()
+		line.Err = readErr.Error()
+		s.write(line)
+		return nil, readErr
+	}
+	resp.Body = bodyReadCloser{
+		Reader: io.MultiReader(bytes.NewReader(hb), resp.Body),
+		Closer: resp.Body,
+	}
+	hdrs := make(map[string]string, len(resp.Header))
+	for k, vs := range resp.Header {
+		hdrs[strings.ToLower(k)] = strings.Join(vs, "\n")
+	}
+	line.Status = resp.StatusCode
+	line.Headers = hdrs
+	line.Body = string(hb)
+	s.write(line)
+	return resp, nil
 }
 
 // RedactRaw scrubs credentials in an HTTP/1.x wire request (request-line,

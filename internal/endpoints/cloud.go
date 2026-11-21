@@ -35,6 +35,10 @@ const (
 	CloudBucketMissing  = "bucket_missing"
 )
 
+// ErrCloudProbeStopped signals that an external request gate (such as
+// replay.Sender's -max budget or stop condition) halted further cloud probes.
+var ErrCloudProbeStopped = errors.New("cloud probe stopped")
+
 // CloudProbeOptions configure active safe ACL probing of cloud storage URLs.
 type CloudProbeOptions struct {
 	Proxy        *url.URL
@@ -45,6 +49,9 @@ type CloudProbeOptions struct {
 	Timeout      time.Duration
 	MaxTargets   int
 	UserAgent    string
+	// Do optionally wraps client.Do(req) so callers (such as verify) can
+	// enforce rate limits, request budgets, and sent.jsonl logging.
+	Do func(ctx context.Context, client *http.Client, req *http.Request) (*http.Response, error)
 }
 
 // CloudCheck records the outcome of probing one cloud storage entry.
@@ -373,18 +380,26 @@ func ProbeCloud(ctx context.Context, cloud []IntelURL, opts CloudProbeOptions) (
 		}
 		ra, cached := rootCache[rootReqURL]
 		if !cached {
-			ra = doCloudRootGET(ctx, client, rootReqURL, ua)
+			ra = doCloudRootGET(ctx, client, opts.Do, rootReqURL, ua)
+			if errors.Is(ra.err, ErrCloudProbeStopped) {
+				break
+			}
 			rootCache[rootReqURL] = ra
 		}
 
 		objStatus := 0
 		var objErr error
+		stoppedAfterRoot := false
 		if u.ObjectKey != "" && !strings.ContainsAny(u.URL, "{}") {
 			sampleURL := strings.TrimSpace(u.URL)
 			if strings.HasPrefix(sampleURL, "//") {
 				sampleURL = "https:" + sampleURL
 			}
-			objStatus, objErr = doCloudObjectHEAD(ctx, client, sampleURL, ua)
+			objStatus, objErr = doCloudObjectHEAD(ctx, client, opts.Do, sampleURL, ua)
+			if errors.Is(objErr, ErrCloudProbeStopped) {
+				objErr = nil
+				stoppedAfterRoot = true
+			}
 		}
 
 		status := classifyCloudACL(u.Provider, ra, objStatus)
@@ -409,11 +424,21 @@ func ProbeCloud(ctx context.Context, cloud []IntelURL, opts CloudProbeOptions) (
 			}
 		}
 		checks = append(checks, chk)
+		if stoppedAfterRoot {
+			break
+		}
 	}
 	return out, checks
 }
 
-func doCloudRootGET(ctx context.Context, client *http.Client, target, ua string) rootProbeAns {
+func doCloudReq(ctx context.Context, client *http.Client, doFn func(context.Context, *http.Client, *http.Request) (*http.Response, error), req *http.Request) (*http.Response, error) {
+	if doFn != nil {
+		return doFn(ctx, client, req)
+	}
+	return client.Do(req)
+}
+
+func doCloudRootGET(ctx context.Context, client *http.Client, doFn func(context.Context, *http.Client, *http.Request) (*http.Response, error), target, ua string) rootProbeAns {
 	reqCtx, cancel := context.WithTimeout(ctx, cloudProbeTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, target, nil)
@@ -422,7 +447,7 @@ func doCloudRootGET(ctx context.Context, client *http.Client, target, ua string)
 	}
 	req.Header.Set("Accept-Encoding", "identity")
 	req.Header.Set("User-Agent", ua)
-	resp, err := client.Do(req)
+	resp, err := doCloudReq(reqCtx, client, doFn, req)
 	if err != nil {
 		return rootProbeAns{err: err}
 	}
@@ -431,7 +456,7 @@ func doCloudRootGET(ctx context.Context, client *http.Client, target, ua string)
 	return rootProbeAns{status: resp.StatusCode, body: string(b)}
 }
 
-func doCloudObjectHEAD(ctx context.Context, client *http.Client, target, ua string) (int, error) {
+func doCloudObjectHEAD(ctx context.Context, client *http.Client, doFn func(context.Context, *http.Client, *http.Request) (*http.Response, error), target, ua string) (int, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, cloudProbeTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodHead, target, nil)
@@ -440,7 +465,7 @@ func doCloudObjectHEAD(ctx context.Context, client *http.Client, target, ua stri
 	}
 	req.Header.Set("Accept-Encoding", "identity")
 	req.Header.Set("User-Agent", ua)
-	resp, err := client.Do(req)
+	resp, err := doCloudReq(reqCtx, client, doFn, req)
 	if err != nil {
 		return 0, err
 	}
