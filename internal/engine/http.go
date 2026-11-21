@@ -91,7 +91,7 @@ func RunHTTP(ctx context.Context, cfg Config, ho HTTPOptions) (Record, error) {
 		}
 		pageScope = ps
 	}
-	d, err := openOutDir(cfg.outDir(), store.Options{MaxBody: cfg.MaxBody})
+	d, err := openOutDir(cfg.outDir(), store.Options{MaxBody: cfg.MaxBody, MaxRunBytes: cfg.MaxStoreBytes})
 	if err != nil {
 		return Record{}, err
 	}
@@ -122,6 +122,7 @@ func RunHTTP(ctx context.Context, cfg Config, ho HTTPOptions) (Record, error) {
 
 	var mu sync.Mutex
 	scripts, newScripts := map[string]bool{}, 0
+	var storeBudgetHit atomic.Bool
 	// put stores a script (or notes a sighting of one, by SHA256) and
 	// returns its key: "" when nothing was stored.
 	put := func(r store.Record, label string) string {
@@ -131,6 +132,9 @@ func RunHTTP(ctx context.Context, cfg Config, ho HTTPOptions) (Record, error) {
 		if err != nil {
 			if errors.Is(err, store.ErrTooLarge) {
 				run.StoreErrors["too_large"]++
+			} else if errors.Is(err, store.ErrStoreBudget) {
+				storeBudgetHit.Store(true)
+				run.StoreErrors["store_budget"]++
 			} else {
 				run.StoreErrors["write"]++
 				slog.Error("store script", "url", logURL(r.URL), "err", err)
@@ -207,6 +211,12 @@ func RunHTTP(ctx context.Context, cfg Config, ho HTTPOptions) (Record, error) {
 		Target: cfg.Target, InScope: cfg.InScope, PageScope: pageScope, Depth: cfg.Depth, MaxPages: cfg.MaxPages, Rate: ho.Rate, PageRate: ho.PageRate,
 		Workers: max(cfg.Tabs, 4), PageWorkers: ho.PageWorkers,
 		MaxFiles: cfg.ResolveMax, MaxBody: cfg.MaxBody, Timeout: cfg.NavTimeout, UserAgent: httpUA(cfg),
+		CapReason: func() string {
+			if storeBudgetHit.Load() {
+				return storeBudgetLabel(cfg.MaxStoreBytes)
+			}
+			return ""
+		},
 		HostRules: cfg.Browser.HostRules, NoDNS: cfg.Browser.Proxy != "" || cfg.Browser.HostRules != "", Insecure: cfg.Browser.Insecure, RecordBody: cfg.RecordBody,
 		Probe: ho.Probe, NoSpecProbe: cfg.NoSpecProbe || ho.NoSpecProbe, SourceMaps: ho.SourceMaps, GuessMaps: ho.GuessMaps,
 		Destructive: func(u string) bool {
@@ -260,7 +270,12 @@ func RunHTTP(ctx context.Context, cfg Config, ho HTTPOptions) (Record, error) {
 					}
 				}
 				if len(m.Body) > 0 {
-					_ = st.SaveMap(m.Body)
+					if err := st.SaveMap(m.Body); errors.Is(err, store.ErrStoreBudget) {
+						storeBudgetHit.Store(true)
+						mu.Lock()
+						run.StoreErrors["store_budget"]++
+						mu.Unlock()
+					}
 				}
 				if sourcesN == 0 && own == nil {
 					sourcesN = len(sm.Sources)
@@ -367,8 +382,15 @@ func RunHTTP(ctx context.Context, cfg Config, ho HTTPOptions) (Record, error) {
 		if res.Stats.Stopped != "" {
 			run.Warnings = append(run.Warnings, "stopped: "+res.Stats.Stopped)
 		}
+		if res.Stats.Capped == "" && storeBudgetHit.Load() {
+			res.Stats.Capped = storeBudgetLabel(cfg.MaxStoreBytes)
+		}
 		if res.Stats.Capped != "" {
-			run.Warnings = append(run.Warnings, res.Stats.Capped+": scripts past it were not fetched (-resolve-max to raise it)")
+			hint := "-resolve-max"
+			if strings.Contains(res.Stats.Capped, "-max-store-mb") {
+				hint = "-max-store-mb"
+			}
+			run.Warnings = append(run.Warnings, fmt.Sprintf("%s: scripts past it were not fetched (%s to raise it)", res.Stats.Capped, hint))
 		}
 		for _, h := range res.IncompleteChains {
 			run.Warnings = append(run.Warnings, "the server of "+h+" sends an incomplete certificate chain: its intermediates were fetched from the AIA, as a browser does (intel.json security_notes)")

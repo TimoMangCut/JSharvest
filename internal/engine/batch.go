@@ -311,7 +311,7 @@ func keepUnclaimed(cfg Config, urls []*url.URL, records []guard.Record) {
 	}
 	for host, rs := range by {
 		slog.Warn("held-back requests no tab claimed", "count", len(rs), "kept_with", host)
-		d, err := openOutDir(filepath.Join(cfg.OutRoot, host, cfg.Role), store.Options{MaxBody: cfg.MaxBody})
+		d, err := openOutDir(filepath.Join(cfg.OutRoot, host, cfg.Role), store.Options{MaxBody: cfg.MaxBody, MaxRunBytes: cfg.MaxStoreBytes})
 		if err != nil {
 			slog.Error("write blocked.jsonl", "err", err)
 			continue

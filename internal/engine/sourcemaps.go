@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -51,6 +52,10 @@ func (e *engine) sourceMaps(ctx context.Context, refs []ref, policy *resolve.Pol
 				stats.MapGuessesHeld++
 				continue // the origin ships no maps: no more guesses there
 			}
+			if e.storeCapped.Load() {
+				stats.Stopped = storeBudgetLabel(e.cfg.MaxStoreBytes)
+				return true
+			}
 			if e.cfg.ResolveMax > 0 && *fetched >= e.cfg.ResolveMax {
 				stats.Stopped = fmt.Sprintf("reached -resolve-max %d", e.cfg.ResolveMax)
 				return true
@@ -95,6 +100,16 @@ func (e *engine) sourceMaps(ctx context.Context, refs []ref, policy *resolve.Pol
 				Initiator: &store.Initiator{Type: "sourcemap", URL: r.url}})
 			if err != nil {
 				e.mapSourcesStored.Add(-1)
+				if errors.Is(err, store.ErrStoreBudget) {
+					e.storeError("store_budget")
+					if !e.storeCapped.Swap(true) {
+						msg := storeBudgetLabel(e.cfg.MaxStoreBytes) + ": scripts past it were not stored (-max-store-mb to raise it)"
+						slog.Warn(msg)
+						e.warn(msg)
+					}
+					stats.Stopped = storeBudgetLabel(e.cfg.MaxStoreBytes)
+					break
+				}
 				continue
 			}
 			e.noteScript(key, isNew)

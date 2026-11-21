@@ -68,7 +68,8 @@ type Options struct {
 	MaxHTML int
 	Vendor  bool // fetch vendor libraries too
 	MaxBody        int
-	MaxSourceFiles int // extracted sourcemap files kept per run (0: DefaultMaxSourceFilesPerRun, <0: unlimited)
+	MaxStoreBytes  int64 // per-run store byte budget (0: unlimited)
+	MaxSourceFiles int   // extracted sourcemap files kept per run (0: DefaultMaxSourceFilesPerRun, <0: unlimited)
 	Workers        int // concurrent listing/fetch workers (0: default 8)
 	// Mode: a whole run, or one of the two stages a crawl runs in process
 	// (round 37, 37.1 B).
@@ -193,6 +194,7 @@ type runner struct {
 	done             map[string]bool
 	store            *store.Store
 	mapSourcesStored atomic.Int64
+	storeCapped      atomic.Bool
 	cred             map[string]bool
 	cur       *current
 	// partial: the listing stopped at -max-pages or a throttled source, its place kept.
@@ -395,7 +397,7 @@ func Run(ctx context.Context, o Options) (*Summary, error) {
 		return &r.st.Summary, nil
 	}
 
-	if r.store, err = store.Open(o.Dir, store.Options{MaxBody: o.MaxBody}); err != nil {
+	if r.store, err = store.Open(o.Dir, store.Options{MaxBody: o.MaxBody, MaxRunBytes: o.MaxStoreBytes}); err != nil {
 		return nil, err
 	}
 	r.cur = loadCurrent(o.Root, o.InScope)

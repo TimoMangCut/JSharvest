@@ -55,8 +55,9 @@ type Config struct {
 	ScopeMode string
 	Browser   browser.Options
 
-	MaxBody    int
-	NavTimeout time.Duration
+	MaxBody       int
+	MaxStoreBytes int64
+	NavTimeout    time.Duration
 	Idle       time.Duration // network quiet time that counts as idle
 	IdleMax    time.Duration
 	SWWait     time.Duration
@@ -349,6 +350,7 @@ type runState struct {
 	analyzing        atomic.Bool // a watch's background analysis of new scripts
 	analyzed         int         // scripts in the store when it last started
 	mapSourcesStored atomic.Int64
+	storeCapped      atomic.Bool
 
 	events      []flow.Event   // actions reported by the pages
 	heard       time.Time      // when the last trusted one came
@@ -713,7 +715,7 @@ func runPage(ctx context.Context, cfg Config, tab context.Context, g *guard.Guar
 }
 
 func (e *engine) open() error {
-	d, err := openOutDir(e.cfg.outDir(), store.Options{MaxBody: e.cfg.MaxBody})
+	d, err := openOutDir(e.cfg.outDir(), store.Options{MaxBody: e.cfg.MaxBody, MaxRunBytes: e.cfg.MaxStoreBytes})
 	if err != nil {
 		return err
 	}
@@ -1122,6 +1124,13 @@ func (e *engine) sink(s capture.Script) {
 		if errors.Is(err, store.ErrTooLarge) {
 			e.storeError("too_large")
 			slog.Warn("script over -max-body, not kept", "url", logURL(s.URL), "size", len(s.Body))
+		} else if errors.Is(err, store.ErrStoreBudget) {
+			e.storeError("store_budget")
+			if !e.storeCapped.Swap(true) {
+				msg := storeBudgetLabel(e.cfg.MaxStoreBytes) + ": scripts past it were not stored (-max-store-mb to raise it)"
+				slog.Warn(msg)
+				e.warn(msg)
+			}
 		} else {
 			e.storeError("write")
 			slog.Error("store script", "url", logURL(s.URL), "err", err)
@@ -1621,6 +1630,13 @@ func toRecord(s capture.Script) store.Record {
 
 func logURL(raw string) string {
 	return traffic.LogURL(raw)
+}
+
+func storeBudgetLabel(maxBytes int64) string {
+	if maxBytes >= 1<<20 && maxBytes%(1<<20) == 0 {
+		return fmt.Sprintf("-max-store-mb (%d) reached", maxBytes>>20)
+	}
+	return fmt.Sprintf("-max-store-mb (%d bytes) reached", maxBytes)
 }
 
 func (r *runState) claimSourceSlot() bool {

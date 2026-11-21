@@ -23,6 +23,7 @@ import (
 	"github.com/TimoMangCut/JSharvest/internal/replay"
 	"github.com/TimoMangCut/JSharvest/internal/scope"
 	"github.com/TimoMangCut/JSharvest/internal/sourcemap"
+	"github.com/TimoMangCut/JSharvest/internal/store"
 )
 
 // archiveSources are the archives listed by default, by archive and by
@@ -67,7 +68,7 @@ type archiveConfig struct {
 	liveHosts                       string
 	liveRate                        float64
 	maxFiles, maxHTML, pageSize     int
-	maxSourceFiles                  int
+	maxSourceFiles, maxStoreMB      int
 	maxPages, concurrency           int
 	ccCollections                   int
 	collapse                        string
@@ -92,6 +93,7 @@ func parseArchiveFlags(args []string) (archiveConfig, error) {
 	liveRate := fs.Float64("live-rate", 5, "live checks per second, at most")
 	maxFiles := fs.Int("max-files", 0, "old scripts to fetch, at most, newest first (0: all)")
 	maxSourceFiles := fs.Int("max-source-files", sourcemap.DefaultMaxSourceFilesPerRun, "most original source files extracted from source maps per run (<0: unlimited)")
+	maxStoreMB := fs.Int("max-store-mb", store.DefaultMaxStoreMB, "most new MiB written to js/ and maps/ in one run (0: unlimited)")
 	maxHTML := fs.Int("max-html", 10, "old pages (text/html captures) to read for the scripts they load, the root first (0: none)")
 	vendor := fs.Bool("vendor", false, "fetch vendor libraries too (jquery, react…)")
 	pageSize := fs.Int("page-size", 25000, "rows of a CDX page (when not using ZipNum sharding)")
@@ -118,8 +120,11 @@ func parseArchiveFlags(args []string) (archiveConfig, error) {
 	if *concurrency < 1 {
 		return archiveConfig{}, errors.New("archive: -concurrency must be 1 or more")
 	}
+	if *maxStoreMB < 0 {
+		return archiveConfig{}, errors.New("archive: -max-store-mb must not be negative")
+	}
 	c := archiveConfig{out: *out, target: *target, sources: *sources, scopeMode: *scopeMode, live: *live, liveHosts: *liveHosts,
-		liveRate: *liveRate, maxFiles: *maxFiles, maxSourceFiles: *maxSourceFiles, maxHTML: *maxHTML, pageSize: *pageSize, maxPages: *maxPages,
+		liveRate: *liveRate, maxFiles: *maxFiles, maxSourceFiles: *maxSourceFiles, maxStoreMB: *maxStoreMB, maxHTML: *maxHTML, pageSize: *pageSize, maxPages: *maxPages,
 		concurrency: *concurrency, ccCollections: *ccCollections, vendor: *vendor, insecure: *insecure, waitLock: *waitLock,
 		shardedWB: !given["page-size"] && os.Getenv("JSHARVEST_WAYBACK_URL") == ""}
 	c.collapse = *collapse
@@ -189,7 +194,7 @@ func newArchiveEnv(cfg archiveConfig) (*archiveEnv, error) {
 func (e *archiveEnv) buildClients() error {
 	cfg := e.cfg
 	o := archive.Options{Dir: e.dir, Root: cfg.out, Host: hostOnly(cfg.target), InScope: e.in, Since: cfg.from, Live: cfg.live,
-		MaxFiles: cfg.maxFiles, MaxPages: cfg.maxPages, MaxHTML: cfg.maxHTML, MaxSourceFiles: cfg.maxSourceFiles,
+		MaxFiles: cfg.maxFiles, MaxPages: cfg.maxPages, MaxHTML: cfg.maxHTML, MaxSourceFiles: cfg.maxSourceFiles, MaxStoreBytes: int64(cfg.maxStoreMB) << 20,
 		Vendor: cfg.vendor, MaxBody: 32 << 20, Workers: cfg.concurrency, Sources: strings.Split(cfg.sources, ","),
 		Log: func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) }}
 

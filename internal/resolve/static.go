@@ -291,17 +291,32 @@ func NgswURLs(manifest []byte, manifestURL string) []Candidate {
 		return nil
 	}
 	var out []Candidate
+	seen := make(map[string]struct{})
+	scanned := 0
+	const maxRawNgswRefs = 200_000
 	for _, g := range m.AssetGroups {
 		for _, ref := range g.URLs {
+			scanned++
+			if scanned > maxRawNgswRefs {
+				return out
+			}
 			if p := strings.ToLower(path.Ext(strings.SplitN(ref, "?", 2)[0])); p != ".js" && p != ".mjs" && p != ".cjs" {
 				continue
 			}
 			if u, err := base.Parse(ref); err == nil && (u.Scheme == "http" || u.Scheme == "https") {
-				out = append(out, Candidate{URL: u.String(), Method: "ngsw", From: manifestURL})
+				us := u.String()
+				if _, dup := seen[us]; dup {
+					continue
+				}
+				seen[us] = struct{}{}
+				out = append(out, Candidate{URL: us, Method: "ngsw", From: manifestURL})
+				if len(out) >= MaxManifestEntries {
+					return out
+				}
 			}
 		}
 	}
-	return dedupe(out)
+	return out
 }
 
 func originRoot(pageURL string, fallback *url.URL) *url.URL {

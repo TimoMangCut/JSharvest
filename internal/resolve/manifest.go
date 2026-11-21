@@ -7,9 +7,21 @@ import (
 	"strings"
 )
 
+// MaxManifestEntries bounds how many script URLs a single build or service
+// worker manifest may contribute, after sorting for determinism.
+const MaxManifestEntries = 10_000
+
 func isJSAssetRef(s string) bool {
 	clean := strings.ToLower(strings.SplitN(strings.SplitN(strings.TrimSpace(s), "#", 2)[0], "?", 2)[0])
 	return strings.HasSuffix(clean, ".js") || strings.HasSuffix(clean, ".mjs")
+}
+
+func sortAndCapManifest(out []string) []string {
+	slices.Sort(out)
+	if len(out) > MaxManifestEntries {
+		out = out[:MaxManifestEntries]
+	}
+	return out
 }
 
 // AssetManifest lists the scripts of a Create React App / webpack
@@ -38,12 +50,17 @@ func AssetManifest(b []byte, at string) []string {
 		return nil
 	}
 	var out []string
+	seen := make(map[string]struct{}, min(len(m.Files)+len(m.Entrypoints), MaxManifestEntries))
 	addJS := func(s string) {
 		if !isJSAssetRef(s) {
 			return
 		}
-		if u, err := base.Parse(s); err == nil && !slices.Contains(out, u.String()) {
-			out = append(out, u.String())
+		if u, err := base.Parse(s); err == nil {
+			us := u.String()
+			if _, dup := seen[us]; !dup {
+				seen[us] = struct{}{}
+				out = append(out, us)
+			}
 		}
 	}
 	for _, v := range m.Files {
@@ -52,8 +69,7 @@ func AssetManifest(b []byte, at string) []string {
 	for _, v := range m.Entrypoints {
 		addJS(v)
 	}
-	slices.Sort(out)
-	return out
+	return sortAndCapManifest(out)
 }
 
 // ViteManifest lists the files of a Vite build manifest, relative to the
@@ -73,15 +89,19 @@ func ViteManifest(b []byte, root string) []string {
 		return nil
 	}
 	var out []string
+	seen := make(map[string]struct{}, min(len(m), MaxManifestEntries))
 	for _, e := range m {
 		if e.File != "" && isJSAssetRef(e.File) {
-			if u, err := base.Parse(e.File); err == nil && !slices.Contains(out, u.String()) {
-				out = append(out, u.String())
+			if u, err := base.Parse(e.File); err == nil {
+				us := u.String()
+				if _, dup := seen[us]; !dup {
+					seen[us] = struct{}{}
+					out = append(out, us)
+				}
 			}
 		}
 	}
-	slices.Sort(out)
-	return out
+	return sortAndCapManifest(out)
 }
 
 // EncoreEntrypoints lists the scripts of a Symfony Webpack Encore
@@ -100,18 +120,22 @@ func EncoreEntrypoints(b []byte, at string) []string {
 		return nil
 	}
 	var out []string
+	seen := make(map[string]struct{})
 	for _, ep := range doc.Entrypoints {
 		for _, s := range ep.JS {
 			if !isJSAssetRef(s) {
 				continue
 			}
-			if u, err := base.Parse(s); err == nil && !slices.Contains(out, u.String()) {
-				out = append(out, u.String())
+			if u, err := base.Parse(s); err == nil {
+				us := u.String()
+				if _, dup := seen[us]; !dup {
+					seen[us] = struct{}{}
+					out = append(out, us)
+				}
 			}
 		}
 	}
-	slices.Sort(out)
-	return out
+	return sortAndCapManifest(out)
 }
 
 // Manifest is the kind of build manifest a URL is, by its path: one that

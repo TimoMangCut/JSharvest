@@ -50,6 +50,7 @@ type Options struct {
 	// MaxFiles bounds the script, manifest and source map requests
 	// (-resolve-max): the graph of a large app is big.
 	MaxFiles  int
+	CapReason func() string // optional external budget check (e.g. -max-store-mb)
 	MaxBody   int
 	Timeout   time.Duration
 	UserAgent string
@@ -1211,6 +1212,13 @@ func (cr *crawler) claim(raw string) (ok bool, why string) {
 	cr.seen[n] = true
 	if cr.stopped != "" || cr.capped != "" {
 		return false, ""
+	}
+	if cr.o.CapReason != nil {
+		if why := cr.o.CapReason(); why != "" {
+			cr.capped = why
+			cr.o.Log("%s: no more scripts fetched; the pages go on", cr.capped)
+			return false, ""
+		}
 	}
 	if cr.o.MaxFiles > 0 && cr.files >= cr.o.MaxFiles {
 		cr.capped = fmt.Sprintf("-resolve-max (%d) reached", cr.o.MaxFiles)

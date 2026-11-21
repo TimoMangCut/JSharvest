@@ -236,3 +236,47 @@ func TestRound41RunSourceCapNoSightingMissing(t *testing.T) {
 		t.Fatalf("expected exactly 3 stored source entries under MaxSourceFiles=3, got %d", sourceEntries)
 	}
 }
+
+func TestRound41HTTPStoreBudgetStopsAndWarns(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = fmt.Fprint(w, `<!doctype html><title>app</title><script src="/a.js"></script><script src="/b.js"></script><script src="/c.js"></script>`)
+		case "/a.js", "/b.js", "/c.js":
+			w.Header().Set("Content-Type", "application/javascript")
+			_, _ = fmt.Fprintf(w, "export const p = %q; // %s\n", r.URL.Path, strings.Repeat("x", 300))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	target, _ := url.Parse(srv.URL + "/")
+	out := t.TempDir()
+	rec, err := RunHTTP(context.Background(),
+		Config{
+			Target:        target,
+			OutRoot:       out,
+			Role:          "anon",
+			ScopeMode:     "fqdn",
+			Depth:         1,
+			NavTimeout:    5 * time.Second,
+			MaxStoreBytes: 500, // fits 1 script (~340 B), caps before storing the rest
+		},
+		HTTPOptions{Rate: 500, PageWorkers: 1, NoSpecProbe: true},
+	)
+	if err != nil {
+		t.Fatalf("RunHTTP: %v", err)
+	}
+	if rec.StoreErrors["write"] != 0 || rec.StoreErrors["store_budget"] == 0 {
+		t.Fatalf("unexpected StoreErrors: %v", rec.StoreErrors)
+	}
+	if rec.HTTP == nil || !strings.Contains(rec.HTTP.Capped, "-max-store-mb") {
+		t.Fatalf("expected HTTP.Capped to mention -max-store-mb, got %+v", rec.HTTP)
+	}
+	joinedWarn := strings.Join(rec.Warnings, "\n")
+	if !strings.Contains(joinedWarn, "(-max-store-mb to raise it)") || strings.Contains(joinedWarn, "-resolve-max") {
+		t.Fatalf("expected -max-store-mb hint in warnings, got: %v", rec.Warnings)
+	}
+}

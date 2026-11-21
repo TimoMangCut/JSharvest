@@ -278,6 +278,9 @@ func (r *runner) pages(ctx context.Context) error {
 			if _, err := r.store.Add(store.Record{Body: []byte(code), URL: c.URL, Kind: "inline", Via: fromHTML, Source: "wayback",
 				Tags: []string{"archive", fromHTML}, Archive: meta}); err == nil {
 				r.sum(func(sm *Summary) { sm.Inline++ })
+			} else if errors.Is(err, store.ErrStoreBudget) {
+				r.noteStoreBudget()
+				break
 			}
 		}
 		for _, src := range append(p.Files(), p.NextManifests()...) {

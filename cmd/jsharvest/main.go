@@ -33,6 +33,7 @@ import (
 	"github.com/TimoMangCut/JSharvest/internal/scope"
 	"github.com/TimoMangCut/JSharvest/internal/session"
 	"github.com/TimoMangCut/JSharvest/internal/sourcemap"
+	"github.com/TimoMangCut/JSharvest/internal/store"
 	"github.com/TimoMangCut/JSharvest/internal/traffic"
 )
 
@@ -172,6 +173,7 @@ func runCrawl(args []string) error {
 	idle := fs.Duration("idle", 1500*time.Millisecond, "network quiet time that counts as idle")
 	idleMax := fs.Duration("idle-max", 30*time.Second, "longest wait for the network to go idle")
 	maxBody := fs.Int("max-body", 50<<20, "largest script body to keep, in bytes")
+	maxStoreMB := fs.Int("max-store-mb", store.DefaultMaxStoreMB, "most new MiB written to js/ and maps/ in one run (0: unlimited)")
 	swWait := fs.Duration("sw-wait", 8*time.Second, "keep waiting this long after a service worker appears, so it can precache the app")
 	scopeMode := fs.String("scope", "rdn", "what counts as the target: rdn (its registrable domain, e.g. *.example.com) or fqdn (its host and subdomains); out-of-scope scripts are kept and tagged third-party")
 	pageScopeMode := fs.String("page-scope", "auto", "pages followed by -depth: auto (fqdn on a subdomain, rdn on the apex or www), fqdn or rdn; scripts and APIs still use -scope")
@@ -309,6 +311,9 @@ func runCrawl(args []string) error {
 	if *recordBody < 0 {
 		return fmt.Errorf("-record-body: must not be negative")
 	}
+	if *maxStoreMB < 0 {
+		return fmt.Errorf("-max-store-mb: must not be negative")
+	}
 	if *depth > 0 && *urlsFile != "" {
 		return errors.New("crawl: -depth goes with -u; -urls harvests each URL on its own")
 	}
@@ -351,6 +356,9 @@ func runCrawl(args []string) error {
 	// The role names a directory under the output root; keep it there.
 	if !roleRe.MatchString(*role) || strings.Contains(*role, "..") {
 		return fmt.Errorf("bad role %q: use letters, digits, '.', '_' and '-'", *role)
+	}
+	if *maxStoreMB < 0 {
+		return fmt.Errorf("-max-store-mb: must not be negative")
 	}
 	// One crawl at a time writes a host's role directory.
 	{
@@ -444,8 +452,9 @@ func runCrawl(args []string) error {
 			HostRules:  *hostRules,
 			Insecure:   *insecure,
 		},
-		MaxBody:    *maxBody,
-		NavTimeout: *navTimeout,
+		MaxBody:       *maxBody,
+		MaxStoreBytes: int64(*maxStoreMB) << 20,
+		NavTimeout:    *navTimeout,
 		Idle:       *idle,
 		IdleMax:    *idleMax,
 		SWWait:     *swWait,
@@ -540,7 +549,7 @@ func runCrawl(args []string) error {
 			if *archiveFallback || *archiveAfter {
 				baseArgs := []string{"-o", *out, "-target", t.Hostname(), "-scope", *scopeMode, "-sources", archiveSources,
 					"-concurrency", fmt.Sprint(max(*tabs*4, 8)), "-live-rate", fmt.Sprint(max(*httpRate, 5)), "-mem-cache-mb", fmt.Sprint(*memCacheMB),
-					"-max-source-files", fmt.Sprint(*maxSourceFiles)}
+					"-max-source-files", fmt.Sprint(*maxSourceFiles), "-max-store-mb", fmt.Sprint(*maxStoreMB)}
 				if *archiveMaxPages > 0 {
 					baseArgs = append(baseArgs, "-max-pages", fmt.Sprint(*archiveMaxPages))
 				}
@@ -786,6 +795,7 @@ func runWatch(args []string) error {
 	scopeMode := fs.String("scope", "rdn", "rdn or fqdn: which scripts count as the target's")
 	flowTag := fs.Bool("flow-tag", true, "trace requests to actions through the page's async stacks; false groups by time only")
 	maxBody := fs.Int("max-body", 50<<20, "largest script body to keep, in bytes")
+	maxStoreMB := fs.Int("max-store-mb", store.DefaultMaxStoreMB, "most new MiB written to js/ and maps/ in one run (0: unlimited)")
 	verbose := fs.Bool("v", false, "debug logging")
 	waitLock := waitLockFlag(fs)
 	fs.Parse(args)
@@ -813,6 +823,9 @@ func runWatch(args []string) error {
 	}
 	if !roleRe.MatchString(*role) || strings.Contains(*role, "..") {
 		return fmt.Errorf("bad role %q: use letters, digits, '.', '_' and '-'", *role)
+	}
+	if *maxStoreMB < 0 {
+		return fmt.Errorf("-max-store-mb: must not be negative")
 	}
 	rules, err := guardRules(*guardAllow, *guardDeny, *allowWrite)
 	if err != nil {
@@ -852,8 +865,10 @@ func runWatch(args []string) error {
 	go func() { <-ctx.Done(); stop() }()
 	cfg := engine.Config{
 		OutRoot: *out, Role: *role, ScopeMode: *scopeMode,
-		Browser: browser.Options{Attach: *attach},
-		MaxBody: *maxBody, NavTimeout: 30 * time.Second, Idle: 1500 * time.Millisecond, IdleMax: 30 * time.Second,
+		Browser:       browser.Options{Attach: *attach},
+		MaxBody:       *maxBody,
+		MaxStoreBytes: int64(*maxStoreMB) << 20,
+		NavTimeout:    30 * time.Second, Idle: 1500 * time.Millisecond, IdleMax: 30 * time.Second,
 		Guard: guardOn, GuardRules: rules, AllowWebSocket: *allowWS,
 		Record: traffic.Mode(*record), RecordBody: *recordBody, Redact: *redact,
 		NoTagger: !*flowTag,

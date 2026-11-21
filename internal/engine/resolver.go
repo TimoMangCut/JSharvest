@@ -187,6 +187,10 @@ func (e *engine) resolve(ctx context.Context) {
 		slog.Info("resolver", "round", round, "fetching", len(todo))
 		hostFails := map[string]int{}
 		for _, c := range todo {
+			if e.storeCapped.Load() {
+				stats.Stopped = storeBudgetLabel(e.cfg.MaxStoreBytes)
+				break
+			}
 			if e.cfg.ResolveMax > 0 && fetched >= e.cfg.ResolveMax {
 				stats.Stopped = fmt.Sprintf("reached -resolve-max %d", e.cfg.ResolveMax)
 				break

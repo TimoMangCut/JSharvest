@@ -48,7 +48,14 @@ const (
 // keptHeaders are the response headers worth keeping for later analysis.
 var keptHeaders = []string{"content-type", "etag", "last-modified", "sourcemap", "x-sourcemap"}
 
-var ErrTooLarge = errors.New("script body over the size limit")
+var (
+	ErrTooLarge    = errors.New("script body over the size limit")
+	ErrStoreBudget = errors.New("run store byte budget exceeded")
+)
+
+// DefaultMaxStoreMB is the default per-run disk budget (-max-store-mb) for
+// newly written JS and source map files.
+const DefaultMaxStoreMB = 2048
 
 // Record is one sighting of a script, as the capture reports it.
 type Record struct {
@@ -117,6 +124,9 @@ type Entry struct {
 type Options struct {
 	// MaxBody is the largest body Add accepts; 0 means no limit.
 	MaxBody int
+	// MaxRunBytes bounds total new bytes written to js/ and maps/ during this
+	// Store handle's lifetime; 0 means no limit.
+	MaxRunBytes int64
 }
 
 type Store struct {
@@ -130,6 +140,7 @@ type Store struct {
 	newSinceFlush int
 	lastFlush     time.Time
 	flushes       int
+	bytesThisRun  int64
 	recovered     int
 	discarded     int
 	sha1          map[string]string // SHA1B32 -> SHA-256, built when first asked
@@ -277,9 +288,13 @@ func (s *Store) Put(r Record) (string, bool, error) {
 
 	e, ok := s.entries[key]
 	if !ok {
+		if s.opts.MaxRunBytes > 0 && s.bytesThisRun+int64(len(r.Body)) > s.opts.MaxRunBytes {
+			return "", false, ErrStoreBudget
+		}
 		if err := writeFileAtomic(s.jsPath(key), r.Body); err != nil {
 			return "", false, err
 		}
+		s.bytesThisRun += int64(len(r.Body))
 		e = &Entry{
 			SHA256: key, SHA1B32: SHA1B32(r.Body), URLs: []string{},
 			MIME: r.MIME, Size: len(r.Body), Source: r.Source, FirstSeen: now,
@@ -324,7 +339,22 @@ func (s *Store) SaveMap(body []byte) error {
 	if _, err := os.Stat(dst); err == nil {
 		return nil
 	}
-	return writeFileAtomic(dst, body)
+	if s.opts.MaxRunBytes > 0 && s.bytesThisRun+int64(len(body)) > s.opts.MaxRunBytes {
+		return ErrStoreBudget
+	}
+	if err := writeFileAtomic(dst, body); err != nil {
+		return err
+	}
+	s.bytesThisRun += int64(len(body))
+	return nil
+}
+
+// BytesWritten returns the total new bytes written to js/ and maps/ through
+// this Store handle.
+func (s *Store) BytesWritten() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.bytesThisRun
 }
 
 func merge(e *Entry, r Record, now time.Time) {

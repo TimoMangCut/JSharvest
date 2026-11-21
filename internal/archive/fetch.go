@@ -203,6 +203,11 @@ func (r *runner) fetch(ctx context.Context) error {
 					qMu.Unlock()
 					continue
 				}
+				if r.storeCapped.Load() {
+					qMu.Unlock()
+					r.sum(func(s *Summary) { s.Skipped["over -max-store-mb"]++ })
+					continue
+				}
 				if r.o.MaxFiles > 0 && n >= r.o.MaxFiles {
 					qMu.Unlock()
 					r.sum(func(s *Summary) { s.Skipped["over -max-files"]++ })
@@ -247,6 +252,9 @@ func (r *runner) fetch(ctx context.Context) error {
 				}
 
 				switch {
+				case errors.Is(ferr, store.ErrStoreBudget):
+					r.noteStoreBudget()
+					r.sum(func(s *Summary) { s.Skipped["over -max-store-mb"]++ })
 				case errors.Is(ferr, errNotArchived):
 					r.sum(func(s *Summary) { s.NotArchived++ })
 					r.markDone(g.key)
@@ -318,6 +326,9 @@ func (r *runner) fromWARC(ctx context.Context, g *group, meta *store.ArchiveSeen
 	}
 	if _, err := r.store.Add(store.Record{Body: rec.Body, URL: g.warc.URL, Kind: "file", Via: "archive-warc", Source: "commoncrawl",
 		MIME: rec.Header.Get("Content-Type"), Tags: tags, Alive: alive, Archive: meta}); err != nil {
+		if errors.Is(err, store.ErrStoreBudget) {
+			r.noteStoreBudget()
+		}
 		return nil, false
 	}
 	r.sum(func(s *Summary) {
@@ -384,7 +395,10 @@ func (r *runner) fetchAsset(ctx context.Context, g *group, meta *store.ArchiveSe
 		return nil, nil
 	}
 	r.sum(func(s *Summary) { s.Maps++ })
-	_ = r.store.SaveMap(body)
+	if err := r.store.SaveMap(body); errors.Is(err, store.ErrStoreBudget) {
+		r.noteStoreBudget()
+		return nil, store.ErrStoreBudget
+	}
 	added := 0
 	capped := 0
 	for _, f := range sm.FilesFor(c.URL) {
@@ -400,6 +414,10 @@ func (r *runner) fetchAsset(ctx context.Context, g *group, meta *store.ArchiveSe
 			added++
 		} else {
 			r.mapSourcesStored.Add(-1)
+			if errors.Is(err, store.ErrStoreBudget) {
+				r.noteStoreBudget()
+				break
+			}
 		}
 	}
 	if added > 0 || capped > 0 {
@@ -427,6 +445,15 @@ func (r *runner) claimSourceSlot() bool {
 		if r.mapSourcesStored.CompareAndSwap(cur, cur+1) {
 			return true
 		}
+	}
+}
+
+func (r *runner) noteStoreBudget() {
+	r.prefetchHalted.Store(true)
+	if !r.storeCapped.Swap(true) {
+		r.sum(func(s *Summary) {
+			s.Notes = append(s.Notes, "-max-store-mb reached")
+		})
 	}
 }
 
@@ -510,7 +537,9 @@ func (r *runner) fetchOne(ctx context.Context, g *group, meta *store.ArchiveSeen
 		if liveURL != c.URL {
 			tags = append(tags, "https-upgrade")
 		}
-		r.store.Add(store.Record{Body: live, URL: liveURL, Kind: "file", Via: "archive-live", Source: "live", Tags: tags, Alive: alive})
+		if _, err := r.store.Add(store.Record{Body: live, URL: liveURL, Kind: "file", Via: "archive-live", Source: "live", Tags: tags, Alive: alive}); errors.Is(err, store.ErrStoreBudget) {
+			return nil, nil, err
+		}
 		endpoints.ExtractCached(r.o.Dir, live, liveURL)
 		kept = append(kept, live)
 	}
