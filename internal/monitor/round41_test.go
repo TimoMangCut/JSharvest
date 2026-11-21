@@ -112,3 +112,30 @@ func TestRound41MonitorSaveAndPendingAtomic(t *testing.T) {
 		t.Fatalf("ClearPending left pending-webhook.json behind")
 	}
 }
+
+func TestRound41MonitorChangesIsolatesTruncatedLine(t *testing.T) {
+	root := t.TempDir()
+	monDir := filepath.Join(root, "monitor")
+	if err := os.MkdirAll(monDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	changesPath := filepath.Join(monDir, "changes.jsonl")
+	if err := os.WriteFile(changesPath, []byte(`{"snapshot":"s0","kind":"crashed`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res := &Result{
+		Snapshot: &Snapshot{ID: "s1", Taken: time.Date(2026, 11, 21, 10, 0, 0, 0, time.UTC)},
+		Changes:  []Change{{Severity: High, Kind: "endpoint_added", Key: "GET /api/new", Roles: []string{"anon"}}},
+	}
+	if err := res.Write(root, "app.example.test"); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(changesPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[1], `"snapshot":"s1"`) {
+		t.Fatalf("expected truncated line isolated and new change on line 1, got %q", string(raw))
+	}
+}

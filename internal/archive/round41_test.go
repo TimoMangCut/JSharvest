@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -50,5 +52,28 @@ func TestRound41WARCBadAndTruncatedLength(t *testing.T) {
 	rec, err := ReadRecord(gzipBytes(valid), 4096)
 	if err != nil || rec.Status != 200 || string(rec.Body) != "const ok = 1;\n" {
 		t.Fatalf("valid WARC failed: rec=%+v err=%v", rec, err)
+	}
+}
+
+func TestRound41ArchiveAppendFileIsolatesTruncatedLine(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "archive.jsonl")
+	if err := os.WriteFile(p, []byte(`{"url":"https://app.example/crashed`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := appendFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.WriteString(`{"url":"https://app.example/ok"}` + "\n")
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
+	if len(lines) != 2 || lines[1] != `{"url":"https://app.example/ok"}` {
+		t.Fatalf("expected truncated line isolated on line 0 and valid record on line 1, got %q", string(raw))
 	}
 }

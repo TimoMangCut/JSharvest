@@ -19,6 +19,7 @@ import (
 	"github.com/TimoMangCut/JSharvest/internal/replay"
 	"github.com/TimoMangCut/JSharvest/internal/results"
 	"github.com/TimoMangCut/JSharvest/internal/store"
+	"github.com/TimoMangCut/JSharvest/internal/traffic"
 )
 
 // Mode is what a Run does.
@@ -569,11 +570,7 @@ func (r *runner) history(ctx context.Context) error {
 }
 
 func appendFile(p string) (*os.File, error) {
-	f, err := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
-	if err != nil {
-		return nil, err
-	}
-	return f, f.Chmod(0o600)
+	return traffic.AppendOpen(p)
 }
 
 func (r *runner) save() {

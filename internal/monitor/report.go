@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/TimoMangCut/JSharvest/internal/mdsafe"
+	"github.com/TimoMangCut/JSharvest/internal/traffic"
 )
 
 // Line is a line of changes.jsonl.
@@ -24,7 +25,7 @@ func (r *Result) Write(root, target string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(filepath.Join(dir, "changes.jsonl"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	f, err := traffic.AppendOpen(filepath.Join(dir, "changes.jsonl"))
 	if err != nil {
 		return err
 	}
