@@ -1,11 +1,15 @@
 /bin/
 /output/
 /profiles/
+/.claude/
 node_modules/
 /testbed/apps/*/dist/
 .angular/
 *.tar.gz
 *.deb
+*.log
+.env
+.env.*
 .next/
 !/testbed/apps/edge-cases/dist/
 !/testbed/apps/guard-cases/dist/

@@ -1,0 +1,12 @@
+title = "jsharvest gitleaks configuration"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Synthetic test fixtures and design documentation examples"
+paths = [
+  '''^testbed/''',
+  '''_test\.go$''',
+  '''^docs/''',
+]
