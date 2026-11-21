@@ -124,6 +124,9 @@ func newClient(o Options, jar http.CookieJar, allow func(u, first *url.URL, doc 
 		if c.aia == nil {
 			c.aia = tlsutil.New()
 		}
+		if c.aia.UA == "" {
+			c.aia.UA = o.UserAgent
+		}
 		tr.DialTLSContext = c.aia.DialTLS(tr.DialContext, true)
 	}
 	// Behind a proxy the dialler sees the proxy alone: the host is judged

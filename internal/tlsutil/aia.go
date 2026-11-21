@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/TimoMangCut/JSharvest/internal/marker"
 	"github.com/TimoMangCut/JSharvest/internal/netsafe"
 )
 
@@ -34,6 +35,9 @@ const (
 
 // AIA completes chains. One serves a whole run: what it fetched is kept.
 type AIA struct {
+	// UA is the User-Agent presented on AIA fetches; when empty,
+	// marker.FallbackUA is sent instead of Go's default client string.
+	UA string
 	// AllowPrivate lets the fetch reach private addresses (tests only).
 	AllowPrivate bool
 	// Roots replaces the system's roots (tests only).
@@ -196,6 +200,11 @@ func (a *AIA) fetch(raw string) (*x509.Certificate, error) {
 	if err != nil {
 		return nil, err
 	}
+	ua := a.UA
+	if ua == "" {
+		ua = marker.FallbackUA
+	}
+	req.Header.Set("User-Agent", ua)
 	resp, err := a.httpClient().Do(req)
 	if err != nil {
 		return nil, err

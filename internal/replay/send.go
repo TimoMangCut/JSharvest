@@ -184,6 +184,9 @@ func NewSender(o SenderOptions) (*Sender, error) {
 			if o.AIA == nil {
 				o.AIA = tlsutil.New()
 			}
+			if o.AIA.UA == "" {
+				o.AIA.UA = o.UserAgent
+			}
 			// The pinned dial, then the handshake: the AIA's intermediates
 			// when the server sends its leaf alone.
 			tr.DialTLSContext = o.AIA.DialTLS(s.dialer.DialContext, true)
