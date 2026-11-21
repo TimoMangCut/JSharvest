@@ -4,9 +4,14 @@ title = "jsharvest gitleaks configuration"
 useDefault = true
 
 [allowlist]
-description = "Synthetic test fixtures and design documentation examples"
+description = "Synthetic test fixtures, historical deleted session log, and documented placeholder keys"
 paths = [
-  '''^testbed/''',
+  '''^testbed/(?:apps|lab|cmd/testbed)/''',
   '''_test\.go$''',
-  '''^docs/''',
+  '''^docs/session-2026-11-02\.jsonl$''',
+]
+regexes = [
+  '''AIzaSyDUMMY0+''',
+  '''lab-test-(?:key|secret)-0+''',
+  '''eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.eyJzdWIiOiIxIn0\.sigabcdef123456''',
 ]
