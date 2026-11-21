@@ -111,18 +111,23 @@ func (r Rules) Classify(req Request) Decision {
 	if Destructive(req.URL) {
 		return Decision{Fake, "destructive"}
 	}
+	for _, v := range BodyActionFields(req.Body, req.ContentType) {
+		if hasWord(destructiveRe, v) {
+			return Decision{Fake, "destructive"}
+		}
+	}
 	method := EffectiveMethod(req.Method, req.Override, req.URL, req.ContentType, req.Body)
 	if method == "DELETE" && !strings.EqualFold(req.Method, "DELETE") {
 		return Decision{Fake, "destructive"} // a DELETE disguised as another method
+	}
+	if gql, write, _ := graphQL(method, req); gql && write && hasWord(destructiveRe, req.Body+" "+req.URL) {
+		return Decision{Fake, "destructive"}
 	}
 	if strings.EqualFold(req.Method, "POST") && method == "POST" && !isGraphQL(method, req) && refreshGrant(req) {
 		return Decision{Pass, "refresh"} // after every Deny/Destructive/DELETE check, before the write branch
 	}
 	if r.Explore {
 		if method == "DELETE" {
-			return Decision{Fake, "destructive"}
-		}
-		if gql, write, _ := graphQL(method, req); gql && write && hasWord(destructiveRe, req.Body+" "+req.URL) {
 			return Decision{Fake, "destructive"}
 		}
 		if (method == "GET" || method == "") && scriptRequest(req.ResourceType) && (actionVerb(req.URL) || operationVerb(req.URL)) {
@@ -222,9 +227,70 @@ func hasWord(re *regexp.Regexp, s string) bool {
 	return false
 }
 
-// operationParams are the query parameters by which one URL serves many
+// operationParams are the query/body parameters by which one URL serves many
 // operations (as flow.Discriminators).
-var operationParams = []string{"action", "method", "op", "cmd", "operation", "func", "function", "task", "do"}
+var operationParams = []string{"action", "method", "op", "cmd", "command", "operation", "func", "function", "task", "do"}
+
+func isOperationParam(k string) bool {
+	for _, p := range operationParams {
+		if strings.EqualFold(k, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// BodyActionFields extracts string values assigned to operation discriminator
+// keys (action, method, op, cmd, command, operation, func, function, task, do)
+// in URL-encoded forms or JSON objects/arrays (including JSON-RPC batches).
+func BodyActionFields(body, contentType string) []string {
+	t := strings.TrimSpace(strings.TrimPrefix(body, "\ufeff"))
+	if t == "" || len(t) > 1<<20 {
+		return nil
+	}
+	var out []string
+	ct := strings.ToLower(contentType)
+	switch {
+	case t[0] == '{' || t[0] == '[':
+		var v any
+		if json.Unmarshal([]byte(t), &v) == nil {
+			walkActionJSON(v, "", 0, &out)
+		}
+	case strings.Contains(ct, "x-www-form-urlencoded") || (!strings.Contains(ct, "multipart/") && !strings.ContainsAny(t, " \t\r\n<")):
+		if f, err := url.ParseQuery(t); err == nil {
+			for k, vs := range f {
+				if isOperationParam(k) {
+					for _, v := range vs {
+						if v != "" && len(v) <= 200 {
+							out = append(out, v)
+						}
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
+func walkActionJSON(v any, key string, depth int, out *[]string) {
+	if depth > 20 || len(*out) >= 64 {
+		return
+	}
+	switch x := v.(type) {
+	case map[string]any:
+		for k, y := range x {
+			walkActionJSON(y, k, depth+1, out)
+		}
+	case []any:
+		for _, y := range x {
+			walkActionJSON(y, key, depth+1, out)
+		}
+	case string:
+		if x != "" && len(x) <= 200 && isOperationParam(key) {
+			*out = append(*out, x)
+		}
+	}
+}
 
 // operationVerb reports whether a GET names an action in an operation
 // parameter: /rpc?action=approve does what /orders/7/approve does.

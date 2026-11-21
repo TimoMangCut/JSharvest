@@ -74,6 +74,16 @@ func (p Policy) Classify(e traffic.Entry, held bool) Decision {
 		body = ""
 	}
 	gql := graphQL(body, u)
+	for _, n := range gql.names {
+		if word(sessionEndRe, n) {
+			return Decision{Never, "ends a session"}
+		}
+	}
+	for _, n := range guard.BodyActionFields(body, ct) {
+		if word(sessionEndRe, n) {
+			return Decision{Never, "ends a session"}
+		}
+	}
 	if gql.unknown {
 		return Decision{Destructive, "a GraphQL operation that cannot be read (a persisted query)"}
 	}

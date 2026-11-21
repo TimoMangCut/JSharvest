@@ -120,3 +120,107 @@ func TestRound41LANOnlyRulesPassEverythingElse(t *testing.T) {
 		t.Fatalf("expected 2 private-address records, got %+v", g.records)
 	}
 }
+
+func TestRound41BodyAndGraphQLDeleteHeld(t *testing.T) {
+	// Even with AllowWrite=true and Explore=false, body operationParams and GraphQL destructive mutations are held as "destructive".
+	r := Rules{AllowWrite: true, Explore: false}
+	destructiveReqs := []Request{
+		{
+			Method:      "POST",
+			URL:         "https://app.example/rpc",
+			ContentType: "application/json",
+			Body:        `{"jsonrpc":"2.0","method":"user.delete","id":1}`,
+		},
+		{
+			Method:      "POST",
+			URL:         "https://app.example/rpc/batch",
+			ContentType: "application/json",
+			Body:        `[{"jsonrpc":"2.0","method":"user.get","id":1},{"jsonrpc":"2.0","command":"wipeAccount","id":2}]`,
+		},
+		{
+			Method:      "POST",
+			URL:         "https://app.example/form",
+			ContentType: "application/x-www-form-urlencoded",
+			Body:        "id=42&command=deactivateUser",
+		},
+		{
+			Method:      "POST",
+			URL:         "https://app.example/graphql",
+			ContentType: "application/json",
+			Body:        `{"query":"mutation { deleteUser(id: 7) { ok } }"}`,
+		},
+	}
+	for _, req := range destructiveReqs {
+		d := r.Classify(req)
+		if d.Action != Fake || d.Reason != "destructive" {
+			t.Fatalf("Classify(%s %s %s) = %+v, want {Fake, destructive}", req.Method, req.URL, req.Body, d)
+		}
+	}
+
+	// Non-destructive writes and GraphQL read queries mentioning "delete" still pass under AllowWrite=true.
+	benignReqs := []Request{
+		{
+			Method:      "POST",
+			URL:         "https://app.example/rpc",
+			ContentType: "application/json",
+			Body:        `{"method":"user.update","bio":"never delete notes"}`,
+		},
+		{
+			Method:      "POST",
+			URL:         "https://app.example/graphql",
+			ContentType: "application/json",
+			Body:        `{"query":"query Search { docs(q: \"delete\") { id } }"}`,
+		},
+	}
+	for _, req := range benignReqs {
+		d := r.Classify(req)
+		if d.Action != Pass {
+			t.Fatalf("Classify(%s %s) = %+v, want Pass", req.URL, req.Body, d)
+		}
+	}
+
+	// Verify AllowWrites window (re-login) still holds back body/GraphQL destructive requests because Reason == "destructive".
+	var answered []any
+	g := &Guard{
+		opts:     Options{Rules: Rules{}},
+		pending:  map[fetch.RequestID]*held{},
+		stats:    Stats{ByReason: map[string]int{}},
+		tops:     map[string]string{},
+		writers:  map[string]int{"frame-login": 1},
+		passedBy: map[string]int{},
+		answerFn: func(_ context.Context, p any) error { answered = append(answered, p); return nil },
+	}
+	g.handle(&fetch.EventRequestPaused{
+		RequestID:    "relogin-rpc-del",
+		FrameID:      "frame-login",
+		ResourceType: network.ResourceTypeFetch,
+		Request: &network.Request{
+			Method:          "POST",
+			URL:             "https://app.example/rpc",
+			Headers:         network.Headers{"content-type": "application/json"},
+			PostDataEntries: []*network.PostDataEntry{{Bytes: []byte(`{"method":"session.logout"}`)}},
+		},
+	}, nil)
+	g.handle(&fetch.EventRequestPaused{
+		RequestID:    "relogin-gql-del",
+		FrameID:      "frame-login",
+		ResourceType: network.ResourceTypeFetch,
+		Request: &network.Request{
+			Method:          "POST",
+			URL:             "https://app.example/graphql",
+			Headers:         network.Headers{"content-type": "application/json"},
+			PostDataEntries: []*network.PostDataEntry{{Bytes: []byte(`{"query":"mutation { deleteAccount }"}`)}},
+		},
+	}, nil)
+	if len(answered) != 2 {
+		t.Fatalf("expected 2 answered events, got %d", len(answered))
+	}
+	for i, a := range answered {
+		if _, ok := a.(fetch.FulfillRequestParams); !ok {
+			t.Fatalf("event %d during AllowWrites should be held (FulfillRequestParams), got %T", i, a)
+		}
+	}
+	if g.stats.PassedLogin != 0 || len(g.records) != 2 || g.records[0].Reason != "destructive" || g.records[1].Reason != "destructive" {
+		t.Fatalf("unexpected relogin guard stats/records: stats=%+v records=%+v", g.stats, g.records)
+	}
+}

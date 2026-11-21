@@ -438,3 +438,44 @@ func TestRound41SentAndTrialsRedacted(t *testing.T) {
 		t.Fatalf("expected REDACTED_ markers in sent.jsonl and trial .http")
 	}
 }
+
+func TestRound41BodyAndGraphQLLogoutNever(t *testing.T) {
+	var p Policy
+	neverCases := []traffic.Entry{
+		{
+			Method:  "POST",
+			URL:     "https://app.example/rpc",
+			Headers: map[string]string{"content-type": "application/json"},
+			Body:    traffic.Body{Body: `{"method":"auth.logout"}`},
+		},
+		{
+			Method:  "POST",
+			URL:     "https://app.example/rpc",
+			Headers: map[string]string{"content-type": "application/x-www-form-urlencoded"},
+			Body:    traffic.Body{Body: "command=expireSession"},
+		},
+		{
+			Method:  "POST",
+			URL:     "https://app.example/graphql",
+			Headers: map[string]string{"content-type": "application/json"},
+			Body:    traffic.Body{Body: `{"query":"mutation SignOutNow { signOut { ok } }"}`},
+		},
+	}
+	for _, e := range neverCases {
+		d := p.Classify(e, false)
+		if d.Kind != Never {
+			t.Fatalf("Classify(%s %s) = %+v, want Never", e.URL, e.Body.Body, d)
+		}
+	}
+
+	// Free-form user data mentioning "expire" is NOT treated as session-ending Never.
+	benign := traffic.Entry{
+		Method:  "POST",
+		URL:     "https://app.example/api/notes",
+		Headers: map[string]string{"content-type": "application/json"},
+		Body:    traffic.Body{Body: `{"title":"Reminder","note":"subscription will expire next month"}`},
+	}
+	if d := p.Classify(benign, false); d.Kind == Never {
+		t.Fatalf("free-form body text falsely classified as Never: %+v", d)
+	}
+}
