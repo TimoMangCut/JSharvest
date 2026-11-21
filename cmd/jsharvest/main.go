@@ -211,6 +211,7 @@ func runCrawl(args []string) error {
 	challengeWait := fs.Duration("challenge-wait", 6*time.Second, "with the cdp engine, how long a page that is a bot challenge is given to pass on its own and reload before it counts as blocked (0: no wait)")
 	archiveAfter := fs.Bool("archive", true, "with the http engine (anon, before a login): after the crawl, run jsharvest archive for the host: old pages and scripts in the Wayback, OTX and Common Crawl, each checked on the live server first (-archive=false: only when the first page is a challenge, see -archive-fallback)")
 	archiveMaxPages := fs.Int("archive-max-pages", 150, "with -archive, most Wayback CDX shards/pages listed in one crawl (0: unlimited; remaining shards resume on later runs)")
+	archiveUA := fs.String("archive-ua", archive.DefaultUA, "with -archive, User-Agent sent to archive services (default identifies jsharvest per Internet Archive etiquette; override for stricter OpSec)")
 	escalate := fs.Bool("escalate", true, "with -engine auto (the http engine before a login): the pages a bot challenge stops plain HTTP on go to Chrome, one run a challenged host, filed with this crawl (the run.json escalated field); -engine http never starts a browser")
 	archiveFallback := fs.Bool("archive-fallback", true, "with the http engine, when the first page is a bot challenge and no script was reached: run jsharvest archive for the host (old pages and scripts, live first)")
 	spaBoot := fs.Bool("spa-boot", false, "with -engine auto: when the http engine finds an SPA and sees no API call, open one guarded headless tab a SPA origin (3 at most, 8 s each) to capture the requests it sends when it boots")
@@ -560,7 +561,7 @@ func runCrawl(args []string) error {
 			if *archiveFallback || *archiveAfter {
 				baseArgs := []string{"-o", *out, "-target", t.Hostname(), "-scope", *scopeMode, "-sources", archiveSources,
 					"-concurrency", fmt.Sprint(max(*tabs*4, 8)), "-live-rate", fmt.Sprint(max(*httpRate, 5)), "-mem-cache-mb", fmt.Sprint(*memCacheMB),
-					"-max-source-files", fmt.Sprint(*maxSourceFiles), "-max-store-mb", fmt.Sprint(*maxStoreMB)}
+					"-max-source-files", fmt.Sprint(*maxSourceFiles), "-max-store-mb", fmt.Sprint(*maxStoreMB), "-archive-ua", *archiveUA}
 				if *archiveMaxPages > 0 {
 					baseArgs = append(baseArgs, "-max-pages", fmt.Sprint(*archiveMaxPages))
 				}

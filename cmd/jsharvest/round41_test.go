@@ -208,3 +208,22 @@ func TestRound41SecondSignalWarnsAndCleansUp(t *testing.T) {
 		}
 	}
 }
+
+func TestRound41ArchiveUAFlag(t *testing.T) {
+	cfg, err := parseArchiveFlags([]string{"-o", t.TempDir(), "-target", "app.example", "-archive-ua", "CustomUA/1.0"})
+	if err != nil {
+		t.Fatalf("parseArchiveFlags: %v", err)
+	}
+	if cfg.archiveUA != "CustomUA/1.0" {
+		t.Fatalf("archiveUA = %q, want CustomUA/1.0", cfg.archiveUA)
+	}
+	env, err := newArchiveEnv(cfg)
+	if err != nil {
+		t.Fatalf("newArchiveEnv: %v", err)
+	}
+	defer env.Close()
+	if env.opts.Wayback.Client.UA != "CustomUA/1.0" || env.opts.Wayback.IndexClient.UA != "CustomUA/1.0" ||
+		env.opts.OTX.Client.UA != "CustomUA/1.0" || env.opts.CC.Client.UA != "CustomUA/1.0" || env.opts.URLScan.Client.UA != "CustomUA/1.0" {
+		t.Fatalf("custom -archive-ua not applied to all archive clients")
+	}
+}

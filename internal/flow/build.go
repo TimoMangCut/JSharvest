@@ -467,12 +467,15 @@ func Build(events []Event, reqs []Request, o Options) []Flow {
 // "jsh:<tag>:setInterval" (see capture's tagScript); the latter is a
 // repeating timer as surely as a bare "setInterval" link.
 func chainOwner(chain []string, find func(string) *action) (owner *action, interval, none bool) {
-	// The tagger's task names start with marker.TaskPrefix (older runs:
-	// "jsh:"): read as one.
-	if slices.ContainsFunc(chain, func(d string) bool { return strings.HasPrefix(d, marker.TaskPrefix) }) {
+	// The tagger's task names start with marker.TaskPrefix (default runs:
+	// "pf8d1e7b:", older runs: "jsh:"): read as one.
+	if slices.ContainsFunc(chain, func(d string) bool {
+		_, ok := marker.CutTaskPrefix(d)
+		return ok && !strings.HasPrefix(d, marker.LegacyTaskPrefix)
+	}) {
 		norm := make([]string, len(chain))
 		for i, d := range chain {
-			if rest, ok := strings.CutPrefix(d, marker.TaskPrefix); ok {
+			if rest, ok := marker.CutTaskPrefix(d); ok {
 				d = marker.LegacyTaskPrefix + rest
 			}
 			norm[i] = d

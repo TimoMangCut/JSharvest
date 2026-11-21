@@ -214,7 +214,7 @@ func (s *Snapshot) restoreScript(force bool) string {
 }
 
 // StorageScript reads the current document's storage, for a snapshot.
-const StorageScript = `(() => {
+var StorageScript = `(() => {
   const read = (a) => { const o = {}; for (let i = 0; i < a.length; i++) { const k = a.key(i); o[k] = a.getItem(k); } return o; };
   try { return {origin: location.origin, local: read(localStorage), session: read(sessionStorage)}; } catch (_) { return {origin: location.origin}; }
 })()

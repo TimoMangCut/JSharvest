@@ -8,7 +8,7 @@ import "github.com/TimoMangCut/JSharvest/internal/marker"
 // sets values the page way (the prototype's setter, then input and change
 // events), so that frameworks that track a field's value see the change.
 // SAMPLES is replaced with the sample values, by input type.
-const exploreLib = `(() => {
+var exploreLib = `(() => {
   if (globalThis.__jshx) return;
   const S = SAMPLES;
   const fire = (el, ...types) => { for (const t of types) el.dispatchEvent(new Event(t, {bubbles: true})); };

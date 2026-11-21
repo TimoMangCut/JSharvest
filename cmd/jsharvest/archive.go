@@ -73,6 +73,7 @@ type archiveConfig struct {
 	ccCollections                   int
 	collapse                        string
 	vendor, insecure                bool
+	archiveUA                       string
 	proxyURL                        *url.URL
 	hostRules                       netsafe.Rules
 	waitLock                        time.Duration
@@ -104,6 +105,7 @@ func parseArchiveFlags(args []string) (archiveConfig, error) {
 	ccCollections := fs.Int("cc-collections", 3, "Common Crawl's newest collections to list")
 	proxy := fs.String("proxy", "", "send everything through this proxy: the archives and the live checks (default JSHARVEST_PROXY, HTTPS_PROXY, HTTP_PROXY; none: no proxy)")
 	hostRules := fs.String("host-resolver-rules", env("JSHARVEST_HOST_RESOLVER_RULES", ""), `Chrome host resolver rules for the live check, e.g. "MAP *.example.test 127.0.0.1" (env JSHARVEST_HOST_RESOLVER_RULES)`)
+	archiveUA := fs.String("archive-ua", archive.DefaultUA, "User-Agent sent to archive services (default identifies jsharvest per Internet Archive etiquette; override for stricter OpSec)")
 	insecure := fs.Bool("insecure", false, "the live check accepts any TLS certificate (a self-signed lab target)")
 	waitLock := waitLockFlag(fs)
 	if err := fs.Parse(args); err != nil {
@@ -125,7 +127,7 @@ func parseArchiveFlags(args []string) (archiveConfig, error) {
 	}
 	c := archiveConfig{out: *out, target: *target, sources: *sources, scopeMode: *scopeMode, live: *live, liveHosts: *liveHosts,
 		liveRate: *liveRate, maxFiles: *maxFiles, maxSourceFiles: *maxSourceFiles, maxStoreMB: *maxStoreMB, maxHTML: *maxHTML, pageSize: *pageSize, maxPages: *maxPages,
-		concurrency: *concurrency, ccCollections: *ccCollections, vendor: *vendor, insecure: *insecure, waitLock: *waitLock,
+		concurrency: *concurrency, ccCollections: *ccCollections, vendor: *vendor, insecure: *insecure, archiveUA: *archiveUA, waitLock: *waitLock,
 		shardedWB: !given["page-size"] && os.Getenv("JSHARVEST_WAYBACK_URL") == ""}
 	c.collapse = *collapse
 	if c.collapse == "none" || (!c.shardedWB && !given["collapse"]) {
@@ -295,6 +297,11 @@ func (e *archiveEnv) buildClients() error {
 	usClient := archive.NewClientSafe(proxyURL, hostRuleSet, services)
 	usClient.Wait = gap(60 * time.Second)
 	usClient.HTTP.CheckRedirect = func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }
+	if cfg.archiveUA != "" {
+		for _, cl := range []*archive.Client{wbIndexClient, wbFilesClient, otxClient, ccClient, usClient} {
+			cl.UA = cfg.archiveUA
+		}
+	}
 	o.URLScan = &archive.URLScan{Base: usBase, Key: os.Getenv("URLSCAN_API_KEY"), Client: usClient,
 		Budget: &archive.Budget{Gap: gap(2 * time.Second)}, Pages: 10, Results: 10}
 	e.opts = o

@@ -899,7 +899,7 @@ func (g *Guard) Stats() Stats {
 // traffic and the only way to keep their messages from the server is not
 // to connect (a stubbed socket fails as a refused connection would); and it
 // removes speculation rules, whose prefetches bypass interception.
-const socketStub = `(() => {
+var socketStub = `(() => {
   const note = () => {};
   class WebSocket extends EventTarget {
     constructor(url) {

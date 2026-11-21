@@ -159,6 +159,10 @@ type Client struct {
 // (or a gate's fake archive) declared with JSHARVEST_WAYBACK_URL and the
 // like: those are allowed whatever they are. A redirect from one of them to
 // another host is checked all the same.
+// DefaultUA is the polite User-Agent presented to public archive services
+// unless overridden by -archive-ua.
+const DefaultUA = "jsharvest (archive; +https://github.com/TimoMangCut/JSharvest)"
+
 func NewClientSafe(proxy *url.URL, rules netsafe.Rules, services []string) *Client {
 	allowed := map[string]bool{}
 	for _, raw := range services {
@@ -178,7 +182,7 @@ func NewClientSafe(proxy *url.URL, rules netsafe.Rules, services []string) *Clie
 	tr.MaxIdleConnsPerHost = 32
 	tr.IdleConnTimeout = 90 * time.Second
 	g := netsafe.Guard{Next: tr, AllowHost: isAllowed, Rules: rules}
-	return &Client{HTTP: &http.Client{Transport: g, Timeout: 120 * time.Second}, UA: "jsharvest (archive; +https://github.com/TimoMangCut/JSharvest)",
+	return &Client{HTTP: &http.Client{Transport: g, Timeout: 120 * time.Second}, UA: DefaultUA,
 		Wait: 60 * time.Second, Tries: 4}
 }
 

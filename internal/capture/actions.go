@@ -39,7 +39,7 @@ const quietTypes = `["mouseover","mouseenter","mouseout","mouseleave","pointerov
 // request the handler starts, however late (setTimeout, await, promises).
 // It changes nothing a handler can see but the function identity, which
 // removeEventListener and the on* getters hide.
-const tagScript = `(() => {
+var tagScript = `(() => {
   const mark = Symbol.for("` + marker.TaggerKey + `");
   if (window[mark] || !console.createTask) return;
   window[mark] = true;
@@ -130,7 +130,7 @@ const tagScript = `(() => {
 // reportScript runs in an isolated world, out of the page's reach, and
 // reports every event of actionTypes through a binding that exists only in
 // that world, so the page cannot forge actions.
-const reportScript = `(() => {
+var reportScript = `(() => {
   if (window.__jshReporter) return;
   window.__jshReporter = true;
   // The binding is looked up when used: Chrome may add it to this world

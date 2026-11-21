@@ -2,49 +2,95 @@
 // docs/research-2026-11-13-bot-transport.md N0). A page sees those names
 // (a sourceURL in its stack traces, a Symbol.for key): they are neutral,
 // never the tool's name. The capture and the flow builder still know the
-// names of older runs (Legacy), whose outputs are read again.
+// names of default and older runs (Legacy), whose outputs are read again.
 package marker
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 )
 
+// seed may be set at build time via:
+// -ldflags "-X github.com/TimoMangCut/JSharvest/internal/marker.seed=..."
+var seed = ""
+
 const (
-	// Internal is the sourceURL of the code jsharvest evaluates: the
-	// resolver's fetch, explore's helpers, the guard's socket stub, the
-	// session's storage restore, the action reporter.
-	Internal = "rt-4f9c2a.js"
-	// Tagger is the sourceURL of the action tagger's wrappers, which run
-	// under the page's own handlers (capture/actions.go).
-	Tagger = "pf-8d1e7b.js"
-	// TaggerKey is the Symbol.for key the tagger sets once installed.
-	TaggerKey = "pf.8d1e7b"
-	// TaskPrefix starts the console.createTask names the tagger gives an
-	// action's handlers and timers (flow reads them back from async
-	// stacks). LegacyTaskPrefix is the older runs'.
-	TaskPrefix       = "pf8d1e7b:"
+	defaultInternal   = "rt-4f9c2a.js"
+	defaultTagger     = "pf-8d1e7b.js"
+	defaultTaggerKey  = "pf.8d1e7b"
+	defaultTaskPrefix = "pf8d1e7b:"
+
 	LegacyTaskPrefix = "jsh:"
 
 	legacyInternal = "jsharvest-internal"
 	legacyTagger   = "jsharvest-tagger"
 )
 
+var (
+	// Internal is the sourceURL of the code jsharvest evaluates: the
+	// resolver's fetch, explore's helpers, the guard's socket stub, the
+	// session's storage restore, the action reporter.
+	Internal string
+	// Tagger is the sourceURL of the action tagger's wrappers, which run
+	// under the page's own handlers (capture/actions.go).
+	Tagger string
+	// TaggerKey is the Symbol.for key the tagger sets once installed.
+	TaggerKey string
+	// TaskPrefix starts the console.createTask names the tagger gives an
+	// action's handlers and timers (flow reads them back from async
+	// stacks). LegacyTaskPrefix is the older runs'.
+	TaskPrefix string
+)
+
+func init() {
+	Internal, Tagger, TaggerKey, TaskPrefix = derive(seed)
+}
+
+func derive(s string) (internal, tagger, taggerKey, taskPrefix string) {
+	if s == "" {
+		return defaultInternal, defaultTagger, defaultTaggerKey, defaultTaskPrefix
+	}
+	sum := sha256.Sum256([]byte("jsharvest-marker:" + s))
+	h := hex.EncodeToString(sum[:])
+	a, b := h[0:6], h[6:12]
+	if a == b {
+		b = h[12:18]
+	}
+	return "rt-" + a + ".js", "pf-" + b + ".js", "pf." + b, "pf" + b + ":"
+}
+
 // IsInternal reports whether a script or stack frame URL is jsharvest's own
-// evaluated code, of this version or an older one.
-func IsInternal(url string) bool { return url == Internal || url == legacyInternal }
+// evaluated code, of this build, the default build, or an older version.
+func IsInternal(url string) bool {
+	return url == Internal || url == defaultInternal || url == legacyInternal
+}
 
 // IsTagger reports whether a URL is the action tagger's.
-func IsTagger(url string) bool { return url == Tagger || url == legacyTagger }
+func IsTagger(url string) bool {
+	return url == Tagger || url == defaultTagger || url == legacyTagger
+}
 
 // InSource reports whether a script's source carries one of the markers.
 func InSource(src string) bool {
-	for _, n := range []string{Internal, Tagger, legacyInternal, legacyTagger} {
+	for _, n := range []string{Internal, Tagger, defaultInternal, defaultTagger, legacyInternal, legacyTagger} {
 		if strings.Contains(src, "sourceURL="+n) {
 			return true
 		}
 	}
 	return false
+}
+
+// CutTaskPrefix strips any recognized tagger task prefix (current build,
+// default unseeded build, or legacy "jsh:") from d.
+func CutTaskPrefix(d string) (string, bool) {
+	for _, p := range []string{TaskPrefix, defaultTaskPrefix, LegacyTaskPrefix} {
+		if rest, ok := strings.CutPrefix(d, p); ok {
+			return rest, true
+		}
+	}
+	return d, false
 }
 
 // Slug is a random path segment of lowercase letters and digits, for a
