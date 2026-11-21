@@ -5,14 +5,10 @@ package archive
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/url"
-	"os"
 	"path"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -388,24 +384,50 @@ func (r *runner) fetchAsset(ctx context.Context, g *group, meta *store.ArchiveSe
 		return nil, nil
 	}
 	r.sum(func(s *Summary) { s.Maps++ })
-	if os.MkdirAll(filepath.Join(r.o.Dir, "maps"), 0o700) == nil {
-		sum := sha256.Sum256(body)
-		os.WriteFile(filepath.Join(r.o.Dir, "maps", hex.EncodeToString(sum[:])+".map"), body, 0o600)
-	}
+	_ = r.store.SaveMap(body)
 	added := 0
+	capped := 0
 	for _, f := range sm.FilesFor(c.URL) {
 		if f.Vendor {
 			continue // a dependency's: noise for the target's endpoints
 		}
+		if !r.claimSourceSlot() {
+			capped++
+			continue
+		}
 		if _, err := r.store.Add(store.Record{Body: []byte(f.Content), URL: c.URL + "#" + f.Path, Kind: "source", Via: "archive-sourcemap",
 			Source: src, Tags: []string{"archive", "sourcemap", "source:" + f.Path}, Alive: alive, Archive: meta}); err == nil {
 			added++
+		} else {
+			r.mapSourcesStored.Add(-1)
 		}
 	}
-	if added > 0 {
-		r.sum(func(s *Summary) { s.MapSources += added })
+	if added > 0 || capped > 0 {
+		r.sum(func(s *Summary) {
+			s.MapSources += added
+			s.SourcesCapped += capped
+		})
 	}
 	return nil, nil
+}
+
+func (r *runner) claimSourceSlot() bool {
+	limit := r.o.MaxSourceFiles
+	if limit == 0 {
+		limit = sourcemap.DefaultMaxSourceFilesPerRun
+	}
+	if limit < 0 {
+		return true
+	}
+	for {
+		cur := r.mapSourcesStored.Load()
+		if cur >= int64(limit) {
+			return false
+		}
+		if r.mapSourcesStored.CompareAndSwap(cur, cur+1) {
+			return true
+		}
+	}
 }
 
 // probeTimeout is how long a memento of a URL only named (no digest) may

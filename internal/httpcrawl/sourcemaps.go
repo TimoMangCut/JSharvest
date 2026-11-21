@@ -120,15 +120,15 @@ func (cr *crawler) sourceMap(ctx context.Context, a answer, j job, h map[string]
 	// callback stores them before it returns), so a reuse never names a
 	// source the store does not have yet; the deferred call releases the
 	// waiters, with nothing to reuse, on every other way out.
-	finishFlight := func(sm *sourcemap.Map, own []sourcemap.File) {
+	finishFlight := func(sm *sourcemap.Map, refs []SourceRef, cacheable bool) {
 		if myFlight == nil {
 			return
 		}
 		cr.mapMu.Lock()
 		delete(cr.mapInflight, dedupKey)
-		if sm != nil && sm.CompleteSourcesContent() {
+		if sm != nil && sm.CompleteSourcesContent() && cacheable {
 			myFlight.ok = true
-			myFlight.ownRefs = sourceRefs(own)
+			myFlight.ownRefs = refs
 			myFlight.sourcesN = len(sm.Sources)
 			if cr.mapCache == nil {
 				cr.mapCache = map[string]*mapDedupEntry{}
@@ -139,7 +139,7 @@ func (cr *crawler) sourceMap(ctx context.Context, a answer, j job, h map[string]
 		myFlight = nil
 		cr.mapMu.Unlock()
 	}
-	defer finishFlight(nil, nil)
+	defer finishFlight(nil, nil, false)
 
 	if ref.Guess && !cr.guesses.Allow(ref.URL) {
 		cr.count(func(st *Stats) { st.MapGuessesHeld++ })
@@ -165,13 +165,26 @@ func (cr *crawler) sourceMap(ctx context.Context, a answer, j job, h map[string]
 	}
 	own := extractOwnMapFiles(sm, a.URL)
 	cr.count(func(st *Stats) { st.SourceMaps++ })
-	cr.o.SourceMap(SourceMap{
-		URL:       ref.URL,
-		ScriptURL: a.URL,
-		Body:      m.Body,
-		Parsed:    sm,
-		OwnFiles:  own,
-		SourcesN:  len(sm.Sources),
-	})
-	finishFlight(sm, own) // stored: now the waiting hosts may reuse it
+	reported := false
+	var storedRefs []SourceRef
+	cacheable := true
+	if cr.o.SourceMap != nil {
+		cr.o.SourceMap(SourceMap{
+			URL:       ref.URL,
+			ScriptURL: a.URL,
+			Body:      m.Body,
+			Parsed:    sm,
+			OwnFiles:  own,
+			SourcesN:  len(sm.Sources),
+			reportStored: func(refs []SourceRef, ok bool) {
+				reported = true
+				storedRefs = refs
+				cacheable = ok
+			},
+		})
+	}
+	if !reported {
+		storedRefs = sourceRefs(own)
+	}
+	finishFlight(sm, storedRefs, cacheable) // stored: now the waiting hosts may reuse it
 }

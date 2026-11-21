@@ -83,9 +83,16 @@ func Find(scriptURL string, headers map[string]string, body []byte, guess bool) 
 }
 
 const (
-	maxInlineMapDataLen  = 44 << 20 // ~33 MiB decoded
-	maxSingleSourceBytes = 16 << 20
-	maxTotalSourcesBytes = 64 << 20
+	maxInlineMapDataLen    = 44 << 20 // ~33 MiB decoded
+	maxSingleSourceBytes   = 16 << 20
+	maxTotalSourcesBytes   = 64 << 20
+	maxTotalMapSources     = 100_000
+	maxOwnSourcesPerMap    = 5_000
+	maxVendorSourcesPerMap = 5_000
+
+	// DefaultMaxSourceFilesPerRun bounds how many extracted sourcemap files a
+	// single crawl or archive run writes into the store.
+	DefaultMaxSourceFilesPerRun = 50_000
 )
 
 func dataURI(s string) ([]byte, bool) {
@@ -116,6 +123,8 @@ type Map struct {
 	Sections       []struct {
 		Map *Map `json:"map"`
 	} `json:"sections"`
+	// Truncated records why Parse or FilesFor capped the map's sources.
+	Truncated string `json:"-"`
 }
 
 // ErrNotMap: the answer is not a source map (an SPA's index.html, a 404
@@ -141,19 +150,41 @@ func Parse(b []byte) (*Map, error) {
 	if m.Version != 3 {
 		return nil, ErrNotMap
 	}
+	if len(m.Sources) > maxTotalMapSources {
+		m.Sources = m.Sources[:maxTotalMapSources]
+		if len(m.SourcesContent) > maxTotalMapSources {
+			m.SourcesContent = m.SourcesContent[:maxTotalMapSources]
+		}
+		m.Truncated = "total_sources>100000"
+	} else if len(m.SourcesContent) > len(m.Sources) && len(m.Sections) > 0 {
+		m.SourcesContent = m.SourcesContent[:len(m.Sources)]
+	}
 	for _, s := range m.Sections {
-		if s.Map == nil {
+		if s.Map == nil || len(s.Map.Sources) == 0 {
 			continue
 		}
-		m.Sources = append(m.Sources, s.Map.Sources...)
-		content := s.Map.SourcesContent
-		for len(content) < len(s.Map.Sources) {
-			content = append(content, nil)
+		rem := maxTotalMapSources - len(m.Sources)
+		if rem <= 0 {
+			m.Truncated = "total_sources>100000"
+			break
 		}
-		for len(m.SourcesContent) < len(m.Sources)-len(s.Map.Sources) {
+		secSources := s.Map.Sources
+		if len(secSources) > rem {
+			secSources = secSources[:rem]
+			m.Truncated = "total_sources>100000"
+		}
+		for len(m.SourcesContent) < len(m.Sources) {
 			m.SourcesContent = append(m.SourcesContent, nil)
 		}
+		m.Sources = append(m.Sources, secSources...)
+		content := s.Map.SourcesContent
+		if len(content) > len(secSources) {
+			content = content[:len(secSources)]
+		}
 		m.SourcesContent = append(m.SourcesContent, content...)
+		for len(m.SourcesContent) < len(m.Sources) {
+			m.SourcesContent = append(m.SourcesContent, nil)
+		}
 	}
 	if len(m.Sources) == 0 {
 		return nil, ErrNotMap
@@ -166,7 +197,7 @@ func Parse(b []byte) (*Map, error) {
 // returns false so cross-host map deduplication does not shadow a staging copy
 // that still carries full sourcesContent.
 func (m *Map) CompleteSourcesContent() bool {
-	if m == nil || len(m.Sources) == 0 || len(m.SourcesContent) < len(m.Sources) {
+	if m == nil || m.Truncated == "total_sources>100000" || len(m.Sources) == 0 || len(m.SourcesContent) < len(m.Sources) {
 		return false
 	}
 	for i := range m.Sources {
@@ -210,7 +241,16 @@ func (m *Map) FilesFor(scriptURL string) []File {
 	var raw []File
 	var rawBytes int64
 	monorepoHits := 0
-	for i, s := range m.Sources {
+	vendorRawCount := 0
+	limit := len(m.Sources)
+	if limit > maxTotalMapSources {
+		limit = maxTotalMapSources
+		if m.Truncated == "" {
+			m.Truncated = "total_sources>100000"
+		}
+	}
+	for i := range limit {
+		s := m.Sources[i]
 		if i >= len(m.SourcesContent) || m.SourcesContent[i] == nil || *m.SourcesContent[i] == "" {
 			continue
 		}
@@ -218,16 +258,23 @@ func (m *Map) FilesFor(scriptURL string) []File {
 		if len(content) > maxSingleSourceBytes {
 			continue
 		}
+		clean := Clean(m.SourceRoot, s)
+		isVendor := vendorPath(clean)
+		if isVendor && vendorRawCount >= maxVendorSourcesPerMap {
+			// Skip excess vendor modules without consuming RAM or byte budget
+			// so app sources listed after a large node_modules/ block survive.
+			continue
+		}
 		if rawBytes+int64(len(content)) > 2*maxTotalSourcesBytes {
 			break
 		}
 		rawBytes += int64(len(content))
-		f := File{Path: Clean(m.SourceRoot, s), Content: content}
-		f.Vendor = vendorPath(f.Path)
-		if !f.Vendor && libStem != "" && hasMonorepoStem(f.Path, libStem) {
+		if isVendor {
+			vendorRawCount++
+		} else if libStem != "" && hasMonorepoStem(clean, libStem) {
 			monorepoHits++
 		}
-		raw = append(raw, f)
+		raw = append(raw, File{Path: clean, Content: content, Vendor: isVendor})
 	}
 	allLibMonorepo := libStem != "" && len(raw) > 0 && monorepoHits*10 >= len(raw)*9
 	var own, vendor []File
@@ -236,9 +283,15 @@ func (m *Map) FilesFor(scriptURL string) []File {
 			f.Vendor = true
 		}
 		if f.Vendor {
-			vendor = append(vendor, f)
+			if len(vendor) < maxVendorSourcesPerMap {
+				vendor = append(vendor, f)
+			}
 		} else {
-			own = append(own, f)
+			if len(own) < maxOwnSourcesPerMap {
+				own = append(own, f)
+			} else if m.Truncated == "" {
+				m.Truncated = "own_sources>5000"
+			}
 		}
 	}
 	out := make([]File, 0, len(own)+len(vendor))

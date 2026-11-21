@@ -131,6 +131,19 @@ type SourceMap struct {
 	// Parsed and OwnFiles are empty.
 	Reused  bool
 	OwnRefs []SourceRef
+
+	// reportStored lets the SourceMap callback report which own sources
+	// actually reached the store so singleflight deduplication never caches
+	// refs the store dropped or capped.
+	reportStored func(stored []SourceRef, cacheable bool)
+}
+
+// NoteStored reports the exact source references persisted by the caller and
+// whether singleflight deduplication may reuse them for later hosts.
+func (m *SourceMap) NoteStored(stored []SourceRef, cacheable bool) {
+	if m.reportStored != nil {
+		m.reportStored(stored, cacheable)
+	}
 }
 
 // SourceRef is one source of a map already stored: its path in the map and
@@ -175,6 +188,7 @@ type Stats struct {
 	SoftProbes     []string       `json:"soft_probes,omitempty"`      // Probes keys whose 2xx response was a soft-200 SPA/HTML fallback
 	SoftProbesMore int            `json:"soft_probes_more,omitempty"` // soft-200 probes beyond SoftProbes cap
 	SourceMaps     int            `json:"source_maps,omitempty"`
+	SourcesCapped  int            `json:"sources_capped,omitempty"`
 	// MapGuessesHeld: <script>.map guesses not made, their origin having
 	// missed sourcemap.GuessMisses with no map found.
 	MapGuessesHeld int            `json:"map_guesses_held,omitempty"`

@@ -32,6 +32,7 @@ import (
 	"github.com/TimoMangCut/JSharvest/internal/netsafe"
 	"github.com/TimoMangCut/JSharvest/internal/scope"
 	"github.com/TimoMangCut/JSharvest/internal/session"
+	"github.com/TimoMangCut/JSharvest/internal/sourcemap"
 	"github.com/TimoMangCut/JSharvest/internal/traffic"
 )
 
@@ -202,6 +203,7 @@ func runCrawl(args []string) error {
 	noSpecProbe := fs.Bool("no-spec-probe", false, "skip OpenAPI/Swagger and OIDC discovery probes while keeping other -probe files")
 	sourceMaps := fs.Bool("sourcemaps", true, "fetch the source maps the scripts name (the CDP engine through the page, with the resolver), and keep their original sources (not node_modules)")
 	sourceMapGuess := fs.Bool("sourcemap-guess", true, "with -sourcemaps, also ask <script>.map when nothing names a map: one more request a script, the app's only (not vendors.js, polyfills…); -sourcemap-guess=false to skip")
+	maxSourceFiles := fs.Int("max-source-files", sourcemap.DefaultMaxSourceFilesPerRun, "most original source files extracted from source maps per run (<0: unlimited)")
 	challengeWait := fs.Duration("challenge-wait", 6*time.Second, "with the cdp engine, how long a page that is a bot challenge is given to pass on its own and reload before it counts as blocked (0: no wait)")
 	archiveAfter := fs.Bool("archive", true, "with the http engine (anon, before a login): after the crawl, run jsharvest archive for the host: old pages and scripts in the Wayback, OTX and Common Crawl, each checked on the live server first (-archive=false: only when the first page is a challenge, see -archive-fallback)")
 	archiveMaxPages := fs.Int("archive-max-pages", 150, "with -archive, most Wayback CDX shards/pages listed in one crawl (0: unlimited; remaining shards resume on later runs)")
@@ -462,9 +464,11 @@ func runCrawl(args []string) error {
 		Actions: *exploreOn,
 		Resolve: *resolveOn,
 		Depth:   *depth, MaxPages: *maxPages, PageRate: *pageRate, PageDwell: *pageDwell,
-		ResolveRate: *resolveRate,
-		ResolveMax:  *resolveMax,
-		SourceMaps:  *sourceMaps, GuessMaps: *sourceMapGuess,
+		ResolveRate:    *resolveRate,
+		ResolveMax:     *resolveMax,
+		SourceMaps:     *sourceMaps,
+		GuessMaps:      *sourceMapGuess,
+		MaxSourceFiles: *maxSourceFiles,
 
 		ChallengeWait: *challengeWait,
 		SpecProbe:     *probe && !*noSpecProbe,
@@ -535,7 +539,8 @@ func runCrawl(args []string) error {
 			closeEnv := func() {}
 			if *archiveFallback || *archiveAfter {
 				baseArgs := []string{"-o", *out, "-target", t.Hostname(), "-scope", *scopeMode, "-sources", archiveSources,
-					"-concurrency", fmt.Sprint(max(*tabs*4, 8)), "-live-rate", fmt.Sprint(max(*httpRate, 5)), "-mem-cache-mb", fmt.Sprint(*memCacheMB)}
+					"-concurrency", fmt.Sprint(max(*tabs*4, 8)), "-live-rate", fmt.Sprint(max(*httpRate, 5)), "-mem-cache-mb", fmt.Sprint(*memCacheMB),
+					"-max-source-files", fmt.Sprint(*maxSourceFiles)}
 				if *archiveMaxPages > 0 {
 					baseArgs = append(baseArgs, "-max-pages", fmt.Sprint(*archiveMaxPages))
 				}

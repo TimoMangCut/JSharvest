@@ -86,10 +86,15 @@ func (e *engine) sourceMaps(ctx context.Context, refs []ref, policy *resolve.Pol
 			if f.Vendor {
 				continue // a dependency's: noise for the target's endpoints
 			}
+			if !e.claimSourceSlot() {
+				stats.SourcesCapped++
+				continue
+			}
 			key, isNew, err := e.st.Put(store.Record{Body: []byte(f.Content), URL: where + "#" + f.Path, Kind: "source", Via: "sourcemap",
 				Target: "page", Page: r.page, Tags: []string{"sourcemap", "source:" + f.Path}, Source: "live",
 				Initiator: &store.Initiator{Type: "sourcemap", URL: r.url}})
 			if err != nil {
+				e.mapSourcesStored.Add(-1)
 				continue
 			}
 			e.noteScript(key, isNew)

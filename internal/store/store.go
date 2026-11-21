@@ -37,8 +37,13 @@ const (
 	maxInitiators = 20
 )
 
-// flushEveryNew is how many new scripts trigger a flush on their own.
-const flushEveryNew = 50
+// flushEveryNew is the base threshold of new scripts that triggers an index
+// flush; larger stores scale geometrically (len(order)/10) so total index
+// writes across a run stay O(N).
+const (
+	flushEveryNew = 50
+	flushMaxAge   = 5 * time.Second
+)
 
 // keptHeaders are the response headers worth keeping for later analysis.
 var keptHeaders = []string{"content-type", "etag", "last-modified", "sourcemap", "x-sourcemap"}
@@ -123,6 +128,8 @@ type Store struct {
 	order         []string // keeps index.jsonl stable across runs
 	unflushed     int      // changes not yet in index.jsonl
 	newSinceFlush int
+	lastFlush     time.Time
+	flushes       int
 	recovered     int
 	discarded     int
 	sha1          map[string]string // SHA1B32 -> SHA-256, built when first asked
@@ -132,7 +139,7 @@ func Open(dir string, opts Options) (*Store, error) {
 	if err := os.MkdirAll(filepath.Join(dir, "js"), 0o700); err != nil {
 		return nil, err
 	}
-	s := &Store{dir: dir, opts: opts, entries: map[string]*Entry{}}
+	s := &Store{dir: dir, opts: opts, entries: map[string]*Entry{}, lastFlush: time.Now()}
 	if err := s.load(); err != nil {
 		return nil, fmt.Errorf("load index: %w", err)
 	}
@@ -290,13 +297,34 @@ func (s *Store) Put(r Record) (string, bool, error) {
 	s.unflushed++
 	if !ok {
 		s.newSinceFlush++
-		if s.newSinceFlush >= flushEveryNew {
+		threshold := max(flushEveryNew, len(s.order)/10)
+		if s.newSinceFlush >= threshold || time.Since(s.lastFlush) >= flushMaxAge {
 			if err := s.flushLocked(); err != nil {
 				return "", false, err
 			}
 		}
 	}
 	return key, !ok, nil
+}
+
+// SaveMap writes a raw source map atomically under <dir>/maps/<sha256>.map
+// when not already present on disk.
+func (s *Store) SaveMap(body []byte) error {
+	if len(body) == 0 {
+		return nil
+	}
+	mapsDir := filepath.Join(s.dir, "maps")
+	if err := os.MkdirAll(mapsDir, 0o700); err != nil {
+		return err
+	}
+	sum := sha256.Sum256(body)
+	dst := filepath.Join(mapsDir, hex.EncodeToString(sum[:])+".map")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := os.Stat(dst); err == nil {
+		return nil
+	}
+	return writeFileAtomic(dst, body)
 }
 
 func merge(e *Entry, r Record, now time.Time) {
@@ -492,6 +520,8 @@ func (s *Store) flushLocked() error {
 		return err
 	}
 	s.unflushed, s.newSinceFlush = 0, 0
+	s.lastFlush = time.Now()
+	s.flushes++
 	return nil
 }
 

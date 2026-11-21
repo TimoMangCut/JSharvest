@@ -2,8 +2,6 @@ package engine
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/TimoMangCut/JSharvest/internal/detect"
@@ -148,7 +147,26 @@ func RunHTTP(ctx context.Context, cfg Config, ho HTTPOptions) (Record, error) {
 		}
 		return key
 	}
-	mapsDir := filepath.Join(st.Dir(), "maps")
+	maxSources := cfg.MaxSourceFiles
+	if maxSources == 0 {
+		maxSources = sourcemap.DefaultMaxSourceFilesPerRun
+	}
+	var mapSourcesStored atomic.Int64
+	var sourcesCapped atomic.Int64
+	claimSourceSlot := func() bool {
+		if maxSources < 0 {
+			return true
+		}
+		for {
+			cur := mapSourcesStored.Load()
+			if cur >= int64(maxSources) {
+				return false
+			}
+			if mapSourcesStored.CompareAndSwap(cur, cur+1) {
+				return true
+			}
+		}
+	}
 	enc := json.NewEncoder(pages)
 	var visited, listedN int
 	var proxyURL *url.URL
@@ -241,9 +259,8 @@ func RunHTTP(ctx context.Context, cfg Config, ho HTTPOptions) (Record, error) {
 						return
 					}
 				}
-				if len(m.Body) > 0 && os.MkdirAll(mapsDir, 0o700) == nil {
-					sum := sha256.Sum256(m.Body)
-					writeFileAtomic(filepath.Join(mapsDir, hex.EncodeToString(sum[:])+".map"), m.Body)
+				if len(m.Body) > 0 {
+					_ = st.SaveMap(m.Body)
 				}
 				if sourcesN == 0 && own == nil {
 					sourcesN = len(sm.Sources)
@@ -259,11 +276,30 @@ func RunHTTP(ctx context.Context, cfg Config, ho HTTPOptions) (Record, error) {
 				where = m.ScriptURL + "#inline-map"
 			}
 			n := 0
+			var storedRefs []httpcrawl.SourceRef
+			putFailed := false
+			var cappedHere int64
 			for _, f := range own {
-				n++
-				put(store.Record{Body: []byte(f.Content), URL: where + "#" + f.Path, Kind: "source", Via: "sourcemap", Target: "http",
+				if !claimSourceSlot() {
+					cappedHere++
+					continue
+				}
+				key := put(store.Record{Body: []byte(f.Content), URL: where + "#" + f.Path, Kind: "source", Via: "sourcemap", Target: "http",
 					Page: m.ScriptURL, Tags: []string{"sourcemap", "source:" + f.Path}, Source: "live",
 					Initiator: &store.Initiator{Type: "sourcemap", URL: m.ScriptURL}}, "source")
+				if key == "" {
+					mapSourcesStored.Add(-1)
+					putFailed = true
+					continue
+				}
+				n++
+				storedRefs = append(storedRefs, httpcrawl.SourceRef{Path: f.Path, SHA256: key})
+			}
+			if cappedHere > 0 {
+				sourcesCapped.Add(cappedHere)
+			}
+			if !m.Reused {
+				m.NoteStored(storedRefs, !putFailed)
 			}
 			// A map another host's copy of the bundle brought: its sources
 			// are stored; this script is noted as their page too, by their
@@ -321,6 +357,8 @@ func RunHTTP(ctx context.Context, cfg Config, ho HTTPOptions) (Record, error) {
 	res, cerr := httpcrawl.Crawl(ctx, o)
 	closeExtra()
 	if res != nil {
+		res.Stats.SourcesCapped = int(sourcesCapped.Load())
+		run.Resolver.SourcesCapped = res.Stats.SourcesCapped
 		run.HTTP = &res.Stats
 		run.Blocked = res.Blocked
 		run.Fronted, run.FrontedBy = res.Fronted, res.FrontedBy

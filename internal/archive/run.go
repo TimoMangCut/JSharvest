@@ -67,8 +67,9 @@ type Options struct {
 	// (0: none).
 	MaxHTML int
 	Vendor  bool // fetch vendor libraries too
-	MaxBody int
-	Workers int // concurrent listing/fetch workers (0: default 8)
+	MaxBody        int
+	MaxSourceFiles int // extracted sourcemap files kept per run (0: DefaultMaxSourceFilesPerRun, <0: unlimited)
+	Workers        int // concurrent listing/fetch workers (0: default 8)
 	// Mode: a whole run, or one of the two stages a crawl runs in process
 	// (round 37, 37.1 B).
 	Mode    Mode
@@ -95,9 +96,10 @@ type Summary struct {
 	WARC      int `json:"from_warc,omitempty"` // fetched from Common Crawl's WARC files
 	// Source maps read, the app's own sources they held; build manifests
 	// read (MAX-04).
-	Maps       int `json:"source_maps,omitempty"`
-	MapSources int `json:"map_sources,omitempty"`
-	Manifests  int `json:"manifests,omitempty"`
+	Maps          int `json:"source_maps,omitempty"`
+	MapSources    int `json:"map_sources,omitempty"`
+	SourcesCapped int `json:"sources_capped,omitempty"`
+	Manifests     int `json:"manifests,omitempty"`
 	Alive      int `json:"alive"`
 	LiveSame   int `json:"live_same"`
 	Mismatch   int `json:"digest_mismatch"`
@@ -188,9 +190,10 @@ type runner struct {
 	// namedURLs are the scripts old pages and fetched scripts named, filed
 	// once.
 	namedURLs map[string]bool
-	done      map[string]bool
-	store     *store.Store
-	cred      map[string]bool
+	done             map[string]bool
+	store            *store.Store
+	mapSourcesStored atomic.Int64
+	cred             map[string]bool
 	cur       *current
 	// partial: the listing stopped at -max-pages or a throttled source, its place kept.
 	partial  bool

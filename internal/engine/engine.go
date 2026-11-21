@@ -127,8 +127,9 @@ type Config struct {
 	// SourceMaps reads the captured scripts' source maps through the page,
 	// with the resolver; GuessMaps asks <script>.map of the app's scripts
 	// that name none (MAX-07).
-	SourceMaps bool
-	GuessMaps  bool
+	SourceMaps     bool
+	GuessMaps      bool
+	MaxSourceFiles int // extracted sourcemap files kept per run (0: DefaultMaxSourceFilesPerRun, <0: unlimited)
 
 	// ChallengeWait is how long a page that is a challenge is given to pass
 	// on its own and reload before it counts as blocked (0: not at all).
@@ -345,8 +346,9 @@ type runState struct {
 	// noSharedWorkers: a batch page that joined a host's keeper after
 	// another page: that one captures the context's service workers.
 	noSharedWorkers bool
-	analyzing       atomic.Bool // a watch's background analysis of new scripts
-	analyzed        int         // scripts in the store when it last started
+	analyzing        atomic.Bool // a watch's background analysis of new scripts
+	analyzed         int         // scripts in the store when it last started
+	mapSourcesStored atomic.Int64
 
 	events      []flow.Event   // actions reported by the pages
 	heard       time.Time      // when the last trusted one came
@@ -1619,6 +1621,25 @@ func toRecord(s capture.Script) store.Record {
 
 func logURL(raw string) string {
 	return traffic.LogURL(raw)
+}
+
+func (r *runState) claimSourceSlot() bool {
+	limit := r.cfg.MaxSourceFiles
+	if limit == 0 {
+		limit = sourcemap.DefaultMaxSourceFilesPerRun
+	}
+	if limit < 0 {
+		return true
+	}
+	for {
+		cur := r.mapSourcesStored.Load()
+		if cur >= int64(limit) {
+			return false
+		}
+		if r.mapSourcesStored.CompareAndSwap(cur, cur+1) {
+			return true
+		}
+	}
 }
 
 func logSourceMapURL(where string) string {

@@ -1,13 +1,21 @@
 package engine
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/chromedp/cdproto/network"
 
@@ -115,5 +123,116 @@ func TestRound41GuardAndSessionLogsMaskTokens(t *testing.T) {
 	}
 	if !strings.Contains(logs, "session lost; restoring it") || !strings.Contains(logs, "next=/dashboard") {
 		t.Fatalf("unexpected session log output:\n%s", logs)
+	}
+}
+
+func TestRound41RunSourceCapNoSightingMissing(t *testing.T) {
+	const bundle = "fetch('/api/shared');\n//# sourceMappingURL=app.js.map\n"
+	srcs := make([]string, 10)
+	contents := make([]string, 10)
+	for i := range 10 {
+		srcs[i] = fmt.Sprintf("src/m_%d.ts", i)
+		contents[i] = fmt.Sprintf("export const f%d = () => fetch('/api/m/%d');", i, i)
+	}
+	mapBytes, err := json.Marshal(map[string]any{
+		"version":        3,
+		"file":           "app.js",
+		"sources":        srcs,
+		"sourcesContent": contents,
+		"mappings":       "AAAA",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var mapHits atomic.Int64
+	var hosts []*httptest.Server
+	for range 4 {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/app.js":
+				w.Header().Set("Content-Type", "application/javascript")
+				_, _ = w.Write([]byte(bundle))
+			case "/app.js.map":
+				mapHits.Add(1)
+				time.Sleep(25 * time.Millisecond)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write(mapBytes)
+			default:
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = fmt.Fprint(w, `<!doctype html><title>p</title><script src="/app.js"></script>`)
+			}
+		}))
+		defer srv.Close()
+		hosts = append(hosts, srv)
+	}
+	seed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		var b strings.Builder
+		b.WriteString("<!doctype html><title>seed</title>")
+		for _, h := range hosts {
+			fmt.Fprintf(&b, `<a href="%s/">h</a>`, h.URL)
+		}
+		_, _ = w.Write([]byte(b.String()))
+	}))
+	defer seed.Close()
+
+	target, _ := url.Parse(seed.URL + "/")
+	out := t.TempDir()
+	rec, err := RunHTTP(context.Background(),
+		Config{
+			Target:         target,
+			OutRoot:        out,
+			Role:           "anon",
+			ScopeMode:      "fqdn",
+			Depth:          1,
+			NavTimeout:     5 * time.Second,
+			MaxSourceFiles: 3,
+		},
+		HTTPOptions{Rate: 500, PageWorkers: 4, NoSpecProbe: true, SourceMaps: true},
+	)
+	if err != nil {
+		t.Fatalf("RunHTTP: %v", err)
+	}
+	if got := mapHits.Load(); got != 1 {
+		t.Fatalf("expected map fetched once via singleflight, got %d", got)
+	}
+	if got := rec.StoreErrors["sighting_missing"]; got != 0 {
+		t.Fatalf("expected sighting_missing == 0, got %d (StoreErrors=%v)", got, rec.StoreErrors)
+	}
+	if rec.Resolver.SourcesCapped != 7 {
+		t.Fatalf("expected SourcesCapped == 7 (10 in map - 3 cap), got %d", rec.Resolver.SourcesCapped)
+	}
+
+	idx, err := filepath.Glob(filepath.Join(out, "*", "anon", "index.jsonl"))
+	if err != nil || len(idx) != 1 {
+		t.Fatalf("index.jsonl: %v %v", idx, err)
+	}
+	f, err := os.Open(idx[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	sourceEntries := 0
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		var e struct {
+			Kinds []string `json:"kinds"`
+			Pages []string `json:"pages"`
+		}
+		if err := json.Unmarshal(sc.Bytes(), &e); err != nil {
+			t.Fatal(err)
+		}
+		for _, k := range e.Kinds {
+			if k == "source" {
+				sourceEntries++
+				if len(e.Pages) != 4 {
+					t.Fatalf("stored source entry has %d host sightings, want 4: %v", len(e.Pages), e.Pages)
+				}
+			}
+		}
+	}
+	if sourceEntries != 3 {
+		t.Fatalf("expected exactly 3 stored source entries under MaxSourceFiles=3, got %d", sourceEntries)
 	}
 }

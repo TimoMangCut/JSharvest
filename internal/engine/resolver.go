@@ -42,8 +42,9 @@ type ResolverStats struct {
 	NotJS      int `json:"not_js"`
 	// Source maps read through the page, and the app's own sources they
 	// held (MAX-07).
-	Maps       int `json:"source_maps,omitempty"`
-	MapSources int `json:"map_sources,omitempty"`
+	Maps          int `json:"source_maps,omitempty"`
+	MapSources    int `json:"map_sources,omitempty"`
+	SourcesCapped int `json:"sources_capped,omitempty"`
 	// MapGuessesHeld: <script>.map guesses not made, their origin having
 	// missed sourcemap.GuessMisses with no map found.
 	MapGuessesHeld int            `json:"map_guesses_held,omitempty"`
