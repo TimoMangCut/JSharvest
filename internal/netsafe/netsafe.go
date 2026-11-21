@@ -42,6 +42,7 @@ var special = func() []netip.Prefix {
 		"2001::/32",       // Teredo
 		"::/96",           // IPv4-compatible
 		"::ffff:0:0:0/96", // SIIT
+		"fec0::/10",       // site-local (deprecated, RFC 3879)
 	} {
 		out = append(out, netip.MustParsePrefix(p))
 	}
