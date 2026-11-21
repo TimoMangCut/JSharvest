@@ -43,6 +43,7 @@ func ReadRecord(b []byte, max int) (*Record, error) {
 		if err != nil {
 			return nil, err
 		}
+		defer zr.Close()
 		zr.Multistream(false)
 		r = zr
 	}
@@ -67,9 +68,15 @@ func ReadRecord(b []byte, max int) (*Record, error) {
 	if err != nil {
 		return nil, fmt.Errorf("WARC Content-Length: %w", err)
 	}
-	block := make([]byte, n)
-	if _, err := io.ReadFull(br, block); err != nil {
+	if n < 0 || int64(n) > int64(max)+1<<20 {
+		return nil, fmt.Errorf("WARC Content-Length %d out of range", n)
+	}
+	block, err := io.ReadAll(io.LimitReader(br, int64(n)))
+	if err != nil {
 		return nil, fmt.Errorf("WARC block: %w", err)
+	}
+	if len(block) < n {
+		return nil, fmt.Errorf("WARC block: %w", io.ErrUnexpectedEOF)
 	}
 	resp, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(block)), nil)
 	if err != nil {
