@@ -33,6 +33,7 @@ import (
 	"github.com/TimoMangCut/JSharvest/internal/detect"
 	"github.com/TimoMangCut/JSharvest/internal/endpoints"
 	"github.com/TimoMangCut/JSharvest/internal/flow"
+	"github.com/TimoMangCut/JSharvest/internal/frontier"
 	"github.com/TimoMangCut/JSharvest/internal/guard"
 	"github.com/TimoMangCut/JSharvest/internal/htmlscan"
 	"github.com/TimoMangCut/JSharvest/internal/httpcrawl"
@@ -154,8 +155,9 @@ type Config struct {
 	// name for their API's description (frontier.SpecPaths), with the
 	// frontier (crawl -probe). NoSpecProbe disables spec probing while
 	// keeping other well-known probes.
-	SpecProbe   bool
-	NoSpecProbe bool
+	SpecProbe     bool
+	NoSpecProbe   bool
+	ProbeOffscope string // "auto" (default: off when Proxy != "", else on), "on", or "off"
 }
 
 // outDir is where the run's output goes.
@@ -184,8 +186,9 @@ type RunConfig struct {
 	ExploreTime  int64  `json:"explore_time_s,omitempty"`
 	ExploreTotal int64  `json:"explore_total_s,omitempty"`
 	ResolveMax   int    `json:"resolve_max,omitempty"`
-	AllowWrite   bool   `json:"allow_write,omitempty"`
-	GuardAllow   string `json:"guard_allow,omitempty"`
+	AllowWrite    bool   `json:"allow_write,omitempty"`
+	GuardAllow    string `json:"guard_allow,omitempty"`
+	ProbeOffscope string `json:"probe_offscope,omitempty"`
 	// Engine is "http" for a crawl without a browser; a browser's leaves it
 	// out, as runs before the field did.
 	Engine string `json:"engine,omitempty"`
@@ -722,13 +725,14 @@ func (e *engine) open() error {
 	st := d.st
 	e.dir, e.st, e.scripts = d, st, map[string]bool{}
 	started := time.Now().UTC()
+	_, effOffscope := frontier.EffectiveProbeOffscope(e.cfg.ProbeOffscope, e.cfg.Browser.Proxy != "")
 	e.run = Record{
 		Version: 2, RunID: newRunID(started), Tabs: e.cfg.Tabs, Target: e.cfg.Target.String(), Role: e.cfg.Role, Mode: "launch", Scope: scopeMode(e.cfg.ScopeMode),
 		Config: &RunConfig{Depth: e.cfg.Depth, MaxPages: e.cfg.MaxPages, Explore: e.cfg.Explore, Resolve: e.cfg.Resolve,
 			Guard: e.cfg.Guard, Debugger: !e.cfg.NoDebugger, Session: e.cfg.Login != nil,
 			Record: string(e.cfg.Record), PageDwellMS: e.cfg.PageDwell.Milliseconds(), ExploreActs: e.cfg.ExploreActions,
 			ExploreTime: int64(e.cfg.ExploreTime.Seconds()), ExploreTotal: int64(e.cfg.ExploreTotal.Seconds()), ResolveMax: e.cfg.ResolveMax,
-			AllowWrite: e.cfg.GuardRules.AllowWrite, GuardAllow: reString(e.cfg.GuardRules.Allow)},
+			AllowWrite: e.cfg.GuardRules.AllowWrite, GuardAllow: reString(e.cfg.GuardRules.Allow), ProbeOffscope: effOffscope},
 		Started: started, StoreErrors: map[string]int{},
 	}
 	if e.cfg.Browser.Attach != "" {

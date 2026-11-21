@@ -210,6 +210,8 @@ func runFrontier(ctx context.Context, cfg Config, tab context.Context, g *guard.
 	c := &crawl{
 		runID:          e.run.RunID,
 		specProbe:      cfg.SpecProbe && !cfg.NoSpecProbe,
+		probeOffscope:  cfg.ProbeOffscope,
+		hasProxy:       cfg.Browser.Proxy != "",
 		seedOrigin:     strings.ToLower(cfg.Target.Scheme + "://" + cfg.Target.Host),
 		inScope:        cfg.InScope,
 		pageScope:      pageScope,
@@ -358,8 +360,10 @@ type crawl struct {
 	known     bool // robots.txt and the sitemaps read
 	// specProbe: the target's origin and API hosts are asked for their
 	// API's description (crawl -probe).
-	specProbe  bool
-	seedOrigin string
+	specProbe     bool
+	probeOffscope string
+	hasProxy      bool
+	seedOrigin    string
 	inScope    func(string) bool
 	pageScope  func(string) bool
 	// apiOrigins: the target's API hosts the scripts name, each asked for
@@ -788,11 +792,12 @@ func (c *crawl) noteAPIOrigins(ss []endpoints.Script, mine map[string]bool) []st
 		if c.specProbe && !s.ThirdParty {
 			c.specCtx.AddScript(s.Result, c.seedOrigin, scriptURL)
 		}
+		allowOffscope, _ := frontier.EffectiveProbeOffscope(c.probeOffscope, c.hasProxy)
 		for _, o := range frontier.APIOrigins(s.Result, c.inScope) {
 			if !c.apiSeen[o] && (frontier.MaxAPIOrigins <= 0 || len(c.apiSeen) <= frontier.MaxAPIOrigins) {
 				c.apiSeen[o] = true
 				added = append(added, o)
-				if c.specProbe {
+				if c.specProbe && (allowOffscope || frontier.OriginInScope(o, c.inScope)) {
 					c.apiPending = append(c.apiPending, o)
 				}
 			}

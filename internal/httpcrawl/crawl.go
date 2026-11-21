@@ -75,6 +75,9 @@ type Options struct {
 	// NoSpecProbe skips OpenAPI/Swagger and OIDC discovery probes while
 	// keeping robots.txt, sitemaps and bundler manifests when Probe is on.
 	NoSpecProbe bool
+	// ProbeOffscope controls spec probing on named out-of-scope API origins:
+	// "auto" (default: off when Proxy != nil, else on), "on", or "off".
+	ProbeOffscope string
 	// SourceMaps fetches the .map a script names (SourceMap header or
 	// sourceMappingURL), or <script>.map, and hands it on (CF-05).
 	SourceMaps bool
@@ -304,9 +307,10 @@ type crawler struct {
 	spa      map[string]bool
 	// apiOrigins are the target's API hosts the scripts name, asked for
 	// their API's description once the pages are done (PIP-03).
-	specBlocked  map[string]string
-	apiOrigins   []string
-	seedOrigin   string
+	specBlocked   map[string]string
+	apiOrigins    []string
+	allowOffscope bool
+	seedOrigin    string
 	seedFinalURL string
 	seedActive   *atomic.Bool
 	onSeedLand   func(string)
@@ -437,7 +441,10 @@ func Crawl(ctx context.Context, o Options) (*Result, error) {
 	base, _ := cookiejar.New(nil)
 	jar := &recJar{CookieJar: base}
 	policy := resolve.NewPolicy(o.Target.Hostname(), o.InScope, o.NoDNS)
-	specPolicy := resolve.NewPolicy(o.Target.Hostname(), func(h string) bool { return !frontier.IsTrackerHost(h) }, o.NoDNS)
+	allowOffscope, _ := frontier.EffectiveProbeOffscope(o.ProbeOffscope, o.Proxy != nil)
+	specPolicy := resolve.NewPolicy(o.Target.Hostname(), func(h string) bool {
+		return !frontier.IsTrackerHost(h) && (allowOffscope || o.InScope == nil || o.InScope(h))
+	}, o.NoDNS)
 	// Whether the target is internal is not the policy's answer (it takes a
 	// target with any private address for internal): every address private,
 	// a private literal, or a host rule to one; no lookup behind a proxy.
@@ -474,7 +481,7 @@ func Crawl(ctx context.Context, o Options) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	cr := &crawler{o: o, c: c, policy: policy, specPolicy: specPolicy, seedActive: &seedActive,
+	cr := &crawler{o: o, c: c, policy: policy, specPolicy: specPolicy, allowOffscope: allowOffscope, seedActive: &seedActive,
 		onSeedLand: func(raw string) {
 			if u, err := url.Parse(raw); err == nil && u.Hostname() != "" && o.InScope(u.Hostname()) {
 				seedMu.Lock()
@@ -1133,6 +1140,9 @@ func (cr *crawler) routes(body []byte, scriptURL, page string, depth int, b *buc
 // frontier.MaxAPIOrigins, the first named first. cr.mu is held.
 func (cr *crawler) noteOriginsLocked(origins []string) {
 	for _, o := range origins {
+		if !cr.allowOffscope && !frontier.OriginInScope(o, cr.o.InScope) {
+			continue
+		}
 		if o != cr.seedOrigin && (frontier.MaxAPIOrigins <= 0 || len(cr.apiOrigins) < frontier.MaxAPIOrigins) && !slices.Contains(cr.apiOrigins, o) {
 			cr.apiOrigins = append(cr.apiOrigins, o)
 		}
@@ -1706,11 +1716,24 @@ func (cr *crawler) specProbeWithScope(ctx context.Context, base, referer string,
 			ca, cStored, cSent := fetchSpec(docURL, raw)
 			if !cStored && cSent && allowConfigHop && ca.Err == nil && ca.Status == 200 && !htmlLike(ca.Body) {
 				if sub := jsapi.SwaggerConfigURLs(ca.Body); len(sub) > 0 {
+					cfgBase, _ := url.Parse(ca.URL)
 					for _, srel := range sub {
 						if cr.stop() != "" || cr.specHostBlocked(base) || ctx.Err() != nil || specBudgetExhausted(budget) {
 							break
 						}
-						fetchSpec(frontier.JoinSpecBase(base, srel), srel)
+						var subURL string
+						if strings.HasPrefix(srel, "/") && !strings.HasPrefix(srel, "//") {
+							subURL = frontier.JoinSpecBase(base, srel)
+						} else if cfgBase != nil {
+							if su, err := cfgBase.Parse(srel); err == nil && (su.Scheme == "http" || su.Scheme == "https") {
+								su.Fragment = ""
+								subURL = su.String()
+							}
+						}
+						if subURL == "" || cr.specPolicy.Check(subURL) != resolve.Allow {
+							continue
+						}
+						fetchSpec(subURL, srel)
 					}
 				}
 			}
@@ -1779,7 +1802,7 @@ func (cr *crawler) specProbePhase2(ctx context.Context, referer string) {
 	seedOrig := cr.seedOrigin
 	cr.mu.Unlock()
 
-	plan := cr.specCtx.Plan(seedOrig, cr.o.InScope)
+	plan := cr.specCtx.PlanWithOffscope(seedOrig, cr.o.InScope, cr.allowOffscope)
 	var budgetPtr *atomic.Int64
 	if frontier.MaxPhase2SpecProbes > 0 {
 		var b atomic.Int64

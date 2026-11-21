@@ -19,6 +19,7 @@ import (
 
 	"github.com/TimoMangCut/JSharvest/internal/detect"
 	"github.com/TimoMangCut/JSharvest/internal/endpoints"
+	"github.com/TimoMangCut/JSharvest/internal/frontier"
 	"github.com/TimoMangCut/JSharvest/internal/guard"
 	"github.com/TimoMangCut/JSharvest/internal/httpcrawl"
 	"github.com/TimoMangCut/JSharvest/internal/jsapi"
@@ -98,10 +99,11 @@ func RunHTTP(ctx context.Context, cfg Config, ho HTTPOptions) (Record, error) {
 	defer d.release()
 	st := d.st
 	started := time.Now().UTC()
+	_, effOffscope := frontier.EffectiveProbeOffscope(cfg.ProbeOffscope, cfg.Browser.Proxy != "")
 	run := Record{
 		Version: 2, RunID: newRunID(started), Target: cfg.Target.String(), Role: cfg.Role, Mode: "http", Scope: scopeMode(cfg.ScopeMode),
 		Config: &RunConfig{Depth: cfg.Depth, MaxPages: cfg.MaxPages, Resolve: true, Record: string(cfg.Record), ResolveMax: cfg.ResolveMax,
-			Engine: "http"},
+			ProbeOffscope: effOffscope, Engine: "http"},
 		Started: started, StoreErrors: map[string]int{},
 	}
 	var redactor *traffic.Redactor
@@ -218,7 +220,7 @@ func RunHTTP(ctx context.Context, cfg Config, ho HTTPOptions) (Record, error) {
 			return ""
 		},
 		HostRules: cfg.Browser.HostRules, NoDNS: cfg.Browser.Proxy != "" || cfg.Browser.HostRules != "", Insecure: cfg.Browser.Insecure, RecordBody: cfg.RecordBody,
-		Probe: ho.Probe, NoSpecProbe: cfg.NoSpecProbe || ho.NoSpecProbe, SourceMaps: ho.SourceMaps, GuessMaps: ho.GuessMaps,
+		Probe: ho.Probe, NoSpecProbe: cfg.NoSpecProbe || ho.NoSpecProbe, ProbeOffscope: cfg.ProbeOffscope, SourceMaps: ho.SourceMaps, GuessMaps: ho.GuessMaps,
 		Destructive: func(u string) bool {
 			return guard.Destructive(u) || (cfg.GuardRules.Deny != nil && cfg.GuardRules.Deny.MatchString(u))
 		},

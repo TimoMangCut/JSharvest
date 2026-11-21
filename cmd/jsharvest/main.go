@@ -203,6 +203,7 @@ func runCrawl(args []string) error {
 	httpRate := fs.Float64("http-rate", 5, "with the http engine, requests per second, of every kind")
 	probe := fs.Bool("probe", true, "read the well-known files: with the http engine robots.txt, the sitemaps and the bundlers' manifests (asset-manifest.json, ngsw.json, .vite/manifest.json, a service worker); with either engine (the cdp one with -depth or -explore) the API descriptions of the target's origin and of the API hosts its scripts name (openapi.json/.yaml, /api-json, /docs-json, /v3/api-docs, /v2/api-docs, /swagger-resources, /swagger/doc.json, /.well-known/openid-configuration)")
 	noSpecProbe := fs.Bool("no-spec-probe", false, "skip OpenAPI/Swagger and OIDC discovery probes while keeping other -probe files")
+	probeOffscope := fs.String("probe-offscope", "auto", "probe API descriptions on named out-of-scope hosts: auto (off when -proxy is set, else on), on, or off")
 	sourceMaps := fs.Bool("sourcemaps", true, "fetch the source maps the scripts name (the CDP engine through the page, with the resolver), and keep their original sources (not node_modules)")
 	sourceMapGuess := fs.Bool("sourcemap-guess", true, "with -sourcemaps, also ask <script>.map when nothing names a map: one more request a script, the app's only (not vendors.js, polyfills…); -sourcemap-guess=false to skip")
 	maxSourceFiles := fs.Int("max-source-files", sourcemap.DefaultMaxSourceFilesPerRun, "most original source files extracted from source maps per run (<0: unlimited)")
@@ -314,6 +315,11 @@ func runCrawl(args []string) error {
 	if *maxStoreMB < 0 {
 		return fmt.Errorf("-max-store-mb: must not be negative")
 	}
+	switch *probeOffscope {
+	case "auto", "on", "off":
+	default:
+		return fmt.Errorf("-probe-offscope: want auto, on or off, got %q", *probeOffscope)
+	}
 	if *depth > 0 && *urlsFile != "" {
 		return errors.New("crawl: -depth goes with -u; -urls harvests each URL on its own")
 	}
@@ -356,9 +362,6 @@ func runCrawl(args []string) error {
 	// The role names a directory under the output root; keep it there.
 	if !roleRe.MatchString(*role) || strings.Contains(*role, "..") {
 		return fmt.Errorf("bad role %q: use letters, digits, '.', '_' and '-'", *role)
-	}
-	if *maxStoreMB < 0 {
-		return fmt.Errorf("-max-store-mb: must not be negative")
 	}
 	// One crawl at a time writes a host's role directory.
 	{
@@ -482,6 +485,7 @@ func runCrawl(args []string) error {
 		ChallengeWait: *challengeWait,
 		SpecProbe:     *probe && !*noSpecProbe,
 		NoSpecProbe:   *noSpecProbe,
+		ProbeOffscope: *probeOffscope,
 	}
 	given := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })

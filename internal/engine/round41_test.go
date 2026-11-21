@@ -7,19 +7,28 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/chromedp/cdproto/network"
 
+	"github.com/TimoMangCut/JSharvest/internal/browser"
+	"github.com/TimoMangCut/JSharvest/internal/endpoints"
+	"github.com/TimoMangCut/JSharvest/internal/jsapi"
+	"github.com/TimoMangCut/JSharvest/internal/netsafe"
+	"github.com/TimoMangCut/JSharvest/internal/scope"
 	"github.com/TimoMangCut/JSharvest/internal/session"
+	"github.com/TimoMangCut/JSharvest/internal/store"
 )
 
 func TestRound41ReloginFailureKeepsSnapshotAndStorage(t *testing.T) {
@@ -279,4 +288,187 @@ func TestRound41HTTPStoreBudgetStopsAndWarns(t *testing.T) {
 	if !strings.Contains(joinedWarn, "(-max-store-mb to raise it)") || strings.Contains(joinedWarn, "-resolve-max") {
 		t.Fatalf("expected -max-store-mb hint in warnings, got: %v", rec.Warnings)
 	}
+}
+
+func TestRound41ProbeOffscopeOffAndAutoProxy(t *testing.T) {
+	var mu sync.Mutex
+	hits := map[string][]string{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host, _, err := net.SplitHostPort(r.Host)
+		if err != nil {
+			host = r.Host
+		}
+		host = strings.ToLower(host)
+		mu.Lock()
+		hits[host] = append(hits[host], r.URL.Path)
+		mu.Unlock()
+
+		switch {
+		case host == "www.example.test" && r.URL.Path == "/":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = fmt.Fprint(w, `<!doctype html><title>App</title><script src="/app.js"></script>`)
+		case host == "www.example.test" && r.URL.Path == "/app.js":
+			w.Header().Set("Content-Type", "application/javascript")
+			_, _ = fmt.Fprint(w, `
+				const partner = axios.create({ baseURL: "http://api-partner.example.net/gw" });
+				partner.get("/orders/v1/list");
+				fetch("http://api.example.test/v1/users");
+			`)
+		case host == "www.example.test" && r.URL.Path == "/api/documentation":
+			// In-scope Swagger UI page pointing to an off-scope spec URL!
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = fmt.Fprint(w, `<!doctype html><html><body><div id="swagger-ui"></div><script>SwaggerUIBundle({ url: "http://internal-docs.example.net/openapi.json" })</script></body></html>`)
+		case (host == "api.example.test" || host == "api-partner.example.net" || host == "internal-docs.example.net") && strings.HasSuffix(r.URL.Path, "openapi.json"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"openapi":"3.0.1","info":{"title":"S","version":"1.0"},"paths":{"/x":{"get":{}}}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	_, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
+	hostRules := fmt.Sprintf("MAP * 127.0.0.1:%s", port)
+	target, _ := url.Parse("http://www.example.test/")
+
+	resetHits := func() map[string][]string {
+		mu.Lock()
+		defer mu.Unlock()
+		cp := make(map[string][]string, len(hits))
+		for k, v := range hits {
+			cp[k] = slices.Clone(v)
+		}
+		hits = map[string][]string{}
+		return cp
+	}
+
+	// 1. Explicit -probe-offscope=off: neither partner origin nor Swagger UI off-scope ref is touched;
+	// in-scope sibling api.example.test (under -scope rdn) IS still probed.
+	recOff, err := RunHTTP(context.Background(),
+		Config{
+			Target:        target,
+			OutRoot:       t.TempDir(),
+			Role:          "anon",
+			ScopeMode:     "rdn",
+			Depth:         1,
+			NavTimeout:    5 * time.Second,
+			ProbeOffscope: "off",
+			Browser:       browser.Options{HostRules: hostRules},
+		},
+		HTTPOptions{Rate: 500, Probe: true},
+	)
+	if err != nil {
+		t.Fatalf("RunHTTP off: %v", err)
+	}
+	gotOff := resetHits()
+	if recOff.Config == nil || recOff.Config.ProbeOffscope != "off" {
+		t.Fatalf("expected run.Config.ProbeOffscope == \"off\", got %+v", recOff.Config)
+	}
+	if len(gotOff["api-partner.example.net"]) != 0 || len(gotOff["internal-docs.example.net"]) != 0 {
+		t.Fatalf("-probe-offscope=off leaked requests to off-scope hosts: %v", gotOff)
+	}
+	if len(gotOff["api.example.test"]) == 0 {
+		t.Fatalf("-probe-offscope=off failed to probe in-scope sibling api.example.test: %v", gotOff)
+	}
+
+	// 2. Default -probe-offscope=auto WITH Proxy active -> resolves to "off" automatically!
+	proxySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Forward every proxied request directly to srv while preserving r.Host.
+		u, _ := url.Parse(srv.URL)
+		u.Path, u.RawQuery = r.URL.Path, r.URL.RawQuery
+		req, _ := http.NewRequestWithContext(r.Context(), r.Method, u.String(), nil)
+		req.Host = r.Host
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			http.Error(w, err.Error(), 502)
+			return
+		}
+		defer resp.Body.Close()
+		for k, vs := range resp.Header {
+			for _, v := range vs {
+				w.Header().Add(k, v)
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		_, _ = w.Write(readBodyTest(resp))
+	}))
+	defer proxySrv.Close()
+
+	recAutoProxy, err := RunHTTP(context.Background(),
+		Config{
+			Target:        target,
+			OutRoot:       t.TempDir(),
+			Role:          "anon",
+			ScopeMode:     "rdn",
+			Depth:         1,
+			NavTimeout:    5 * time.Second,
+			ProbeOffscope: "auto",
+			Browser:       browser.Options{Proxy: proxySrv.URL},
+		},
+		HTTPOptions{Rate: 500, Probe: true},
+	)
+	if err != nil {
+		t.Fatalf("RunHTTP auto+proxy: %v", err)
+	}
+	gotAutoProxy := resetHits()
+	if recAutoProxy.Config == nil || recAutoProxy.Config.ProbeOffscope != "off" {
+		t.Fatalf("expected auto+proxy to record ProbeOffscope == \"off\", got %+v", recAutoProxy.Config)
+	}
+	if len(gotAutoProxy["api-partner.example.net"]) != 0 || len(gotAutoProxy["internal-docs.example.net"]) != 0 {
+		t.Fatalf("auto+proxy leaked off-scope spec probes: %v", gotAutoProxy)
+	}
+
+	// 3. CDP frontier noteAPIOrigins + specFiles Swagger UI follow-up also honor ProbeOffscope="off".
+	inScope, _ := scope.New("www.example.test", "rdn")
+	st, err := store.Open(t.TempDir(), store.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cCDP := &crawl{
+		specProbe:      true,
+		probeOffscope:  "off",
+		seedOrigin:     "http://www.example.test",
+		inScope:        inScope,
+		scripts:        map[string]bool{},
+		thirdPartyDone: map[string]bool{},
+	}
+	defer cCDP.closeSpecClient()
+	parsed := jsapi.Extract([]byte(`
+		fetch("http://api-partner.example.net/v1/x");
+		fetch("http://api.example.test/v1/y");
+	`))
+	added := cCDP.noteAPIOrigins([]endpoints.Script{{
+		SHA256: "sha1",
+		URLs:   []string{"http://www.example.test/app.js"},
+		Result: parsed,
+	}}, nil)
+	// Skeleton deduplication still sees both origins, while apiPending only queues in-scope!
+	if len(added) != 2 || !slices.Equal(cCDP.takeAPIOrigins(), []string{"http://api.example.test"}) {
+		t.Fatalf("CDP noteAPIOrigins mismatch: added=%v pending=%v", added, cCDP.apiPending)
+	}
+	rulesObj, _ := netsafe.ParseHostRules(hostRules)
+	eCDP := &engine{
+		runState: &runState{
+			cfg: Config{
+				Target:        target,
+				InScope:       inScope,
+				ProbeOffscope: "off",
+				Browser:       browser.Options{HostRules: hostRules},
+			},
+			st:        st,
+			privRules: rulesObj,
+			privOff:   true,
+			scripts:   map[string]bool{},
+		},
+	}
+	eCDP.specFiles(context.Background(), cCDP, "http://www.example.test", "http://www.example.test/")
+	gotCDP := resetHits()
+	if len(gotCDP["internal-docs.example.net"]) != 0 {
+		t.Fatalf("CDP specFiles Swagger UI leaked off-scope request: %v", gotCDP)
+	}
+}
+
+func readBodyTest(resp *http.Response) []byte {
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(resp.Body)
+	return buf.Bytes()
 }

@@ -348,10 +348,42 @@ func JoinSpecBase(base, rel string) string {
 	return base + rel
 }
 
+// EffectiveProbeOffscope resolves -probe-offscope ("auto", "on", "off") given
+// whether an outbound proxy is active. Under "auto" (or ""), off-scope API
+// spec probing turns off when a proxy is configured and stays on otherwise.
+func EffectiveProbeOffscope(mode string, hasProxy bool) (allow bool, effective string) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "on":
+		return true, "on"
+	case "off":
+		return false, "off"
+	default:
+		if hasProxy {
+			return false, "off"
+		}
+		return true, "on"
+	}
+}
+
+// OriginInScope reports whether rawOrigin's hostname satisfies inScope.
+func OriginInScope(rawOrigin string, inScope func(string) bool) bool {
+	if inScope == nil {
+		return true
+	}
+	u, err := url.Parse(rawOrigin)
+	return err == nil && u != nil && u.Hostname() != "" && inScope(u.Hostname())
+}
+
 // Plan computes up to MaxSpecBases gateway bases and up to
 // MaxServiceDocPrefixes microservice prefixes ordered by endpoint frequency
 // then lexicographically.
 func (sc *SpecCollector) Plan(seedOrigin string, inScope func(string) bool) SpecProbePlan {
+	return sc.PlanWithOffscope(seedOrigin, inScope, true)
+}
+
+// PlanWithOffscope is Plan with explicit control over whether out-of-scope
+// named API bases may be included.
+func (sc *SpecCollector) PlanWithOffscope(seedOrigin string, inScope func(string) bool, allowOffscope bool) SpecProbePlan {
 	sc.mu.Lock()
 	rawBases := slices.Clone(sc.bases)
 	rawEps := slices.Clone(sc.endpoints)
@@ -386,6 +418,9 @@ func (sc *SpecCollector) Plan(seedOrigin string, inScope func(string) bool) Spec
 			return
 		}
 		inS := urlInScope(norm)
+		if !inS && !allowOffscope {
+			return
+		}
 		st := baseMap[norm]
 		if st == nil {
 			if !inS && !explicit {
@@ -469,7 +504,7 @@ func (sc *SpecCollector) Plan(seedOrigin string, inScope func(string) bool) Spec
 			break
 		}
 		if !st.inScope {
-			if !st.explicit || outOfScope[st.origin] >= MaxOutOfScopeSpecBasesPerOrigin {
+			if !allowOffscope || !st.explicit || outOfScope[st.origin] >= MaxOutOfScopeSpecBasesPerOrigin {
 				continue
 			}
 			outOfScope[st.origin]++

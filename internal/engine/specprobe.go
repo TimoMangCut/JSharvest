@@ -32,7 +32,10 @@ func (c *crawl) getSpecPolicy(cfg Config) *resolve.Policy {
 		if cfg.Target != nil {
 			targetHost = cfg.Target.Hostname()
 		}
-		c.specPol = resolve.NewPolicy(targetHost, func(h string) bool { return !frontier.IsTrackerHost(h) }, noDNS)
+		allowOffscope, _ := frontier.EffectiveProbeOffscope(cfg.ProbeOffscope, cfg.Browser.Proxy != "")
+		c.specPol = resolve.NewPolicy(targetHost, func(h string) bool {
+			return !frontier.IsTrackerHost(h) && (allowOffscope || cfg.InScope == nil || cfg.InScope(h))
+		}, noDNS)
 	}
 	return c.specPol
 }
@@ -243,11 +246,16 @@ func (e *engine) specFilesWithHeaders(ctx context.Context, c *crawl, base, page 
 		if !stored && r.Status == 200 && r.Text != "" && !r.Challenge {
 			rawBody := []byte(r.Text)
 			if p == "/swagger-resources" {
+				parentRes, _ := url.Parse(targetURL)
 				for _, rel := range jsapi.SwaggerResources(rawBody) {
 					if ctx.Err() != nil || (budget != nil && *budget <= 0) {
 						break
 					}
-					fetchOne(frontier.JoinSpecBase(base, rel), rel)
+					docURL := resolveSpecRef(base, parentRes, rel)
+					if docURL == "" || pol.Check(docURL) != resolve.Allow {
+						continue
+					}
+					fetchOne(docURL, rel)
 				}
 			}
 			if parentU, err := url.Parse(targetURL); err == nil {
@@ -263,11 +271,16 @@ func (e *engine) specFilesWithHeaders(ctx context.Context, c *crawl, base, page 
 					if pol.Check(du.String()) == resolve.Allow {
 						cr, cStored := fetchOne(du.String(), du.Path)
 						if !cStored && cr.Status == 200 && cr.Text != "" && !cr.Challenge {
+							cfgBase, _ := url.Parse(du.String())
 							for _, srel := range jsapi.SwaggerConfigURLs([]byte(cr.Text)) {
 								if ctx.Err() != nil || (budget != nil && *budget <= 0) {
 									break
 								}
-								fetchOne(frontier.JoinSpecBase(base, srel), srel)
+								subURL := resolveSpecRef(base, cfgBase, srel)
+								if subURL == "" || pol.Check(subURL) != resolve.Allow {
+									continue
+								}
+								fetchOne(subURL, srel)
 							}
 						}
 					}
@@ -277,9 +290,25 @@ func (e *engine) specFilesWithHeaders(ctx context.Context, c *crawl, base, page 
 	}
 }
 
+func resolveSpecRef(base string, parent *url.URL, ref string) string {
+	if strings.HasPrefix(ref, "/") && !strings.HasPrefix(ref, "//") {
+		return frontier.JoinSpecBase(base, ref)
+	}
+	if parent == nil {
+		return ""
+	}
+	u, err := parent.Parse(ref)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return ""
+	}
+	u.Fragment = ""
+	return u.String()
+}
+
 func (e *engine) specFilesPhase2(ctx context.Context, c *crawl, page string) {
 	pol := c.getSpecPolicy(e.cfg)
-	plan := c.specCtx.Plan(c.seedOrigin, e.cfg.InScope)
+	allowOffscope, _ := frontier.EffectiveProbeOffscope(e.cfg.ProbeOffscope, e.cfg.Browser.Proxy != "")
+	plan := c.specCtx.PlanWithOffscope(c.seedOrigin, e.cfg.InScope, allowOffscope)
 	var budgetPtr *int
 	if frontier.MaxPhase2SpecProbes > 0 {
 		b := frontier.MaxPhase2SpecProbes
