@@ -472,3 +472,22 @@ func readBodyTest(resp *http.Response) []byte {
 	_, _ = buf.ReadFrom(resp.Body)
 	return buf.Bytes()
 }
+
+func TestRound41WatchLANGuardWarningWhenGuardOff(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(prev)
+
+	warnWatchGuardScope(false, true)
+	out := buf.String()
+	if !strings.Contains(out, "-lan-guard=false") || !strings.Contains(out, "unattributed workers") {
+		t.Fatalf("expected -lan-guard scope warning when guard=false and LAN guard active, got %q", out)
+	}
+
+	buf.Reset()
+	warnWatchGuardScope(false, false)
+	if buf.Len() != 0 {
+		t.Fatalf("expected no warning when both guard and lan-guard are off, got %q", buf.String())
+	}
+}

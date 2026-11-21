@@ -104,9 +104,7 @@ func Watch(ctx context.Context, cfg Config, w WatchOptions) error {
 	default:
 		slog.Warn("watch: handlers the page registered before now are not traced; their requests are grouped by time. Use -reload to trace them all")
 	}
-	if cfg.Guard {
-		slog.Warn("watch: the guard holds back writes of every worker, service worker and frame in this browser it cannot place, other tabs' too; use a browser profile for this target only")
-	}
+	warnWatchGuardScope(cfg.Guard, e.guard != nil)
 	if err := e.writeLive(time.Now().UTC()); err != nil {
 		return fmt.Errorf("write %s: %w", results.LiveFile, err)
 	}
@@ -132,6 +130,14 @@ func Watch(ctx context.Context, cfg Config, w WatchOptions) error {
 		slog.Warn("watch: the tab still runs jsharvest's scripts (and the guard's socket stub, if on) until it is reloaded")
 	}
 	return err
+}
+
+func warnWatchGuardScope(guardOn, hasGuard bool) {
+	if guardOn {
+		slog.Warn("watch: the guard holds back writes of every worker, service worker and frame in this browser it cannot place, other tabs' too; use a browser profile for this target only")
+	} else if hasGuard {
+		slog.Warn("watch: -lan-guard blocks private/loopback requests of unattributed workers in this browser; use a dedicated browser profile or -lan-guard=false if other tabs use local services")
+	}
 }
 
 // watchUntil waits for the end of the watch. Meanwhile it keeps a snapshot
